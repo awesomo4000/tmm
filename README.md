@@ -8,7 +8,7 @@ A skinny libvaxis sidebar for ordinary tmux sessions. Run it beside your workspa
 
 ## Build and run
 
-Requires Zig 0.16.0, tmux, and the Zig libtmux checkout at `../libtmux`. Tested with tmux 3.7c and libtmux revision `c63d5aa24d95c8bf757f8ad0b79f81da98275dbf`. libvaxis is pinned in `build.zig.zon`. No JavaScript runtime is needed.
+Requires Zig 0.16.0 and tmux. Zig fetches [libtmux](https://github.com/awesomo4000/libtmux) and libvaxis from public repositories, with revisions and content hashes pinned in `build.zig.zon`. Tested with tmux 3.7c and libtmux revision `c63d5aa24d95c8bf757f8ad0b79f81da98275dbf`. No sibling checkout or JavaScript runtime is needed.
 
 ```sh
 zig build

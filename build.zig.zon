@@ -4,7 +4,10 @@
     .version = "0.1.0",
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .libtmux = .{ .path = "../libtmux" },
+        .libtmux = .{
+            .url = "https://github.com/awesomo4000/libtmux/archive/c63d5aa24d95c8bf757f8ad0b79f81da98275dbf.tar.gz",
+            .hash = "libtmux-0.0.0-tgBK0k9eAQBadMVJ7aIuwP5Zts8qr7vl_FKYla-DHj5F",
+        },
         .vaxis = .{
             .url = "git+https://github.com/rockorager/libvaxis#f37c42a3b324131c131d066767968e1f5b976453",
             .hash = "vaxis-0.6.0-BWNV_AIQDADLTDo5jCn27pBWJBvi-sTrSkSKwITQWgUV",
