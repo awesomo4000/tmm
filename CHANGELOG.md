@@ -2,6 +2,8 @@
 
 ## 09/10/2026
 
+- Added a transparent cel-shaded README illustration with fictional projects, using WebP in the README and including full-color and smaller PNG versions.
+
 - Licensed tmm under MPL-2.0, matching rawr, while preserving third-party attribution.
 
 ## 09/09/2026
