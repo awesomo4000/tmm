@@ -1,0 +1,14 @@
+.{
+    .name = .tmm,
+    .fingerprint = 0x4fe911912a14498a,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .libtmux = .{ .path = "../libtmux" },
+        .vaxis = .{
+            .url = "git+https://github.com/rockorager/libvaxis#f37c42a3b324131c131d066767968e1f5b976453",
+            .hash = "vaxis-0.6.0-BWNV_AIQDADLTDo5jCn27pBWJBvi-sTrSkSKwITQWgUV",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "LICENSE", "README.md", "THIRD_PARTY_NOTICES.md", "licenses" },
+}
