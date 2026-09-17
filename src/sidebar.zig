@@ -93,7 +93,7 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
 /// Discover sockets only in tmux's conventional per-user directory. Custom
 /// socket paths are explicit CLI entries; never traverse arbitrary directories.
 pub fn discover(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, environ: std.process.Environ, list: *std.ArrayList(Server)) !void {
-    const directory = try std.fmt.allocPrint(a, "{s}/tmux-{d}", .{ env.get("TMUX_TMPDIR") orelse "/tmp", std.c.getuid() });
+    const directory = try std.fmt.allocPrint(a, "{s}/tmux-{d}", .{ env.get("TMUX_TMPDIR") orelse "/tmp", std.posix.system.getuid() });
     var dir = std.Io.Dir.openDirAbsolute(io, directory, .{ .iterate = true }) catch return;
     defer dir.close(io);
     var iterator = dir.iterate();
