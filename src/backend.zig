@@ -348,7 +348,15 @@ fn flashDisplay(server: *Connection, client: m.Client) !void {
         break;
     };
     if (!found) return error.DisplayDisconnected;
-    _ = try query(server, &.{ "display-message", "-c", client.name, "-d", "5000", "-N", "-C", "-l", message });
+    _ = query(server, &.{ "display-message", "-c", client.name, "-d", "5000", "-N", "-C", "-l", message }) catch |err| {
+        // tmux 3.4 lacks centered messages. Keep the same client and duration
+        // using its status-line message when option parsing rejects -C.
+        const diagnostic = server.diagnostic orelse return err;
+        if (std.mem.indexOf(u8, diagnostic, "command display-message: unknown flag -C") == null) return err;
+        server.diagnostic = null;
+        _ = try query(server, &.{ "display-message", "-c", client.name, "-d", "5000", "-N", "-l", message });
+        return;
+    };
 }
 
 const Tracker = struct {
