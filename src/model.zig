@@ -202,4 +202,6 @@ test "terminal owner follows login and shell, stops at SSH" {
 
 test {
     _ = @import("status.zig");
+    _ = @import("control.zig");
+    _ = @import("layout.zig");
 }
