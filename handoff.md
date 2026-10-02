@@ -319,10 +319,13 @@ exposure (#12111) was closed as not planned. That is still true of
 
 ### Three build requirements the earlier draft missed
 
-1. **Kitty graphics is feature-gated.** `src/terminal/kitty.zig`:
-   `pub const graphics = if (build_options.kitty_graphics) @import(...) else struct {};`
-   Without the option the whole namespace is an empty struct. Set it when wiring
-   the dependency.
+1. **Kitty graphics is feature-gated but defaults ON.** `src/terminal/kitty.zig`
+   has `pub const graphics = if (build_options.kitty_graphics) @import(...) else struct {};`
+   and `terminal/build_options.zig:165` declares `kitty_graphics: bool = true`,
+   forced off only for freestanding targets (`kittyGraphics()`, ~line 274). No
+   build wiring needed on macOS — verified by a test asserting
+   `@hasDecl(ghostty.kitty.graphics, "ImageStorage")`, which fails to resolve if
+   the feature is off.
 2. **Image storage is off by default.** A non-zero
    `GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT` (terminal.h:1774) is required
    or nothing is retained.
@@ -332,7 +335,35 @@ exposure (#12111) was closed as not planned. That is still true of
    pulled in transitively by vaxis) and can serve as that callback.
 
 Consumers can take the Zig module or link the `ghostty-vt-static` artifact
-(build.zig ~160-176); for a Zig codebase the module is the nicer route.
+(build.zig ~160-176); for a Zig codebase the module is the nicer route. The Zig
+module is named **`ghostty-vt`** (and `ghostty-vt-c` for the C ABI),
+`src/build/GhosttyZig.zig:28`.
+
+### Wiring result (done, 10/02/2026)
+
+Pinned `ghostty_vt` to ghostty `83edd491e3024ae5e50393d62877b8897da1cccd`
+(`ghostty-1.3.2-dev`) and imported the `ghostty-vt` module in `build.zig`.
+
+**`simd = false` is required.** Ghostty defaults SIMD on, which links libc++, and
+Zig 0.16.0 cannot compile its own bundled libcxx for aarch64-macos:
+
+```
+error: sub-compilation of libcxx failed
+  .../lib/libcxx/include/__random/clamp_to_integral.h:47:58:
+  note: use of undeclared identifier 'INFINITY'
+```
+
+The dependency graph itself is fine — wuffs, uucode, simdutf and highway all
+build; only the libc++ sub-compilation fails. Passing `.simd = false` to
+`b.dependency` makes the module pure Zig, which is also the configuration that
+makes it dependency-free. Revisit when Zig ships a working libcxx; the cost is
+slower VT parsing, not lost features. Note that kitty graphics still pulls in
+**wuffs** (C) for pixel format conversion and alpha blending, so the module is
+not literally C-free once graphics are on.
+
+`src/vt.zig` holds the per-pane `Terminal` wrapper and sets
+`kitty_image_storage_limit` (requirement 2 above). PNG decoding (requirement 3)
+is not wired yet; it is only needed for Phase 4.
 
 ### Estimate impact
 
