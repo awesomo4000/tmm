@@ -204,4 +204,5 @@ test {
     _ = @import("status.zig");
     _ = @import("control.zig");
     _ = @import("layout.zig");
+    _ = @import("vt.zig");
 }
