@@ -198,6 +198,42 @@ status + 11 control + 7 layout). Nothing existing broken.
 Each phase is independently testable with the `regress/`-style shell harness or
 unit tests. Estimated ~2.5–3.5k new/changed Zig total; current tmm ~1.4k.
 
+### Phase 2 groundwork done (10/07/2026)
+
+`src/cmprobe.zig` + `tests/control_mode.py` validate the parser against a live
+tmux before `backend.zig` is restructured. The probe spawns `tmux -C attach`
+with piped stdio, feeds each line to `control.Parser`, and prints one classified
+event per line; the harness drives a throwaway `-S` socket and asserts the
+stream. Run with `zig build cmprobe -- -S <socket> -t <session>` or
+`python3 tests/control_mode.py`. Deterministic across repeated runs:
+
+```
+reply_begin 285 / reply_end 285 ok     guard block pairs by number
+session_changed $0 alpha               session ids really are "$N"
+window_add @1 / window_renamed @1      window lifecycle
+layout_change @1 419a,80x24,0,0[80x12,0,0,1,80x11,0,13,2]
+output %2 HELLO-FROM-PANE\x0d\x0a       decoded to exact bytes, CRLF intact
+exit                                   on kill-server, stream ends cleanly
+```
+
+**Three Zig 0.16 traps found doing this; Phase 2 will hit all three.**
+
+1. **`takeDelimiterExclusive` leaves the delimiter in the buffer.** It is
+   `peekDelimiterExclusive` plus `toss(result.len)`, and the returned length
+   excludes the newline — so the next call sees a leading delimiter, returns a
+   zero-length slice and tosses nothing. Paired with an `if (line.len == 0)
+   continue` guard that is a silent infinite spin, which looks exactly like a
+   blocked read. Use `takeDelimiterInclusive` and trim `"\r\n"`.
+2. **`Child.kill()` reaps the child and clears `child.id`**, so a following
+   `wait()` trips `assert(child.id != null)` and panics. Use one or the other.
+3. **`File.reader()` defaults to positional reads**; a control-mode child is a
+   pipe, so use `readerStreaming()`. (This was not the cause of the hang above,
+   trap 1 was, but positional reads on a pipe are wrong regardless.)
+
+When a line-reader looks like it is blocking, read the fd directly first: a
+single `readStreaming` returning several whole lines proves the transport is
+fine and the bug is in the line splitting.
+
 **Phase 2 — transport + model-from-events** (~800–1100 LoC)
 - New transport: spawn `tmux -C attach` locally, or `ssh <host> tmux -C attach`
   remotely, as a long-lived child (it's a persistent REPL: write commands to
