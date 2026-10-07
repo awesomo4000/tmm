@@ -64,7 +64,12 @@ def main():
             return json.loads(subprocess.check_output([str(BINARY), '-S', socket, '--dump'], timeout=5))
 
         def sessions():
-            return dict(line.split('|', 1) for line in tmux('list-clients', '-F', '#{client_name}|#{session_name}').splitlines())
+            # Exclude control-mode clients: tmm attaches one for the
+            # control-mode stream, and it is not a display. tmm's own client
+            # listing filters on client_control_mode for the same reason.
+            rows = tmux('list-clients', '-F',
+                        '#{client_control_mode}|#{client_name}|#{session_name}').splitlines()
+            return dict(r.split('|', 2)[1:] for r in rows if r.startswith('0|'))
 
         def click(row, col=3):
             os.write(ui_fd, f'\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m'.encode())

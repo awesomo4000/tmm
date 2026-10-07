@@ -6,6 +6,7 @@ const std = @import("std");
 const tmux = @import("libtmux");
 const m = @import("model.zig");
 const status = @import("status.zig");
+const cmstream = @import("cmstream.zig");
 const Allocator = std.mem.Allocator;
 pub const Snapshot = struct {
     arena: std.heap.ArenaAllocator,
@@ -63,6 +64,11 @@ pub const Rename = struct {
 pub const Shared = struct {
     stopping: std.atomic.Value(bool) = .init(false),
     mutex: std.Io.Mutex = .init,
+    /// Posted by controlWorker when tmux state changed; the collector waits on
+    /// it instead of polling. Statically initializable, no deinit. The wait is
+    /// cancellable, so task.cancel unblocks a collector parked here even if the
+    /// control stream is wedged.
+    wake: std.Io.Semaphore = .{},
     request: ?Request = null,
     blink: ?Request = null,
     rename: ?Rename = null,
@@ -76,6 +82,7 @@ pub const Shared = struct {
         defer self.mutex.unlock(io);
         if (self.rename) |old| old.deinit(a);
         self.rename = .{ .id = owned_id, .name = owned_name, .create = create, .display = owned_display };
+        self.wake.post(io);
     }
     pub fn blinkDisplay(self: *Shared, io: std.Io, alloc: Allocator, client: m.Client) !void {
         const request = try Request.copy(alloc, client, null);
@@ -83,12 +90,14 @@ pub const Shared = struct {
         defer self.mutex.unlock(io);
         if (self.blink) |old| old.deinit(alloc);
         self.blink = request;
+        self.wake.post(io);
     }
     pub fn send(self: *Shared, io: std.Io, alloc: Allocator, request: Request) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         if (self.request) |old| old.deinit(alloc);
         self.request = request;
+        self.wake.post(io);
     }
 };
 pub const Connection = struct {
@@ -314,6 +323,77 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
             s.destroy(alloc);
             return;
         };
+        // Event-driven steady state: controlWorker posts on tmux changes. If the
+        // control stream cannot run it posts on a 500 ms cadence instead, so
+        // the degraded path matches the old fixed poll exactly.
+        shared.wake.wait(io) catch return;
+    }
+}
+
+/// How often %output alone may wake the collector. Structural events wake it
+/// immediately; pane output is throttled because it arrives per keystroke, and
+/// the only thing that needs it is agent-status screen inspection, which used
+/// to run on the 500 ms poll anyway.
+const output_wake_interval_ms: i64 = 500;
+
+/// Floor sampling rate. Control events make the UI react immediately, but some
+/// state is not derivable from events yet: agent completion needs two
+/// consecutive idle samples, and an idle agent emits no %output to trigger the
+/// second one. Until status.zig derives agent state from live %output (Phase 2
+/// of the compositor plan), the collector still needs a periodic tick. This
+/// restores exactly the old cadence as a floor; event wakes sit on top of it.
+pub fn heartbeatWorker(io: std.Io, shared: *Shared) void {
+    while (!shared.stopping.load(.acquire)) {
+        io.sleep(.fromMilliseconds(500), .awake) catch return;
+        shared.wake.post(io);
+    }
+}
+
+/// Reads the control-mode stream and wakes the collector when tmux state
+/// changes. Runs as its own task so a stalled stream cannot delay shutdown:
+/// the collector parks on a cancellable semaphore wait, not on this loop.
+pub fn controlWorker(io: std.Io, alloc: Allocator, opts: tmux.ServerOptions, shared: *Shared) void {
+    while (!shared.stopping.load(.acquire)) {
+        const stream = cmstream.Stream.open(alloc, io, .{
+            .socket = opts.socket_path,
+            .label = opts.socket_name,
+            .session = null,
+            .tmux_bin = opts.tmux_bin orelse "tmux",
+        }) catch {
+            // No control stream: fall back to the historical fixed cadence so
+            // the UI keeps refreshing rather than freezing.
+            shared.wake.post(io);
+            io.sleep(.fromMilliseconds(500), .awake) catch return;
+            continue;
+        };
+        defer stream.close();
+
+        var last_output_wake: i64 = 0;
+        while (!shared.stopping.load(.acquire)) {
+            const ev = (stream.next() catch break) orelse break;
+            switch (ev) {
+                // Pane bytes: throttle, or a busy pane wakes the collector on
+                // every keystroke and we are back to worse than polling.
+                .output, .extended_output => {
+                    // std.time.milliTimestamp is gone in 0.16; .awake is the
+                    // monotonic clock this codebase already sleeps against.
+                    const now = std.Io.Timestamp.now(io, .awake).toMilliseconds();
+                    if (now - last_output_wake >= output_wake_interval_ms) {
+                        last_output_wake = now;
+                        shared.wake.post(io);
+                    }
+                },
+                // Guard-block bookkeeping for our own commands changes nothing.
+                .reply_begin, .reply_line, .reply_end, .unknown => {},
+                // Everything else is structural: refresh now.
+                else => shared.wake.post(io),
+            }
+            if (ev == .exit) break;
+        }
+        // Stream ended (server died, or we were detached). Wake once so the
+        // collector observes the failure, then retry unless we are stopping.
+        shared.wake.post(io);
+        if (shared.stopping.load(.acquire)) return;
         io.sleep(.fromMilliseconds(500), .awake) catch return;
     }
 }

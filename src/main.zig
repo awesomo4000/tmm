@@ -123,9 +123,16 @@ pub fn main(init: std.process.Init) !void {
     try vx.setMouseMode(tty.writer(), true);
     var shared: backend.Shared = .{};
     var task = try io.concurrent(runWorker, .{ io, a, init.minimal.environ, opts, &shared, &loop });
+    var control_task = try io.concurrent(backend.controlWorker, .{ io, a, opts, &shared });
+    var heartbeat_task = try io.concurrent(backend.heartbeatWorker, .{ io, &shared });
     defer {
         vx.setMouseMode(tty.writer(), false) catch {};
         shared.stopping.store(true, .release);
+        // Wake the collector before cancelling so it exits its semaphore wait
+        // on its own terms rather than mid-collect.
+        shared.wake.post(io);
+        heartbeat_task.cancel(io);
+        control_task.cancel(io);
         task.cancel(io);
         clearShared(a, &shared);
         drain(a, &loop);
@@ -312,6 +319,11 @@ pub fn main(init: std.process.Init) !void {
         if (action) |selected| switch (selected) {
             .server => |i| if (i != current_server) {
                 shared.stopping.store(true, .release);
+                // Wake first: the collector parks on shared.wake, and the old
+                // control task must go before a new one targets another server.
+                shared.wake.post(io);
+                heartbeat_task.cancel(io);
+                control_task.cancel(io);
                 task.cancel(io);
                 clearShared(a, &shared);
                 drain(a, &loop);
@@ -325,6 +337,8 @@ pub fn main(init: std.process.Init) !void {
                 opts = servers.items[i].options;
                 shared.stopping.store(false, .release);
                 task = try io.concurrent(runWorker, .{ io, a, init.minimal.environ, opts, &shared, &loop });
+                control_task = try io.concurrent(backend.controlWorker, .{ io, a, opts, &shared });
+                heartbeat_task = try io.concurrent(backend.heartbeatWorker, .{ io, &shared });
             },
             .display => |i| if (snapshot) |s| {
                 const next = try backend.Request.copy(a, s.clients[i], null);
