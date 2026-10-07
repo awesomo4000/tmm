@@ -1,0 +1,25 @@
+# Toolchain pinning for tmm. See https://mise.jdx.dev
+#
+# Keep this in step with build.zig.zon's minimum_zig_version; they move
+# together. The control-mode compositor work targets 0.16.0 and goes to 0.17.0
+# once the dependency tree lands there (libvaxis PR 370, ghostty PR 14519, and
+# a 0.17 branch of libtmux).
+#
+# Deliberately no ZIG_GLOBAL_CACHE_DIR here: packages currently resolve out of
+# zig-pkg/, which is not a Zig convention and is not set by any env var or
+# wrapper in the repo, so the mechanism is unconfirmed. Pinning it wrongly would
+# silently move dependency resolution. Worth settling before the 0.17 port,
+# since changed dep hashes will need fetching.
+[tools]
+zig = "0.16.0"
+
+[tasks.test]
+description = "Unit tests plus the control-mode integration suite"
+run = [
+  "zig build test",
+  "python3 tests/control_mode.py",
+]
+
+[tasks.probe]
+description = "Control-mode probe: mise run probe -- -S <socket> -t <session>"
+run = "zig build cmprobe --"
