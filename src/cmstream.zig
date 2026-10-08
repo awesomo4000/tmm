@@ -52,6 +52,10 @@ pub const Stream = struct {
     pending: std.ArrayList([]const u8) = .empty,
     /// Backing store for a deferred line being replayed through the parser.
     held: []u8,
+    /// When set, notifications seen during a `request` are dropped instead of
+    /// deferred. Use it for a stream dedicated to queries, whose notifications
+    /// another stream already handles, so `pending` cannot grow without bound.
+    discard_notifications: bool = false,
 
     /// Spawn the control-mode client. Heap-allocated because `reader` holds a
     /// self-referential interface; returning it by value would move it.
@@ -152,7 +156,10 @@ pub const Stream = struct {
                 else => return err,
             };
             const line = std.mem.trimEnd(u8, raw, "\r\n");
-            if (line.len == 0) continue;
+            // Deliberately NOT skipping empty lines: inside a guard block an
+            // empty line is real reply content, e.g. a blank screen row in a
+            // capture-pane reply. The parser maps it to reply_line when depth
+            // is non-zero and to .unknown outside, which callers ignore.
             self.last_line = line;
             const ev = self.parser.feed(line);
             if (ev == .exit) self.ended = true;
@@ -203,6 +210,31 @@ pub const Stream = struct {
         return .{ .ok = ok, .lines = try lines.toOwnedSlice(alloc) };
     }
 
+    /// Like `request`, but takes the argument vector a subprocess call would
+    /// use and quotes it into one control-mode command line.
+    ///
+    /// Each argument is wrapped in single quotes, which tmux treats as fully
+    /// literal. That matters because tmux's command parser treats `#` as a
+    /// comment and `;` as a command separator, so an unquoted `-F #{...}`
+    /// silently becomes `-F` with no argument. Format expansion still happens,
+    /// because the command receiving the format does it, not the parser.
+    ///
+    /// tmux offers no escape for a single quote inside single quotes, so an
+    /// argument containing one is refused rather than mis-parsed. Callers with
+    /// arbitrary user data (session names) should keep using the argv path.
+    pub fn requestArgv(self: *Stream, alloc: Allocator, args: []const []const u8) !Reply {
+        var line: std.ArrayList(u8) = .empty;
+        defer line.deinit(alloc);
+        for (args, 0..) |arg, i| {
+            if (std.mem.indexOfScalar(u8, arg, '\'') != null) return error.UnquotableArgument;
+            if (i != 0) try line.append(alloc, ' ');
+            try line.append(alloc, '\'');
+            try line.appendSlice(alloc, arg);
+            try line.append(alloc, '\'');
+        }
+        return self.request(alloc, line.items);
+    }
+
     pub const Reply = struct {
         ok: bool,
         lines: []const []const u8,
@@ -210,11 +242,23 @@ pub const Stream = struct {
             for (self.lines) |l| alloc.free(l);
             alloc.free(self.lines);
         }
+        /// Newline-joined body, matching what the equivalent `tmux` subprocess
+        /// would have written to stdout. Caller owns the result.
+        pub fn join(self: Reply, alloc: Allocator) ![]u8 {
+            var out: std.ArrayList(u8) = .empty;
+            errdefer out.deinit(alloc);
+            for (self.lines) |l| {
+                try out.appendSlice(alloc, l);
+                try out.append(alloc, '\n');
+            }
+            return out.toOwnedSlice(alloc);
+        }
     };
 
     /// Stash the line just parsed so a later `next()` reports it. Called when a
     /// notification shows up while a command reply is outstanding.
     fn defer_line(self: *Stream) !void {
+        if (self.discard_notifications) return;
         const copy = try self.alloc.dupe(u8, self.last_line);
         errdefer self.alloc.free(copy);
         try self.pending.append(self.alloc, copy);

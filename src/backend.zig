@@ -103,6 +103,10 @@ pub const Shared = struct {
 pub const Connection = struct {
     server: tmux.Server,
     diagnostic: ?[]const u8 = null,
+    /// Optional control-mode client used for read-only queries, so they cost a
+    /// write and a read on an existing connection rather than a fork and exec
+    /// of tmux. Null falls back to the subprocess path.
+    queries: ?*cmstream.Stream = null,
     pub fn init(a: Allocator, io: std.Io, environ: std.process.Environ, opts: tmux.ServerOptions) !Connection {
         return .{ .server = try tmux.Server.init(a, io, environ, opts) };
     }
@@ -110,6 +114,33 @@ pub const Connection = struct {
         self.server.deinit();
     }
 };
+/// Read-only query. Prefers the control client; falls back to a subprocess if
+/// there is none, or if an argument cannot be quoted for the command parser.
+///
+/// Only use this for commands whose arguments are fixed by the program (format
+/// strings, tmux ids). Anything carrying user data, and anything that mutates
+/// state, goes through `query` so the arguments are passed as a real argv with
+/// no command-line parsing in between.
+fn queryRead(connection: *Connection, args: []const []const u8) ![]u8 {
+    const stream = connection.queries orelse return query(connection, args);
+    const alloc = connection.server.allocator;
+    const reply = stream.requestArgv(alloc, args) catch |err| switch (err) {
+        // Unquotable argument, or the stream died. Either way the subprocess
+        // path still works, so fall back rather than failing the collect.
+        error.UnquotableArgument, error.StreamEnded => return query(connection, args),
+        else => return err,
+    };
+    defer reply.deinit(alloc);
+    if (!reply.ok) {
+        connection.diagnostic = if (reply.lines.len > 0)
+            alloc.dupe(u8, reply.lines[0]) catch null
+        else
+            null;
+        return error.TmuxCommandFailed;
+    }
+    return reply.join(alloc);
+}
+
 fn query(connection: *Connection, args: []const []const u8) ![]u8 {
     var result = try connection.server.exec(args);
     if (!result.success()) {
@@ -123,7 +154,7 @@ fn query(connection: *Connection, args: []const []const u8) ![]u8 {
     return result.stdout;
 }
 pub fn clients(server: *Connection, alloc: Allocator) ![]m.Client {
-    const data = try query(server, &.{ "list-clients", "-F", m.format(&.{ "client_name", "client_pid", "client_created", "session_id", "client_control_mode" }) });
+    const data = try queryRead(server, &.{ "list-clients", "-F", m.format(&.{ "client_name", "client_pid", "client_created", "session_id", "client_control_mode" }) });
     const rows = try m.records(5, alloc, data);
     var result: std.ArrayList(m.Client) = .empty;
     for (rows) |r| if (std.mem.eql(u8, r[4], "0")) {
@@ -144,7 +175,7 @@ pub fn collect(server: *Connection, snapshot: *Snapshot, target: ?Request) !void
             snapshot.failure = "Target disconnected. Select a display explicitly.";
         } else {
             if (t.pane) |pane| {
-                const data = try query(server, &.{ "list-panes", "-s", "-t", t.session.?, "-F", m.format(&.{ "pane_id", "window_id" }) });
+                const data = try queryRead(server, &.{ "list-panes", "-s", "-t", t.session.?, "-F", m.format(&.{ "pane_id", "window_id" }) });
                 const pane_rows = try m.records(2, a, data);
                 var exists = false;
                 for (pane_rows) |r| if (std.mem.eql(u8, r[0], pane) and std.mem.eql(u8, r[1], t.window.?)) {
@@ -159,7 +190,7 @@ pub fn collect(server: *Connection, snapshot: *Snapshot, target: ?Request) !void
                 _ = try query(server, &.{ "select-window", "-t", window_target });
                 _ = try query(server, &.{ "select-pane", "-t", pane });
             }
-            const data = try query(server, &.{ "display-message", "-c", t.client.name, "-p", m.format(&.{ "session_id", "window_id", "pane_id", "pane_current_path" }) });
+            const data = try queryRead(server, &.{ "display-message", "-c", t.client.name, "-p", m.format(&.{ "session_id", "window_id", "pane_id", "pane_current_path" }) });
             const rows = try m.records(4, a, data);
             if (rows.len != 1) return error.MalformedContext;
             snapshot.context = try std.fmt.allocPrint(a, "{s} {s} {s}", .{ rows[0][0], rows[0][1], rows[0][2] });
@@ -171,11 +202,11 @@ pub fn collect(server: *Connection, snapshot: *Snapshot, target: ?Request) !void
             };
         }
     }
-    const session_data = try query(server, &.{ "list-sessions", "-F", m.format(&.{ "session_id", "session_name", "session_path" }) });
+    const session_data = try queryRead(server, &.{ "list-sessions", "-F", m.format(&.{ "session_id", "session_name", "session_path" }) });
     const session_rows = try m.records(3, a, session_data);
     snapshot.sessions = try a.alloc(m.Session, session_rows.len);
     for (session_rows, snapshot.sessions) |r, *s| s.* = .{ .id = r[0], .name = r[1], .path = r[2] };
-    const pane_data = try query(server, &.{ "list-panes", "-a", "-F", m.format(&.{ "session_id", "window_id", "pane_id", "pane_current_path", "pane_current_command", "@agent_hint", "@agent_state", "@agent_status_text", "pane_pid", "@agent_session_id" }) });
+    const pane_data = try queryRead(server, &.{ "list-panes", "-a", "-F", m.format(&.{ "session_id", "window_id", "pane_id", "pane_current_path", "pane_current_command", "@agent_hint", "@agent_state", "@agent_status_text", "pane_pid", "@agent_session_id" }) });
     const pane_rows = try m.records(10, a, pane_data);
     snapshot.panes = try a.alloc(m.Pane, pane_rows.len);
     for (pane_rows, snapshot.panes) |r, *p| p.* = .{ .session = r[0], .window = r[1], .id = r[2], .cwd = r[3], .command = r[4], .agent = r[5], .state = r[6], .status = r[7] };
@@ -221,11 +252,10 @@ pub fn collect(server: *Connection, snapshot: *Snapshot, target: ?Request) !void
         if (!std.mem.eql(u8, pane.agent, "codex") and !std.mem.eql(u8, pane.agent, "claude")) continue;
         const verdict = detections.get(pane.id) orelse blk: {
             // Capture live screen, not copy-mode scroll position. No screen data is retained.
-            var capture = server.server.exec(&.{ "capture-pane", "-p", "-t", pane.id, "-S", "0" }) catch break :blk status.Verdict{ .state = .unknown, .rule = "capture-failed" };
-            defer capture.deinit();
-            if (!capture.success()) break :blk status.Verdict{ .state = .unknown, .rule = "capture-failed" };
-            const title_data = query(server, &.{ "display-message", "-p", "-t", pane.id, "#{pane_title}" }) catch "";
-            const result = status.classify(pane.agent, capture.stdout, std.mem.trim(u8, title_data, "\r\n"));
+            const screen = queryRead(server, &.{ "capture-pane", "-p", "-t", pane.id, "-S", "0" }) catch
+                break :blk status.Verdict{ .state = .unknown, .rule = "capture-failed" };
+            const title_data = queryRead(server, &.{ "display-message", "-p", "-t", pane.id, "#{pane_title}" }) catch "";
+            const result = status.classify(pane.agent, screen, std.mem.trim(u8, title_data, "\r\n"));
             try detections.put(pane.id, result);
             break :blk result;
         };
@@ -241,6 +271,17 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
     defer tracker.deinit();
     var target: ?Request = null;
     defer if (target) |t| t.deinit(alloc);
+    // Long-lived control client for read-only queries. Opened once: a client
+    // per iteration would cost as much as the fork and exec it replaces. Its
+    // own notifications are dropped, because controlWorker handles events.
+    const query_stream: ?*cmstream.Stream = cmstream.Stream.open(alloc, io, .{
+        .socket = opts.socket_path,
+        .label = opts.socket_name,
+        .session = null,
+        .tmux_bin = opts.tmux_bin orelse "tmux",
+    }) catch null;
+    if (query_stream) |qs| qs.discard_notifications = true;
+    defer if (query_stream) |qs| qs.close();
     while (!shared.stopping.load(.acquire)) {
         shared.mutex.lockUncancelable(io);
         if (shared.request) |r| {
@@ -265,6 +306,7 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
             };
             return;
         };
+        server.queries = query_stream;
         var rename_failure: ?[]const u8 = null;
         if (rename) |r| {
             const id = s.arena.allocator().dupe(u8, r.id) catch {
