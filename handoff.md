@@ -160,13 +160,17 @@ panes). Prefer the compositor.
 
 ---
 
-## 3. What's done (branch `control-mode-compositor`, commit 454186f)
+## 3. What's done (on `main`, 10/08/2026)
 
-Verified with Zig 0.16.0 (`pip install ziglang` provides the compiler as
-`python3 -m ziglang`). Both new modules import only `std`, so they test
-standalone without the libtmux/vaxis deps.
+Toolchain is pinned by `mise.toml` (zig 0.16.0). Run everything with
+`mise run test` (unit plus the control-mode suite) or individually:
+`zig build test`, `python3 tests/control_mode.py`,
+`python3 tests/integration.py`, `python3 tests/measure_spawns.py`.
+38 unit tests: control 11, layout 7, model 7, reconcile 8, status 3, vt 2.
 
-- **`src/control.zig`** — control-mode protocol client. Pure/borrowing like
+**Protocol and parsing**
+
+- **`src/control.zig`** — control-mode protocol. Pure/borrowing like
   `model.zig`:
   - `Event` tagged union (output, extended_output, layout_change, window/session
     notifications, pane_mode/pause/continue, client_session_changed/detached,
@@ -175,21 +179,71 @@ standalone without the libtmux/vaxis deps.
   - `Parser.feed(line) Event` — one event per line; tracks `%begin`/`%end`/
     `%error` guard depth (nesting-safe).
   - `decodeAlloc(alloc, escaped) ![]u8` — reverses `\ooo` octal escaping.
-  - `Command` — `refreshSize`, `refreshWindowSize`, `sendKeysHex`, `capturePane`
-    (format tmux command lines to write to the control client's stdin).
-  - 11 tests.
 - **`src/layout.zig`** — classic v1 layout-string parser → `[]PaneRect`
   (`{id: ?u32, x, y, w, h}`), leaves in document order; strips the checksum,
-  replicates the pane-id/sibling look-ahead. 7 tests.
-- **`src/model.zig`** — test aggregator now pulls in control.zig + layout.zig.
+  replicates the pane-id/sibling look-ahead.
 
-Test run: `python3 -m ziglang test src/model.zig` → **28/28 pass** (6 model + 3
-status + 11 control + 7 layout). Nothing existing broken.
+Both validated against live tmux 3.7c, not just fixtures: real `%layout-change`
+strings parse to correct rects, and a real `%output` line round-trips to exact
+bytes with a kitty APC intact.
 
-> Note: `zig build test` can't run in a network-restricted env because it must
-> fetch libtmux + vaxis from GitHub. Test the new std-only modules directly:
-> `zig test src/control.zig`, `zig test src/layout.zig`, or the aggregate
-> `zig test src/model.zig`.
+**Transport**
+
+- **`src/cmstream.zig`** — owns a long-lived `tmux -C attach` child and turns
+  stdout into a stream of `control.Event`. `request`/`requestArgv` run a tmux
+  command over that same client and return its guarded reply, so a query costs a
+  write and a read instead of a fork and exec. `open` drains the guard block
+  tmux emits for the attach itself, without which the first request matches that
+  block and returns the wrong result. Notifications arriving while a reply is
+  outstanding are deferred and replayed by `next`.
+- **`src/cmprobe.zig`** + **`tests/control_mode.py`** — a probe that prints each
+  event as `control.zig` classifies it, and an integration suite that drives a
+  disposable socket and asserts the stream. Also exercises `request`.
+
+**Event-driven collector**
+
+- `Shared.wake` (a cancellable `std.Io.Semaphore`) replaced the collector's
+  fixed 500 ms `io.sleep`. `backend.controlWorker` reads the event stream and
+  posts that semaphore on structural events, throttling `%output` to one wake
+  per 500 ms. `Shared.send`/`blinkDisplay`/`renameSession` post it too, since
+  they hand work to a collector that no longer polls for it.
+- `backend.heartbeatWorker` still posts every 500 ms as a floor. **This is
+  scaffolding**: agent completion needs two consecutive idle samples and an idle
+  agent emits no output to trigger the second. It goes away when `status.zig`
+  derives agent state from live `%output`.
+
+**Queries off subprocesses**
+
+- `backend.queryRead` sends read-only, program-fixed commands over the query
+  client. Converted: `list-clients`, `list-sessions`, both `list-panes`, both
+  `display-message` reads, and `capture-pane`. Mutations and anything carrying
+  user data deliberately stay on the argv path — a control-mode command is one
+  text line, tmux parsing treats `#` as a comment and `;` as a separator, and
+  there is no escape for a single quote inside single quotes, so `requestArgv`
+  refuses an unquotable argument rather than mis-parsing it.
+- Measured by `tests/measure_spawns.py`: six seconds of the real TUI, at least
+  twelve collects, **two** tmux spawns total, both the persistent control
+  clients. Previously that window was roughly eighty-four spawns.
+- Two control clients, not one: `request` cannot safely interleave with `next`
+  on the same stream, so the event reader and the query channel are separate
+  tasks with separate clients. Both are excluded from the display list by the
+  existing `client_control_mode` filter.
+
+**Groundwork for the rest**
+
+- **`src/reconcile.zig`** — compares an incrementally maintained view against a
+  freshly queried one, on structural fields only (session, window, pane id, cwd,
+  command). Agent state, status, completion, unread and interrupted are sampled
+  and legitimately differ between two samples, so comparing them would report
+  drift that is not drift. Order-insensitive. This is both the test oracle for
+  the incremental model and the runtime self-heal that lets the heartbeat go.
+- **`src/vt.zig`** — per-pane `Terminal` wrapper, sets a non-zero
+  `kitty_image_storage_limit`, and pins the kitty-graphics and OSC 7501 parsers
+  as *tests* so a dependency update that loses either fails loudly.
+- **`vendor/libghostty-vt-source.tar.gz`** — libghostty-vt vendored as its
+  release archive and referenced by relative path, replacing a git dependency on
+  the whole ghostty repository (4 MB in the repo versus 107 MB unpacked). See
+  `vendor/README.md` for the exact commit and the update procedure.
 
 ---
 
@@ -234,7 +288,9 @@ When a line-reader looks like it is blocking, read the fd directly first: a
 single `readStreaming` returning several whole lines proves the transport is
 fine and the bug is in the line splitting.
 
-**Phase 2 — transport + model-from-events** (~800–1100 LoC)
+**Phase 2 — transport + model-from-events** (~800–1100 LoC) — *transport,
+event-driven collector and the query cutover are done; what remains is the
+incremental model itself*
 - New transport: spawn `tmux -C attach` locally, or `ssh <host> tmux -C attach`
   remotely, as a long-lived child (it's a persistent REPL: write commands to
   stdin, read `%`-notifications + `%begin/%end/%error` replies from stdout).
