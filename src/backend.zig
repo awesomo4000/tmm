@@ -7,6 +7,9 @@ const tmux = @import("libtmux");
 const m = @import("model.zig");
 const status = @import("status.zig");
 const cmstream = @import("cmstream.zig");
+const control = @import("control.zig");
+const istate = @import("state.zig");
+const reconcile = @import("reconcile.zig");
 const Allocator = std.mem.Allocator;
 pub const Snapshot = struct {
     arena: std.heap.ArenaAllocator,
@@ -64,6 +67,14 @@ pub const Rename = struct {
 pub const Shared = struct {
     stopping: std.atomic.Value(bool) = .init(false),
     mutex: std.Io.Mutex = .init,
+    /// Notification lines handed to the collector, as owned copies: event
+    /// payloads borrow from the stream's read buffer and would dangle.
+    events: std.ArrayList([]u8) = .empty,
+    /// Set when a line could not be queued. Losing an event means the
+    /// incremental model cannot be trusted, so the collector escalates to a
+    /// full query rather than carrying on with a gap.
+    events_dropped: bool = false,
+
     /// Posted by controlWorker when tmux state changed; the collector waits on
     /// it instead of polling. Statically initializable, no deinit. The wait is
     /// cancellable, so task.cancel unblocks a collector parked here even if the
@@ -92,6 +103,42 @@ pub const Shared = struct {
         self.blink = request;
         self.wake.post(io);
     }
+    /// Queue one notification line for the collector. Never blocks on capacity:
+    /// on overflow it records the loss instead, which forces a resync.
+    pub fn pushEvent(self: *Shared, io: std.Io, alloc: Allocator, line: []const u8) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (self.events.items.len >= max_queued_events) {
+            self.events_dropped = true;
+            return;
+        }
+        const copy = alloc.dupe(u8, line) catch {
+            self.events_dropped = true;
+            return;
+        };
+        self.events.append(alloc, copy) catch {
+            alloc.free(copy);
+            self.events_dropped = true;
+        };
+    }
+
+    /// Hand the queued lines to the caller, who owns them. `dropped` reports
+    /// whether anything was lost since the last drain.
+    pub fn takeEvents(self: *Shared, io: std.Io, alloc: Allocator, dropped: *bool) []const []u8 {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        dropped.* = self.events_dropped;
+        self.events_dropped = false;
+        return self.events.toOwnedSlice(alloc) catch blk: {
+            // Could not hand them over; drop them and force a resync rather
+            // than leaving the collector to apply a partial batch.
+            for (self.events.items) |l| alloc.free(l);
+            self.events.clearRetainingCapacity();
+            dropped.* = true;
+            break :blk &.{};
+        };
+    }
+
     pub fn send(self: *Shared, io: std.Io, alloc: Allocator, request: Request) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
@@ -282,6 +329,15 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
     }) catch null;
     if (query_stream) |qs| qs.discard_notifications = true;
     defer if (query_stream) |qs| qs.close();
+
+    // Incremental model, maintained across iterations from the event queue and
+    // checked against each full query. It is not yet the source of the snapshot
+    // the UI renders: the full collect stays authoritative while the apply
+    // logic is being proven. Divergence is reported through TMM_RECONCILE_LOG.
+    var model = istate.State.init(alloc);
+    defer model.deinit();
+    const reconcile_log = environ.getAlloc(alloc, "TMM_RECONCILE_LOG") catch null;
+    defer if (reconcile_log) |path| alloc.free(path);
     while (!shared.stopping.load(.acquire)) {
         shared.mutex.lockUncancelable(io);
         if (shared.request) |r| {
@@ -296,6 +352,21 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
         shared.mutex.unlock(io);
         defer if (blink) |request| request.deinit(alloc);
         defer if (rename) |r| r.deinit(alloc);
+        // Apply whatever the control stream reported since the last pass.
+        var dropped = false;
+        const lines = shared.takeEvents(io, alloc, &dropped);
+        if (dropped) model.needs_full = true;
+        for (lines) |line| {
+            var parser: control.Parser = .{};
+            // Only notifications are queued, and those never open a guard
+            // block, so a fresh parser per line cannot desynchronise.
+            _ = model.apply(parser.feed(line)) catch {
+                model.needs_full = true;
+            };
+            alloc.free(line);
+        }
+        if (lines.len > 0) alloc.free(lines);
+
         const s = alloc.create(Snapshot) catch return;
         s.* = .{ .arena = .init(alloc) };
         var server = Connection.init(s.arena.allocator(), io, environ, opts) catch |err| {
@@ -357,6 +428,16 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
             if (t.run_identity) |id| alloc.free(id);
             t.run_identity = null;
         };
+        // Check the incremental model against the authoritative query, then
+        // adopt it. Skipped when the model already knows it is stale, since
+        // reporting the gap it has already declared would be noise.
+        if (s.valid) {
+            if (!model.isDirty()) checkModel(io, alloc, &model, s, reconcile_log);
+            model.adopt(s.sessions, s.panes) catch {
+                model.needs_full = true;
+            };
+        }
+
         if (shared.stopping.load(.acquire)) {
             s.destroy(alloc);
             return;
@@ -371,6 +452,46 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
         shared.wake.wait(io) catch return;
     }
 }
+
+/// Report structural divergence between the incremental model and a full query.
+/// Writes to the path in TMM_RECONCILE_LOG when set, so the integration suite
+/// can assert nothing diverged; a normal run pays nothing. The file is
+/// truncated each time, so it holds the most recent divergence rather than a
+/// history, which is all that is needed to tell whether any occurred.
+fn checkModel(
+    io: std.Io,
+    alloc: Allocator,
+    model: *istate.State,
+    s: *Snapshot,
+    log_path: ?[]const u8,
+) void {
+    const path = log_path orelse return;
+    const mismatches = reconcile.diff(alloc, .{
+        .sessions = model.sessions.items,
+        .panes = model.panes.items,
+    }, .{
+        .sessions = s.sessions,
+        .panes = s.panes,
+    }) catch return;
+    defer alloc.free(mismatches);
+    if (mismatches.len == 0) return;
+
+    var file = std.Io.Dir.cwd().createFile(io, path, .{}) catch return;
+    defer file.close(io);
+    var buf: [4096]u8 = undefined;
+    var w = file.writer(io, &buf);
+    for (mismatches) |mismatch| {
+        const line = reconcile.describe(alloc, mismatch) catch continue;
+        defer alloc.free(line);
+        w.interface.writeAll(line) catch {};
+        w.interface.writeAll("\n") catch {};
+    }
+    w.interface.flush() catch {};
+}
+
+/// Cap on queued notification lines. Overflow forces a full resync, which is
+/// correct but expensive, so this is generous relative to any realistic burst.
+const max_queued_events: usize = 1024;
 
 /// How often %output alone may wake the collector. Structural events wake it
 /// immediately; pane output is throttled because it arrives per keystroke, and
@@ -427,8 +548,13 @@ pub fn controlWorker(io: std.Io, alloc: Allocator, opts: tmux.ServerOptions, sha
                 },
                 // Guard-block bookkeeping for our own commands changes nothing.
                 .reply_begin, .reply_line, .reply_end, .unknown => {},
-                // Everything else is structural: refresh now.
-                else => shared.wake.post(io),
+                // Everything else is structural. Hand the raw line to the
+                // collector so it can update the incremental model, then wake
+                // it. Payloads borrow from the read buffer, hence the line.
+                else => {
+                    shared.pushEvent(io, alloc, stream.lastLine());
+                    shared.wake.post(io);
+                },
             }
             if (ev == .exit) break;
         }

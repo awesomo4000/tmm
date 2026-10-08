@@ -14,10 +14,11 @@
 zig = "0.16.0"
 
 [tasks.test]
-description = "Unit tests plus the control-mode integration suite"
+description = "Unit tests plus the control-mode and reconcile suites"
 run = [
   "zig build test",
   "python3 tests/control_mode.py",
+  "python3 tests/reconcile_live.py",
 ]
 
 [tasks.probe]

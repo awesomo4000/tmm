@@ -232,11 +232,37 @@ bytes with a kitty APC intact.
 **Groundwork for the rest**
 
 - **`src/reconcile.zig`** — compares an incrementally maintained view against a
-  freshly queried one, on structural fields only (session, window, pane id, cwd,
-  command). Agent state, status, completion, unread and interrupted are sampled
-  and legitimately differ between two samples, so comparing them would report
-  drift that is not drift. Order-insensitive. This is both the test oracle for
-  the incremental model and the runtime self-heal that lets the heartbeat go.
+  freshly queried one, order-insensitively. Compares **identity and membership
+  only**: which sessions and panes exist, each session's name and path, each
+  pane's session and window.
+- **`src/state.zig`** — the incremental model: owned sessions and panes, a dirty
+  set of windows and sessions, and a `needs_full` escalation. Events either
+  update it directly (`%window-close` removes, `%session-renamed` renames) or
+  mark something dirty, because notifications carry only ids.
+- **Wired in**: `Shared` queues notification lines as owned copies (payloads
+  borrow from the read buffer), capped, with overflow forcing a resync.
+  `controlWorker` pushes, the collector drains and applies, then compares
+  against the full query and adopts it. **The full collect is still
+  authoritative** — the incremental model is observed, not yet trusted, while
+  the apply logic is proven. `tests/reconcile_live.py` drives nine churn
+  operations against the running app with `TMM_RECONCILE_LOG` set and fails on
+  any divergence; currently zero.
+
+### Found by the oracle: cwd and command are not event-derivable
+
+The first run reported `pane_differs %5: command queried=sleep
+incremental=bash`. That was not a bug in the apply logic but a wrong assumption
+in the oracle: **tmux emits no notification when a pane's working directory or
+foreground command changes.** They shift silently whenever the user runs
+anything, so an event-driven model cannot track them and comparing them reports
+divergence on the first command typed.
+
+Consequence for the plan: `cwd`, `command` and agent status are **sampled
+properties**, in the same category as each other and distinct from structure.
+Events can maintain *which panes exist and where*; properties need a periodic
+query regardless. So the heartbeat does not disappear entirely — it shrinks from
+a seven-query full rebuild to one cheap `list-panes -a -F` property refresh over
+the control client, plus agent status. Plan Phase 2 accordingly.
 - **`src/vt.zig`** — per-pane `Terminal` wrapper, sets a non-zero
   `kitty_image_storage_limit`, and pins the kitty-graphics and OSC 7501 parsers
   as *tests* so a dependency update that loses either fails loudly.
