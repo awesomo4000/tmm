@@ -37,8 +37,11 @@ def main():
 
         events_path = os.path.join(root, 'events.txt')
         with open(events_path, 'wb') as sink:
+            # --cmd exercises the request/reply path: the query runs over the
+            # control client itself, with no tmux subprocess.
             probe = subprocess.Popen(
-                [PROBE, '-S', socket, '-t', 'alpha', '--events', '40'],
+                [PROBE, '-S', socket, '-t', 'alpha', '--events', '40',
+                 '--cmd', 'list-panes -a -F "#{session_name}:#{window_index}"'],
                 stdout=sink, stderr=subprocess.STDOUT,
             )
             try:
@@ -66,12 +69,12 @@ def main():
     tags = [l.split('\t')[0] for l in lines]
     rows = [l.split('\t') for l in lines]
 
-    # Guard blocks: the attach reply is wrapped and must parse as a pair.
-    assert 'reply_begin' in tags, tags
-    begin = rows[tags.index('reply_begin')]
-    end = rows[tags.index('reply_end')]
-    assert begin[1] == end[1], 'guard numbers differ: %s vs %s' % (begin, end)
-    assert end[2] == 'ok', end
+    # Guard blocks are no longer surfaced as events: open() drains the attach
+    # block and request() consumes its own. They are still exercised, via the
+    # request path below, whose ok flag comes from %end and whose lines come
+    # from the guarded body.
+    assert 'reply_begin' not in tags, \
+        'guard block leaked as an event; open() should have drained it: %s' % tags
 
     # Session identity. tmux session ids are literally "$N".
     sess = rows[tags.index('session_changed')]
@@ -93,6 +96,19 @@ def main():
     outs = [r for r in rows if r[0] == 'output']
     assert outs, 'no %output events'
     assert any('HELLO-FROM-PANE\\x0d\\x0a' in r[2] for r in outs), outs
+
+    # Request/reply over the control client: the attach guard block must have
+    # been drained at open, or this matches the wrong block and returns 0 lines.
+    req = [r for r in rows if r[0] == 'request']
+    assert req, 'no request event; --cmd reply was not matched'
+    assert req[0][1] == 'ok', req
+    assert int(req[0][2].split()[0]) >= 1, ('reply had no lines', req)
+    replies = [r for r in rows if r[0] == 'reply']
+    assert any('alpha' in r[1] for r in replies), replies
+
+    # Notifications that arrived while the reply was outstanding are replayed,
+    # not dropped: the structural events must still be present after it.
+    assert 'session_changed' in tags, tags
 
     # Killing the server ends the stream cleanly.
     assert tags[-1] == 'exit', tags

@@ -70,7 +70,19 @@ pub fn main(init: std.process.Init) !void {
     });
     defer stream.close();
 
-    if (send_cmd) |cmd| try stream.send(cmd);
+    if (send_cmd) |cmd| {
+        // Run it as a request/reply over this control client, so the probe also
+        // exercises the no-subprocess query path.
+        const reply = try stream.request(gpa, cmd);
+        defer reply.deinit(gpa);
+        try w.print("request\t{s}\t{d} lines\n", .{ if (reply.ok) "ok" else "error", reply.lines.len });
+        for (reply.lines) |l| {
+            try w.writeAll("reply\t");
+            try writeSafe(w, l);
+            try w.writeAll("\n");
+        }
+        try w.flush();
+    }
 
     var seen: usize = 0;
     while (seen < max_events) {
