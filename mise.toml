@@ -19,6 +19,7 @@ run = [
   "zig build test",
   "python3 tests/control_mode.py",
   "python3 tests/reconcile_live.py",
+  "python3 tests/measure_queries.py",
 ]
 
 [tasks.probe]

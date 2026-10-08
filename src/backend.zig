@@ -70,6 +70,11 @@ pub const Shared = struct {
     /// Notification lines handed to the collector, as owned copies: event
     /// payloads borrow from the stream's read buffer and would dangle.
     events: std.ArrayList([]u8) = .empty,
+    /// Pane ids that emitted output, forwarded as ids rather than whole
+    /// `%output` lines: the payload can be large and only the id is needed to
+    /// decide whether that pane's agent status must be re-captured.
+    output_panes: std.ArrayList([]u8) = .empty,
+
     /// Set when a line could not be queued. Losing an event means the
     /// incremental model cannot be trusted, so the collector escalates to a
     /// full query rather than carrying on with a gap.
@@ -139,6 +144,27 @@ pub const Shared = struct {
         };
     }
 
+    /// Note that a pane emitted output. Deduplicated and capped; dropping one
+    /// only costs a skipped capture, which the sample budget then covers.
+    pub fn pushOutputPane(self: *Shared, io: std.Io, alloc: Allocator, pane: []const u8) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        for (self.output_panes.items) |p| if (std.mem.eql(u8, p, pane)) return;
+        if (self.output_panes.items.len >= 256) return;
+        const copy = alloc.dupe(u8, pane) catch return;
+        self.output_panes.append(alloc, copy) catch alloc.free(copy);
+    }
+
+    pub fn takeOutputPanes(self: *Shared, io: std.Io, alloc: Allocator) []const []u8 {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return self.output_panes.toOwnedSlice(alloc) catch blk: {
+            for (self.output_panes.items) |p| alloc.free(p);
+            self.output_panes.clearRetainingCapacity();
+            break :blk &.{};
+        };
+    }
+
     pub fn send(self: *Shared, io: std.Io, alloc: Allocator, request: Request) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
@@ -150,6 +176,8 @@ pub const Shared = struct {
 pub const Connection = struct {
     server: tmux.Server,
     diagnostic: ?[]const u8 = null,
+    /// Queries issued on this connection, for TMM_QUERY_LOG measurement.
+    query_count: usize = 0,
     /// Optional control-mode client used for read-only queries, so they cost a
     /// write and a read on an existing connection rather than a fork and exec
     /// of tmux. Null falls back to the subprocess path.
@@ -169,6 +197,7 @@ pub const Connection = struct {
 /// state, goes through `query` so the arguments are passed as a real argv with
 /// no command-line parsing in between.
 fn queryRead(connection: *Connection, args: []const []const u8) ![]u8 {
+    connection.query_count += 1;
     const stream = connection.queries orelse return query(connection, args);
     const alloc = connection.server.allocator;
     const reply = stream.requestArgv(alloc, args) catch |err| switch (err) {
@@ -189,6 +218,7 @@ fn queryRead(connection: *Connection, args: []const []const u8) ![]u8 {
 }
 
 fn query(connection: *Connection, args: []const []const u8) ![]u8 {
+    connection.query_count += 1;
     var result = try connection.server.exec(args);
     if (!result.success()) {
         defer result.deinit();
@@ -210,6 +240,12 @@ pub fn clients(server: *Connection, alloc: Allocator) ![]m.Client {
     return result.toOwnedSlice(alloc);
 }
 pub fn collect(server: *Connection, snapshot: *Snapshot, target: ?Request) !void {
+    return collectWithCache(server, snapshot, target, null, null);
+}
+
+/// As `collect`, but reusing cached agent verdicts for panes that emitted no
+/// output, which is where most of a pass's queries go.
+pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Request, agents: ?*AgentCache, model: ?*istate.State) !void {
     const a = snapshot.arena.allocator();
     snapshot.clients = try clients(server, a);
     if (target) |t| {
@@ -297,6 +333,20 @@ pub fn collect(server: *Connection, snapshot: *Snapshot, target: ?Request) !void
             continue;
         }
         if (!std.mem.eql(u8, pane.agent, "codex") and !std.mem.eql(u8, pane.agent, "claude")) continue;
+        // Reuse a cached verdict when this pane emitted nothing and has
+        // settled: capture plus title is two queries and dominates a pass.
+        if (agents) |cache| {
+            const had_output = if (model) |mo| mo.hadOutput(pane.id) else true;
+            if (!cache.needsCapture(pane.id, had_output)) {
+                if (cache.cached(pane.id)) |v| {
+                    pane.state = @tagName(v.state);
+                    pane.status_source = "screen";
+                    pane.status_rule = v.rule;
+                    pane.interrupted = v.interrupted;
+                    continue;
+                }
+            }
+        }
         const verdict = detections.get(pane.id) orelse blk: {
             // Capture live screen, not copy-mode scroll position. No screen data is retained.
             const screen = queryRead(server, &.{ "capture-pane", "-p", "-t", pane.id, "-S", "0" }) catch
@@ -304,6 +354,7 @@ pub fn collect(server: *Connection, snapshot: *Snapshot, target: ?Request) !void
             const title_data = queryRead(server, &.{ "display-message", "-p", "-t", pane.id, "#{pane_title}" }) catch "";
             const result = status.classify(pane.agent, screen, std.mem.trim(u8, title_data, "\r\n"));
             try detections.put(pane.id, result);
+            if (agents) |cache| cache.record(pane.id, result);
             break :blk result;
         };
         pane.state = @tagName(verdict.state);
@@ -336,8 +387,12 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
     // logic is being proven. Divergence is reported through TMM_RECONCILE_LOG.
     var model = istate.State.init(alloc);
     defer model.deinit();
+    var agents = AgentCache.init(alloc);
+    defer agents.deinit();
     const reconcile_log = environ.getAlloc(alloc, "TMM_RECONCILE_LOG") catch null;
     defer if (reconcile_log) |path| alloc.free(path);
+    const query_log = environ.getAlloc(alloc, "TMM_QUERY_LOG") catch null;
+    defer if (query_log) |path| alloc.free(path);
     while (!shared.stopping.load(.acquire)) {
         shared.mutex.lockUncancelable(io);
         if (shared.request) |r| {
@@ -366,6 +421,13 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
             alloc.free(line);
         }
         if (lines.len > 0) alloc.free(lines);
+
+        const emitted = shared.takeOutputPanes(io, alloc);
+        for (emitted) |pane| {
+            model.noteOutput(pane) catch {};
+            alloc.free(pane);
+        }
+        if (emitted.len > 0) alloc.free(emitted);
 
         const s = alloc.create(Snapshot) catch return;
         s.* = .{ .arena = .init(alloc) };
@@ -405,7 +467,7 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
         if (rename) |r| if (r.create and s.rename_result.?.success) {
             if (target) |t| collect_target = .{ .client = t.client };
         };
-        collect(&server, s, collect_target) catch |err| {
+        collectWithCache(&server, s, collect_target, &agents, &model) catch |err| {
             s.failure = server.diagnostic orelse @errorName(err);
         };
         if (rename_failure) |failure| s.failure = failure;
@@ -431,7 +493,11 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
         // Check the incremental model against the authoritative query, then
         // adopt it. Skipped when the model already knows it is stale, since
         // reporting the gap it has already declared would be noise.
+        if (query_log) |path| appendCount(io, alloc, path, server.query_count);
         if (s.valid) {
+            // This pass's capture decisions have consumed the output marks.
+            agents.prune(s.panes);
+            model.clearOutput();
             if (!model.isDirty()) checkModel(io, alloc, &model, s, reconcile_log);
             model.adopt(s.sessions, s.panes) catch {
                 model.needs_full = true;
@@ -489,6 +555,91 @@ fn checkModel(
     w.interface.flush() catch {};
 }
 
+/// Captures still owed to a pane after its last output. The completion rule
+/// needs two consecutive idle samples, so a pane must keep being sampled for a
+/// few passes after it stops emitting, or a working-to-idle transition would
+/// never be observed and completions would be lost. Three covers working, then
+/// idle, then idle.
+const samples_after_output: u8 = 3;
+
+/// Agent verdicts kept across passes, so a pane that emitted nothing need not
+/// be re-captured. Capture plus title is two tmux queries per agent pane per
+/// pass, measured as two thirds of the cost of a pass with three agents.
+pub const AgentCache = struct {
+    alloc: Allocator,
+    entries: std.StringHashMap(Entry),
+
+    pub const Entry = struct {
+        verdict: status.Verdict,
+        /// Remaining captures owed; zero means the pane has settled.
+        budget: u8,
+    };
+
+    pub fn init(alloc: Allocator) AgentCache {
+        return .{ .alloc = alloc, .entries = .init(alloc) };
+    }
+
+    pub fn deinit(self: *AgentCache) void {
+        var it = self.entries.iterator();
+        while (it.next()) |e| self.alloc.free(e.key_ptr.*);
+        self.entries.deinit();
+    }
+
+    /// Whether this pane must be captured this pass.
+    pub fn needsCapture(self: *AgentCache, pane: []const u8, had_output: bool) bool {
+        const existing = self.entries.getPtr(pane) orelse return true;
+        if (had_output) {
+            existing.budget = samples_after_output;
+            return true;
+        }
+        return existing.budget > 0;
+    }
+
+    pub fn record(self: *AgentCache, pane: []const u8, verdict: status.Verdict) void {
+        if (self.entries.getPtr(pane)) |e| {
+            e.verdict = verdict;
+            if (e.budget > 0) e.budget -= 1;
+            return;
+        }
+        const key = self.alloc.dupe(u8, pane) catch return;
+        self.entries.put(key, .{
+            .verdict = verdict,
+            .budget = samples_after_output - 1,
+        }) catch self.alloc.free(key);
+    }
+
+    pub fn cached(self: *AgentCache, pane: []const u8) ?status.Verdict {
+        const e = self.entries.getPtr(pane) orelse return null;
+        return e.verdict;
+    }
+
+    /// Forget panes that no longer exist, so the cache cannot grow without end.
+    pub fn prune(self: *AgentCache, panes: []const m.Pane) void {
+        var stale: std.ArrayList([]const u8) = .empty;
+        defer stale.deinit(self.alloc);
+        var it = self.entries.iterator();
+        outer: while (it.next()) |e| {
+            for (panes) |pane| if (std.mem.eql(u8, pane.id, e.key_ptr.*)) continue :outer;
+            stale.append(self.alloc, e.key_ptr.*) catch return;
+        }
+        for (stale.items) |key| {
+            if (self.entries.fetchRemove(key)) |kv| self.alloc.free(kv.key);
+        }
+    }
+};
+
+/// Append one collect's query count, for measuring the effect of changes to
+/// how much each pass asks tmux. Gated on TMM_QUERY_LOG; free when unset.
+fn appendCount(io: std.Io, alloc: Allocator, path: []const u8, count: usize) void {
+    const line = std.fmt.allocPrint(alloc, "{d}\n", .{count}) catch return;
+    defer alloc.free(line);
+    var file = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false }) catch return;
+    defer file.close(io);
+    const st = file.stat(io) catch return;
+    const end = st.size;
+    _ = file.writePositionalAll(io, line, end) catch {};
+}
+
 /// Cap on queued notification lines. Overflow forces a full resync, which is
 /// correct but expensive, so this is generous relative to any realistic burst.
 const max_queued_events: usize = 1024;
@@ -540,6 +691,14 @@ pub fn controlWorker(io: std.Io, alloc: Allocator, opts: tmux.ServerOptions, sha
                 .output, .extended_output => {
                     // std.time.milliTimestamp is gone in 0.16; .awake is the
                     // monotonic clock this codebase already sleeps against.
+                    // Always forward which pane moved: that is what decides
+                    // whether its agent status needs re-capturing. Only the
+                    // wake is throttled.
+                    switch (ev) {
+                        .output => |o| shared.pushOutputPane(io, alloc, o.pane),
+                        .extended_output => |o| shared.pushOutputPane(io, alloc, o.pane),
+                        else => {},
+                    }
                     const now = std.Io.Timestamp.now(io, .awake).toMilliseconds();
                     if (now - last_output_wake >= output_wake_interval_ms) {
                         last_output_wake = now;

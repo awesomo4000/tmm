@@ -38,6 +38,11 @@ pub const State = struct {
     /// event stream was interrupted. The owner does a full collect and clears it.
     needs_full: bool = true,
 
+    /// Pane ids that produced output since `clearOutput`. A pane that emitted
+    /// nothing cannot have changed its screen, so its agent status need not be
+    /// re-captured — which is where most of each pass's tmux queries go.
+    output_panes: std.ArrayList([]const u8) = .empty,
+
     pub fn init(alloc: Allocator) State {
         return .{ .alloc = alloc };
     }
@@ -51,6 +56,8 @@ pub const State = struct {
         self.dirty_windows.deinit(self.alloc);
         for (self.dirty_sessions.items) |s| self.alloc.free(s);
         self.dirty_sessions.deinit(self.alloc);
+        for (self.output_panes.items) |p| self.alloc.free(p);
+        self.output_panes.deinit(self.alloc);
     }
 
     fn freeSession(self: *State, s: m.Session) void {
@@ -149,8 +156,20 @@ pub const State = struct {
                 return true;
             },
 
-            // Pane bytes and our own command replies change no structure.
-            .output, .extended_output, .reply_begin, .reply_line, .reply_end => return false,
+            // Pane bytes change no structure, but they do mean that pane's
+            // screen moved, which is what decides whether its agent status
+            // needs re-capturing.
+            .output => |o| {
+                try self.markOutput(o.pane);
+                return false;
+            },
+            .extended_output => |o| {
+                try self.markOutput(o.pane);
+                return false;
+            },
+
+            // Our own command replies change nothing.
+            .reply_begin, .reply_line, .reply_end => return false,
 
             else => return false,
         }
@@ -183,6 +202,28 @@ pub const State = struct {
             .status = p.status,
         });
         self.needs_full = false;
+    }
+
+    fn markOutput(self: *State, pane: []const u8) !void {
+        for (self.output_panes.items) |p| if (std.mem.eql(u8, p, pane)) return;
+        try self.output_panes.append(self.alloc, try self.alloc.dupe(u8, pane));
+    }
+
+    /// Record that a pane emitted output. Public because the control reader
+    /// runs in another task and forwards pane ids rather than payloads.
+    pub fn noteOutput(self: *State, pane: []const u8) !void {
+        return self.markOutput(pane);
+    }
+
+    pub fn hadOutput(self: *const State, pane: []const u8) bool {
+        for (self.output_panes.items) |p| if (std.mem.eql(u8, p, pane)) return true;
+        return false;
+    }
+
+    /// Called once a pass has consumed the output marks.
+    pub fn clearOutput(self: *State) void {
+        for (self.output_panes.items) |p| self.alloc.free(p);
+        self.output_panes.clearRetainingCapacity();
     }
 
     pub fn isDirty(self: *const State) bool {
@@ -266,12 +307,24 @@ test "renaming an unknown session falls back to a query" {
     try testing.expectEqual(@as(usize, 1), st.dirty_sessions.items.len);
 }
 
-test "pane output never marks anything dirty" {
+test "pane output marks that pane, not the structure" {
     var st = State.init(testing.allocator);
     defer st.deinit();
     try st.adopt(&.{}, &.{testPane("%1", "@0")});
     try testing.expect(!try st.apply(.{ .output = .{ .pane = "%1", .escaped = "hello" } }));
     try testing.expect(!st.isDirty());
+    try testing.expect(st.hadOutput("%1"));
+    try testing.expect(!st.hadOutput("%2"));
+    st.clearOutput();
+    try testing.expect(!st.hadOutput("%1"));
+}
+
+test "repeated output from one pane records it once" {
+    var st = State.init(testing.allocator);
+    defer st.deinit();
+    try st.adopt(&.{}, &.{});
+    for (0..5) |_| _ = try st.apply(.{ .output = .{ .pane = "%1", .escaped = "x" } });
+    try testing.expectEqual(@as(usize, 1), st.output_panes.items.len);
 }
 
 test "sessions-changed and exit escalate to a full query" {
