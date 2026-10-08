@@ -205,4 +205,5 @@ test {
     _ = @import("control.zig");
     _ = @import("layout.zig");
     _ = @import("vt.zig");
+    _ = @import("reconcile.zig");
 }
