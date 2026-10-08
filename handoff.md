@@ -247,6 +247,17 @@ fine and the bug is in the line splitting.
 - `backend.zig` is the big change: steady state becomes event-driven.
 
 **Phase 3 — compositor (text)** (~700–1000 LoC)
+- **VT lifecycle is tmm's to manage.** Allocate on first sight (initial
+  enumeration at attach, then `%window-add` / a `%layout-change` revealing a new
+  pane id) and destroy on pane death (`%layout-change` without that pane, or
+  `%window-close`). Missing the teardown leaks a whole terminal, its scrollback
+  and its image store per closed pane.
+- **Memory multiplies by pane count.** `vt.zig` currently sets
+  `default_kitty_storage_limit` to 16 MiB per pane, which is a 320 MiB ceiling
+  across twenty panes, before scrollback. Make it a budget shared across panes,
+  or much smaller per pane, before a session with many agents exists.
+- Each VT must be resized from `layout.zig`'s rects on every `%layout-change`;
+  `refresh-client -C <w>x<h>` is what makes tmux re-tile and emit a fresh one.
 - One `libghostty-vt` `Terminal` per pane (new `vt.zig` wrapper); feed decoded
   `%output`; resize per `%layout-change` (parse with `layout.zig`).
 - Render: for each visible pane, blit its libghostty grid into the pane's rect
@@ -258,9 +269,28 @@ fine and the bug is in the line splitting.
 - `main.zig` gains the compositor render path + focus/input.
 
 **Phase 4 — kitty image bridge** (~150–350 LoC)
-- Read image data from libghostty-vt (API per Ghostling's renderer — read it
-  first), re-emit kitty to ghostty positioned/clipped per pane rect. Accept
-  live-only semantics (no pre-attach image restore).
+- Read image data from libghostty-vt (API per `include/ghostty/vt/kitty_graphics.h`,
+  see section 6), re-emit kitty to ghostty positioned/clipped per pane rect.
+  Accept live-only semantics (no pre-attach image restore).
+- **The response leg.** Kitty is request/response: an app transmits an image and
+  may wait for `\x1b_G...;OK\x1b\\`, and `a=q` is a direct question. In a
+  compositor the real terminal's reply goes to tmm, not the app, so **tmm must
+  synthesise the response itself**. Without it, apps that wait will stall or
+  conclude kitty is unsupported. Delivery is verified working:
+  `send-keys -t %N -H 1b 5f 47 69 3d 31 3b 4f 4b 1b 5c 0a` put exactly
+  `\x1b_Gi=1;OK\x1b\\` into the pane process. libghostty-vt implements the
+  protocol, so derive the reply from its state rather than hand-rolling it.
+- **Image id remapping.** Every pane's app allocates kitty ids believing it owns
+  the terminal, and tmm re-emits into one real terminal, so ids collide. Keep a
+  per-pane map `(pane, storage id) -> outbound id`, allocated from a monotonic
+  counter **on first sight and reused thereafter** — a fresh id per sighting
+  leaks an image per frame and breaks replace (`i=N` re-transmit) and delete
+  (`a=d,i=N`). Free on app delete and on pane death. Read ids from
+  libghostty-vt's `ImageStorage`, which already resolves the `i=` id versus `I=`
+  number distinction (`imageById` / `imageByNumber`), rather than sniffing APCs.
+- libvaxis is the emit side: `Image.init(id, w, h)` references an image the
+  terminal already knows, so transmit once and place many times, clipped per
+  pane rect via `DrawOptions.clip_region` and ordered with `z_index`.
 
 **Phase 5 — hardening**
 - Flow control (`%pause`/`%continue`, the 300 ms `CONTROL_MAXIMUM_AGE`
@@ -268,6 +298,54 @@ fine and the bug is in the line splitting.
 
 **Deferred (not v1):** remote aggregator (host dimension), multi-backend
 (screen/zellij), patched-tmux image persistence (#5445), static-pane-inside-tmux.
+
+### Settled 10/08/2026: uniform per-pane VTs
+
+One libghostty-vt `Terminal` for **every** pane, unconditionally, so kitty works
+in all cases. No selective allocation, no per-pane fidelity tiers. The
+alternatives below are verified to exist and are parked deliberately; revisit
+only if memory or throughput becomes a real problem, not pre-emptively.
+
+Parked, with the mechanisms confirmed in `tmux(1)` under `refresh-client -f`:
+
+- `no-output` — a control client stops receiving pane output entirely. Correct
+  for the query client, which only runs commands and currently receives every
+  `%output` just to discard it (`Stream.discard_notifications`).
+- `read-only` — would make the event client's read-only role a tmux-enforced
+  guarantee rather than a convention (`controlWorker` makes no send/request
+  calls today).
+- `pause-after=<secs>` — per-client flow control, already noted for Phase 5.
+- Allocating VTs only for rendered panes, with agent status for the rest coming
+  from an on-demand `capture-pane`. This is the lever to pull if the per-pane
+  memory budget below bites.
+
+### Why not raw per-pane passthrough
+
+Recorded so it is not reconsidered from scratch: a pane's bytes cannot be piped
+into a sub-rectangle. A VT stream is stateful and global to the terminal —
+absolute cursor positioning, erase-in-display, scroll-region changes, alternate
+screen — and terminals have no viewport primitive to scope a stream to a box
+(`DECSTBM` constrains vertical scrolling only, with no horizontal equivalent).
+Raw output would move the real cursor, clear the window and reset margins,
+destroying the sidebar and every other pane. That is why tmux parses into a grid
+and re-renders, and why taking its place means inheriting that work.
+
+Kitty is the sole exception, and only because its placements carry explicit
+position and clipping — exactly the property that makes re-emission into a pane
+rect possible.
+
+### Measured: why control mode rather than a normal client
+
+Same pane emitting the same bytes, on tmux 3.7c:
+
+| client | plaintext | kitty APC |
+| --- | --- | --- |
+| `tmux attach` (normal) | arrives | **dropped** (no `QUJD`, no `\x1b_G`) |
+| `tmux -C` (control) | arrives | `\033_Gf=24,...;QUJD\033\134` verbatim |
+
+756 bytes were captured from the normal client with the plaintext marker
+present, so the capture was working; the APC simply is not there. tmux's screen
+model has no image concept, so its parser discards the sequence while rendering.
 
 ### File map (new / changed)
 ```
