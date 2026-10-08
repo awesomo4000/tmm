@@ -39,6 +39,25 @@ pub fn initPane(
     });
 }
 
+test "libghostty-vt parses the program status protocol (OSC 7501)" {
+    // Pinned as a capability, not inferred from a version: OSC 7501 landed in
+    // libghostty-vt on 2026-10-06 and the previous pin here predated it. If a
+    // future pin bump loses the parser, this fails instead of the status code
+    // silently falling back to screen scraping.
+    //
+    // The protocol itself is a proposal with no program adoption yet; this only
+    // asserts that we could consume it when something emits it.
+    const ps = ghostty.osc.Command.ProgramStatus;
+    try std.testing.expect(@hasDecl(ps, "State"));
+    try std.testing.expect(@hasDecl(ps, "Kind"));
+    inline for (.{ "idle", "working", "done", "blocked", "error", "clear" }) |name| {
+        try std.testing.expect(@hasField(ps.State, name));
+    }
+    inline for (.{ "permission", "question", "auth" }) |name| {
+        try std.testing.expect(@hasField(ps.Kind, name));
+    }
+}
+
 test "libghostty-vt is wired in and exposes kitty graphics" {
     // Compiles only if the kitty_graphics build option is on: the namespace is
     // an empty struct otherwise, so ImageStorage would not resolve.
