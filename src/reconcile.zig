@@ -7,12 +7,22 @@
 //! instead of a fork and exec each, so a full query is affordable as an oracle:
 //! in tests after every operation, and at a low rate at runtime to catch drift.
 //!
-//! Only **structural** fields are compared — session, window, pane id, cwd and
-//! command — because those are derivable from tmux and must match exactly.
-//! Agent fields (state, status, completion, unread, interrupted) are *sampled*:
-//! they come from screen inspection and from rules that need two consecutive
-//! observations, so two samples taken moments apart legitimately differ and
-//! comparing them would report drift that is not drift.
+//! Only **identity and membership** are compared: which sessions and panes
+//! exist, each session's name and path, and each pane's session and window.
+//! Those are exactly what control-mode notifications can maintain.
+//!
+//! Deliberately not compared:
+//!
+//!   - `cwd` and `command`. **tmux emits no notification when a pane's
+//!     working directory or foreground command changes** — they shift silently
+//!     as the user runs things. An event-driven model therefore cannot track
+//!     them, and comparing them reports divergence on the first `cd` or command
+//!     the user runs. Observed exactly that: `command queried=sleep
+//!     incremental=bash`. They are sampled properties and must be refreshed by
+//!     a periodic query, like agent status.
+//!   - Agent fields (state, status, completion, unread, interrupted), which
+//!     come from screen inspection and from rules needing two consecutive
+//!     observations, so two samples moments apart legitimately differ.
 //!
 //! Comparison is order-insensitive: tmux returns its own ordering and an
 //! incremental model will accumulate a different one.
@@ -94,12 +104,11 @@ pub fn diff(alloc: std.mem.Allocator, incremental: View, queried: View) ![]Misma
             try out.append(alloc, .{ .kind = .pane_missing, .id = want.id });
             continue;
         };
-        // Structural only; see the module comment on sampled fields.
+        // Membership only; cwd and command are sampled, not event-derived.
+        // See the module comment.
         const fields = [_]struct { name: []const u8, want: []const u8, got: []const u8 }{
             .{ .name = "session", .want = want.session, .got = got.session },
             .{ .name = "window", .want = want.window, .got = got.window },
-            .{ .name = "cwd", .want = want.cwd, .got = got.cwd },
-            .{ .name = "command", .want = want.command, .got = got.command },
         };
         for (fields) |f| {
             if (!std.mem.eql(u8, f.want, f.got)) try out.append(alloc, .{
@@ -172,15 +181,25 @@ test "a pane the incremental model kept after death is reported" {
     try testing.expectEqual(Mismatch.Kind.pane_unexpected, d[0].kind);
 }
 
-test "a stale field is reported with both values" {
-    const incremental = [_]m.Pane{pane("%1", "$0", "@0", "/stale", "bash")};
-    const queried = [_]m.Pane{pane("%1", "$0", "@0", "/fresh", "bash")};
+test "a stale membership field is reported with both values" {
+    const incremental = [_]m.Pane{pane("%1", "$0", "@0", "/a", "bash")};
+    const queried = [_]m.Pane{pane("%1", "$9", "@0", "/a", "bash")};
     const d = try diff(testing.allocator, .{ .panes = &incremental }, .{ .panes = &queried });
     defer testing.allocator.free(d);
     try testing.expectEqual(@as(usize, 1), d.len);
-    try testing.expectEqualStrings("cwd", d[0].field);
-    try testing.expectEqualStrings("/fresh", d[0].expected);
-    try testing.expectEqualStrings("/stale", d[0].actual);
+    try testing.expectEqualStrings("session", d[0].field);
+    try testing.expectEqualStrings("$9", d[0].expected);
+    try testing.expectEqualStrings("$0", d[0].actual);
+}
+
+test "cwd and command are ignored: no tmux event reports them" {
+    // A pane whose shell ran a command, or that was cd'd, with no notification
+    // of either. An event-driven model cannot know, so this is not divergence.
+    const incremental = [_]m.Pane{pane("%1", "$0", "@0", "/old", "bash")};
+    const queried = [_]m.Pane{pane("%1", "$0", "@0", "/new", "sleep")};
+    const d = try diff(testing.allocator, .{ .panes = &incremental }, .{ .panes = &queried });
+    defer testing.allocator.free(d);
+    try testing.expectEqual(@as(usize, 0), d.len);
 }
 
 test "sampled agent fields are deliberately ignored" {

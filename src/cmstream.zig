@@ -264,6 +264,13 @@ pub const Stream = struct {
         try self.pending.append(self.alloc, copy);
     }
 
+    /// The raw line backing the event most recently returned by `next`. Valid
+    /// until the next call. Used to hand an event to another task, which needs
+    /// an owned copy because event payloads borrow from this buffer.
+    pub fn lastLine(self: *const Stream) []const u8 {
+        return self.last_line;
+    }
+
     /// Write a tmux command for the control client to run. The reply arrives as
     /// a guard block (`reply_begin` .. `reply_end`) in the event stream.
     pub fn send(self: *Stream, command: []const u8) !void {
