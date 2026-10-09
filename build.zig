@@ -23,6 +23,9 @@ pub fn build(b: *std.Build) void {
         .simd = false,
     }).module("ghostty-vt");
     mod.addImport("ghostty-vt", ghostty_vt);
+    // openpty for the terminal region; see src/pty.zig.
+    mod.link_libc = true;
+    if (target.result.os.tag == .linux) mod.linkSystemLibrary("util", .{});
     const exe = b.addExecutable(.{ .name = "tmm", .root_module = mod });
     b.installArtifact(exe);
     // Development probe for the control-mode stream. Not installed; run with
