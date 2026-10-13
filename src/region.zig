@@ -1,0 +1,465 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! One terminal region: a pty with a child process on it, a libghostty-vt
+//! terminal parsing its output, and a blit of the resulting grid into a
+//! libvaxis window.
+//!
+//! This is the right-hand side of `tmm --shell`: an ordinary shell, in which
+//! an ordinary `tmux attach` works. It is not a tmux pane and tmm is not a
+//! terminal multiplexer here; the split is tmm drawing two things into one
+//! window, so the sidebar costs no second OS window and no second click.
+//!
+//! Three objects per region, which is the libghostty-vt shape:
+//!
+//!   terminal      the state
+//!   stream        the parser, owning a handler that mutates the state
+//!   render_state  the readout, with per-row dirty tracking
+//!
+//! `Region` must not move once `init` returns: `stream.handler` holds a
+//! pointer to `terminal`, and the `write_pty` effect recovers the region from
+//! its handler pointer. Allocate it with `create`.
+
+const std = @import("std");
+const vaxis = @import("vaxis");
+const ghostty = @import("ghostty-vt");
+const Pty = @import("pty.zig").Pty;
+
+const Allocator = std.mem.Allocator;
+
+/// Printable ASCII as one-byte strings, so the common cell needs no
+/// allocation to produce the `[]const u8` grapheme a vaxis cell wants.
+const ascii: [128][1]u8 = blk: {
+    var table: [128][1]u8 = undefined;
+    for (&table, 0..) |*slot, i| slot.* = .{@intCast(i)};
+    break :blk table;
+};
+
+pub const Region = struct {
+    io: std.Io,
+    alloc: Allocator,
+    pty: Pty,
+    terminal: ghostty.Terminal,
+    stream: ghostty.TerminalStream,
+    render_state: ghostty.RenderState,
+
+    /// Guards `terminal`, `stream`, and `render_state`. The reader task feeds
+    /// the stream; the UI task resizes, renders, and writes input. Both go
+    /// through here.
+    mutex: std.Io.Mutex = .init,
+
+    /// Set once the child's pty reaches end of stream.
+    exited: std.atomic.Value(bool) = .init(false),
+
+    /// False once the pty has been closed. Closing it is what ends the
+    /// reader task's blocking read, so shutdown closes before it joins and
+    /// `destroy` must not close a second time.
+    pty_open: bool = true,
+
+    cols: u16,
+    rows: u16,
+
+    /// Image storage per region. Non-zero so kitty placements survive parsing
+    /// even though this cut does not draw them yet.
+    const kitty_storage_limit: usize = 16 * 1024 * 1024;
+
+    pub fn create(
+        alloc: Allocator,
+        io: std.Io,
+        argv: []const []const u8,
+        cols: u16,
+        rows: u16,
+    ) !*Region {
+        const self = try alloc.create(Region);
+        errdefer alloc.destroy(self);
+
+        self.* = .{
+            .io = io,
+            .alloc = alloc,
+            .pty = try .spawn(alloc, argv, .{ .cols = cols, .rows = rows }),
+            .terminal = undefined,
+            .stream = undefined,
+            .render_state = .empty,
+            .cols = cols,
+            .rows = rows,
+        };
+        errdefer self.pty.deinit(io);
+
+        self.terminal = try .init(io, alloc, .{
+            .cols = cols,
+            .rows = rows,
+            .kitty_image_storage_limit = kitty_storage_limit,
+        });
+        errdefer self.terminal.deinit(alloc);
+
+        // The handler borrows `&self.terminal`, which is why Region is pinned.
+        var handler: ghostty.TerminalStream.Handler = .init(&self.terminal);
+        handler.effects = .readonly;
+        // Terminal responses -- device attributes, cursor position, the kitty
+        // graphics and OSC 7501 query replies -- are produced by the library
+        // and handed back here. We route them to the child; we do not write
+        // them ourselves.
+        handler.effects.write_pty = writePty;
+        self.stream = .init(.{ .handler = handler, .allocator = alloc });
+
+        return self;
+    }
+
+    /// Kill the child and close the pty. Idempotent, and safe to call while
+    /// the reader task is blocked in a read: the close is what unblocks it.
+    pub fn closePty(self: *Region) void {
+        if (!self.pty_open) return;
+        self.pty_open = false;
+        self.pty.deinit(self.io);
+    }
+
+    pub fn destroy(self: *Region) void {
+        const alloc = self.alloc;
+        self.closePty();
+        self.render_state.deinit(alloc);
+        self.stream.deinit();
+        self.terminal.deinit(alloc);
+        alloc.destroy(self);
+    }
+
+    /// Recover the region from the handler pointer an effect is called with.
+    /// `stream.handler` is a by-value field of the stream, and `stream` is a
+    /// by-value field of the region, so two hops land on the region.
+    fn fromHandler(handler: *ghostty.TerminalStream.Handler) *Region {
+        const stream: *ghostty.TerminalStream = @fieldParentPtr("handler", handler);
+        return @fieldParentPtr("stream", stream);
+    }
+
+    fn writePty(handler: *ghostty.TerminalStream.Handler, bytes: []const u8) void {
+        const self = fromHandler(handler);
+        if (!self.pty_open) return;
+        // Called from inside a feed, which already holds the mutex.
+        self.pty.write(self.io, bytes) catch {};
+    }
+
+    /// Parse `bytes` as output from the child. Called from the reader task.
+    pub fn feed(self: *Region, bytes: []const u8) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.stream.nextSlice(bytes);
+    }
+
+    /// Resize the terminal, the pty, and so the child's idea of its window.
+    pub fn resize(self: *Region, cols: u16, rows: u16) !void {
+        if (cols == 0 or rows == 0 or !self.pty_open) return;
+        if (cols == self.cols and rows == self.rows) return;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        // Through the handler, not the terminal: the handler also emits the
+        // in-band size report when the child asked for one (mode 2048).
+        try self.stream.handler.resize(.{ .cols = cols, .rows = rows });
+        self.cols = cols;
+        self.rows = rows;
+        try self.pty.setSize(.{ .cols = cols, .rows = rows });
+    }
+
+    /// Encode a key press and send it to the child.
+    pub fn sendKey(self: *Region, key: vaxis.Key) !void {
+        if (!self.pty_open) return;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const opts: ghostty.input.KeyEncodeOptions = .fromTerminal(&self.terminal);
+        var buf: [128]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        ghostty.input.encodeKey(&writer, toKeyEvent(key), opts) catch |err| switch (err) {
+            // Only a long pre-edit overflows 128 bytes, and vaxis delivers
+            // pre-edit text as `text` which we pass through below instead.
+            error.WriteFailed => {
+                if (key.text) |text| try self.pty.write(self.io, text);
+                return;
+            },
+        };
+        const encoded = writer.buffered();
+        if (encoded.len == 0) return;
+        try self.pty.write(self.io, encoded);
+    }
+
+    /// Draw the region into `win`. `fa` is a per-frame allocator, used only
+    /// for graphemes that are not single-byte ASCII.
+    pub fn draw(self: *Region, win: vaxis.Window, fa: Allocator) !void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        try self.render_state.update(self.alloc, &self.terminal);
+        const state = &self.render_state;
+        // libvaxis keeps the previous frame's cells, and only the sidebar is
+        // cleared each frame, so an unchanged terminal needs no work at all.
+        // Without this the whole region is rewritten on every sidebar refresh.
+        if (state.dirty == .false) return;
+
+        const range = state.rowDataRange();
+        const row_dirty = state.row_data.items(.dirty);
+        const rows_slice = state.row_data.items(.cells);
+
+        var y: u16 = 0;
+        for (range.start..range.end) |i| {
+            defer y += 1;
+            if (y >= win.height) break;
+            // vaxis diffs cells itself, so a clean row still has to be written
+            // on a full redraw; only a partial update may skip clean rows.
+            if (state.dirty == .partial and !row_dirty[i]) continue;
+            row_dirty[i] = false;
+
+            const cells = rows_slice[i];
+            const raws = cells.items(.raw);
+            const styles = cells.items(.style);
+            const graphemes = cells.items(.grapheme);
+
+            var x: u16 = 0;
+            while (x < win.width) {
+                if (x >= raws.len) {
+                    win.writeCell(x, y, .{});
+                    x += 1;
+                    continue;
+                }
+                const raw = raws[x];
+                const style: ghostty.Style = if (raw.hasStyling()) styles[x] else .{};
+                const width = raw.gridWidth();
+                win.writeCell(x, y, .{
+                    .char = .{
+                        .grapheme = try grapheme(fa, raw, graphemes[x]),
+                        .width = width,
+                    },
+                    .style = toStyle(style, raw),
+                });
+                // A wide cell owns the following column; vaxis wants the
+                // trailing column left alone rather than overwritten.
+                x += width;
+            }
+        }
+        // Rows the child has not produced yet, when the window is taller than
+        // the terminal. Only reachable between a window resize and the
+        // matching terminal resize.
+        while (y < win.height) : (y += 1) {
+            for (0..win.width) |x| win.writeCell(@intCast(x), y, .{});
+        }
+        state.dirty = .false;
+    }
+
+    /// Where the child's cursor is within `win`, if it is visible.
+    pub fn cursor(self: *Region) ?struct { col: u16, row: u16 } {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const c = self.render_state.cursor;
+        if (!c.visible) return null;
+        const vp = c.viewport orelse return null;
+        return .{ .col = vp.x, .row = vp.y };
+    }
+
+    fn grapheme(fa: Allocator, raw: ghostty.Cell, cps: []const u21) ![]const u8 {
+        if (!raw.hasText()) return " ";
+        const cp = raw.codepoint();
+        if (raw.content_tag != .codepoint_grapheme) {
+            if (cp < 0x80) return &ascii[cp];
+            var buf: [4]u8 = undefined;
+            const n = try std.unicode.utf8Encode(cp, &buf);
+            return fa.dupe(u8, buf[0..n]);
+        }
+        var out: std.ArrayList(u8) = .empty;
+        var buf: [4]u8 = undefined;
+        const n = try std.unicode.utf8Encode(cp, &buf);
+        try out.appendSlice(fa, buf[0..n]);
+        for (cps) |extra| {
+            const k = try std.unicode.utf8Encode(extra, &buf);
+            try out.appendSlice(fa, buf[0..k]);
+        }
+        return out.items;
+    }
+
+    /// Map a ghostty style to a vaxis one. Colors are mapped by *source*, not
+    /// resolved to RGB: an unset color stays `.default` and a palette index
+    /// stays an index, so the region inherits the outer terminal's theme the
+    /// same way the sidebar does.
+    fn toStyle(style: ghostty.Style, raw: ghostty.Cell) vaxis.Cell.Style {
+        // A cell can carry its own background without a style, which is how a
+        // cleared region with a background color is stored.
+        const cell_bg: ?vaxis.Cell.Color = switch (raw.content_tag) {
+            .bg_color_palette => .{ .index = raw.content.color_palette.data },
+            .bg_color_rgb => .{ .rgb = .{
+                raw.content.color_rgb.r,
+                raw.content.color_rgb.g,
+                raw.content.color_rgb.b,
+            } },
+            else => null,
+        };
+        var out: vaxis.Cell.Style = .{
+            .fg = toColor(style.fg_color),
+            .bg = cell_bg orelse toColor(style.bg_color),
+            .ul = toColor(style.underline_color),
+            .ul_style = switch (style.flags.underline) {
+                .none => .off,
+                .single => .single,
+                .double => .double,
+                .curly => .curly,
+                .dotted => .dotted,
+                .dashed => .dashed,
+            },
+            .bold = style.flags.bold,
+            .dim = style.flags.faint,
+            .italic = style.flags.italic,
+            .blink = style.flags.blink,
+            .invisible = style.flags.invisible,
+            .strikethrough = style.flags.strikethrough,
+        };
+        // Swap here rather than setting vaxis `reverse`: the outer terminal
+        // would otherwise reverse again on top of its own default colors,
+        // which is not what the child asked for when it named both colors.
+        if (style.flags.inverse) {
+            const fg = out.fg;
+            out.fg = out.bg;
+            out.bg = fg;
+        }
+        return out;
+    }
+
+    fn toColor(c: ghostty.Style.Color) vaxis.Cell.Color {
+        return switch (c) {
+            .none => .default,
+            .palette => |idx| .{ .index = idx },
+            .rgb => |rgb| .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
+        };
+    }
+
+    /// Translate a libvaxis key press into the event libghostty-vt encodes
+    /// from. vaxis reports a codepoint plus text; ghostty wants a physical key
+    /// plus the text it produced, so named keys are mapped and everything
+    /// else rides on `utf8`/`unshifted_codepoint`.
+    fn toKeyEvent(key: vaxis.Key) ghostty.input.KeyEvent {
+        return .{
+            .action = .press,
+            .key = toKeyCode(key.codepoint),
+            .mods = .{
+                .shift = key.mods.shift,
+                .ctrl = key.mods.ctrl,
+                .alt = key.mods.alt,
+                .super = key.mods.super,
+                .caps_lock = key.mods.caps_lock,
+                .num_lock = key.mods.num_lock,
+            },
+            // vaxis has already applied shift to produce `text`, so the
+            // shift that produced it is consumed and must not be encoded
+            // again as a modifier.
+            .consumed_mods = .{ .shift = key.mods.shift and key.text != null },
+            .utf8 = key.text orelse "",
+            .unshifted_codepoint = @intCast(key.codepoint & 0x1fffff),
+        };
+    }
+
+    fn toKeyCode(cp: u21) ghostty.input.Key {
+        return switch (cp) {
+            // Named control keys, which vaxis gives as C0 or kitty codepoints.
+            vaxis.Key.tab => .tab,
+            vaxis.Key.enter => .enter,
+            vaxis.Key.escape => .escape,
+            vaxis.Key.space => .space,
+            vaxis.Key.backspace => .backspace,
+            vaxis.Key.insert => .insert,
+            vaxis.Key.delete => .delete,
+            vaxis.Key.left => .arrow_left,
+            vaxis.Key.right => .arrow_right,
+            vaxis.Key.up => .arrow_up,
+            vaxis.Key.down => .arrow_down,
+            vaxis.Key.page_up => .page_up,
+            vaxis.Key.page_down => .page_down,
+            vaxis.Key.home => .home,
+            vaxis.Key.end => .end,
+            vaxis.Key.caps_lock => .caps_lock,
+            vaxis.Key.scroll_lock => .scroll_lock,
+            vaxis.Key.num_lock => .num_lock,
+            vaxis.Key.print_screen => .print_screen,
+            vaxis.Key.pause => .pause,
+            vaxis.Key.menu => .context_menu,
+            vaxis.Key.f1 => .f1,
+            vaxis.Key.f2 => .f2,
+            vaxis.Key.f3 => .f3,
+            vaxis.Key.f4 => .f4,
+            vaxis.Key.f5 => .f5,
+            vaxis.Key.f6 => .f6,
+            vaxis.Key.f7 => .f7,
+            vaxis.Key.f8 => .f8,
+            vaxis.Key.f9 => .f9,
+            vaxis.Key.f10 => .f10,
+            vaxis.Key.f11 => .f11,
+            vaxis.Key.f12 => .f12,
+            // Letters and digits, so ctrl and alt combinations encode from a
+            // physical key rather than from text alone.
+            'a'...'z' => @enumFromInt(
+                @intFromEnum(ghostty.input.Key.key_a) + (cp - 'a'),
+            ),
+            'A'...'Z' => @enumFromInt(
+                @intFromEnum(ghostty.input.Key.key_a) + (cp - 'A'),
+            ),
+            '0'...'9' => @enumFromInt(
+                @intFromEnum(ghostty.input.Key.digit_0) + (cp - '0'),
+            ),
+            '`', '~' => .backquote,
+            '-', '_' => .minus,
+            '=', '+' => .equal,
+            '[', '{' => .bracket_left,
+            ']', '}' => .bracket_right,
+            '\\', '|' => .backslash,
+            ';', ':' => .semicolon,
+            '\'', '"' => .quote,
+            ',', '<' => .comma,
+            '.', '>' => .period,
+            '/', '?' => .slash,
+            else => .unidentified,
+        };
+    }
+};
+
+test "key translation names the physical key behind a codepoint" {
+    const R = Region;
+    try std.testing.expectEqual(ghostty.input.Key.key_a, R.toKeyCode('a'));
+    try std.testing.expectEqual(ghostty.input.Key.key_a, R.toKeyCode('A'));
+    try std.testing.expectEqual(ghostty.input.Key.key_z, R.toKeyCode('z'));
+    try std.testing.expectEqual(ghostty.input.Key.digit_0, R.toKeyCode('0'));
+    try std.testing.expectEqual(ghostty.input.Key.digit_9, R.toKeyCode('9'));
+    try std.testing.expectEqual(ghostty.input.Key.arrow_up, R.toKeyCode(vaxis.Key.up));
+    try std.testing.expectEqual(ghostty.input.Key.f12, R.toKeyCode(vaxis.Key.f12));
+    try std.testing.expectEqual(ghostty.input.Key.enter, R.toKeyCode(vaxis.Key.enter));
+    // Shift does not change which key is pressed.
+    try std.testing.expectEqual(ghostty.input.Key.minus, R.toKeyCode('_'));
+    try std.testing.expectEqual(ghostty.input.Key.slash, R.toKeyCode('?'));
+}
+
+test "input encoding produces the bytes a child expects" {
+    var buf: [64]u8 = undefined;
+    const encode = struct {
+        fn call(out: []u8, key: vaxis.Key, opts: ghostty.input.KeyEncodeOptions) ![]const u8 {
+            var writer: std.Io.Writer = .fixed(out);
+            try ghostty.input.encodeKey(&writer, Region.toKeyEvent(key), opts);
+            return writer.buffered();
+        }
+    }.call;
+
+    // A plain letter is its own text.
+    try std.testing.expectEqualStrings("a", try encode(&buf, .{
+        .codepoint = 'a',
+        .text = "a",
+    }, .{}));
+    // ctrl+c is the C0 control, which is how a shell sees an interrupt.
+    try std.testing.expectEqualStrings("\x03", try encode(&buf, .{
+        .codepoint = 'c',
+        .mods = .{ .ctrl = true },
+    }, .{}));
+    // tmux prefix, so a tmux running in the region is reachable.
+    try std.testing.expectEqualStrings("\x02", try encode(&buf, .{
+        .codepoint = 'b',
+        .mods = .{ .ctrl = true },
+    }, .{}));
+    // Arrows follow the cursor key mode the child selected, which is the
+    // reason the encoder reads options off the terminal rather than guessing.
+    try std.testing.expectEqualStrings("\x1b[A", try encode(&buf, .{
+        .codepoint = vaxis.Key.up,
+    }, .{ .cursor_key_application = false }));
+    try std.testing.expectEqualStrings("\x1bOA", try encode(&buf, .{
+        .codepoint = vaxis.Key.up,
+    }, .{ .cursor_key_application = true }));
+}
