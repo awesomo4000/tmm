@@ -653,6 +653,58 @@ Same version and fingerprint as the tarball vendored here. Ours is the tarball
 plus a relative `url`, keeping 4 MB in git rather than 16 MB of tree; theirs
 avoids an unpack step. Either is fine.
 
+### Built 10/13/2026: `tmm --shell`
+
+`src/region.zig` is the recipe above, realised. `--shell` splits the window
+into the sidebar, a one-column divider, and one `Region`; without it tmm is
+byte-for-byte what it was, which is the point of the flag. `--split cols` sets
+the starting width. F12 moves focus; dragging the divider resizes both sides.
+Covered by `tests/split_shell.py`.
+
+Departures from the recipe, each for a reason:
+
+- **Colors are mapped by source, not resolved to RGB.** `style.fg(...)` and
+  `style.bg(...)` resolve against libghostty-vt's *own* default palette, which
+  would pin the region to ghostty colors on a terminal themed otherwise.
+  Reading `style.fg_color` / `style.bg_color` directly instead keeps `.none`
+  as libvaxis `.default` and a palette index as an index, so the region
+  inherits the user's theme exactly as the sidebar does.
+- **`inverse` swaps fg and bg rather than setting libvaxis `reverse`.** The
+  outer terminal would otherwise reverse a second time, against its own
+  defaults instead of the colors the child named.
+- **Clean rows are only skipped when `dirty == .partial`.** libvaxis keeps its
+  own previous-frame screen, so a `.full` redraw has to write every row.
+- **No trailing-blank trim.** libvaxis diffs cells itself, so writing the
+  blanks costs nothing on the wire and keeps the region from retaining stale
+  cells after a resize.
+
+### Two things the recipe did not cover, found by building it
+
+- **The child needs a controlling terminal, not just a pty on its stdio.**
+  `std.process.spawn` cannot do this, so `src/pty.zig` now forks and execs by
+  hand to call `setsid` and `TIOCSCTTY` in between. Without it `TIOCSWINSZ` on
+  the master delivers no SIGWINCH and the child never learns it was resized —
+  which makes a draggable divider pointless — and a shell reports "no job
+  control in this shell". Verified: after a drag the shell itself reports the
+  region's exact size.
+- **`std.c.T` on darwin defines `IOCGWINSZ` and nothing else.** `TIOCSWINSZ`
+  and `TIOCSCTTY` are computed in `pty.zig` the way std computes its one
+  neighbour.
+
+Rendering assertions need a screen model, not a search of the captured bytes:
+libvaxis emits only the cells that changed, each after a cursor move, so a line
+reading `F12 sidebar` arrives as `F12`, `sid`, `bar`. `tests/screen.py` replays
+the cursor and is what every display assertion goes through.
+
+### Not yet, in the region
+
+- Mouse events are not forwarded to the child; clicking the region only focuses
+  it. `vt.input.encodeMouse` is there for it.
+- Kitty graphics are parsed and stored (the storage limit is set) but not drawn.
+  That is the Phase 4 bridge.
+- Scrollback is not reachable; the region shows the viewport only.
+- One region only. Per-pane regions and compositing are Phase 3.
+
 ---
 
 ## 7. References

@@ -26,6 +26,21 @@ The default launch lists the default server and discovers other running sockets 
 
 `-L` or `-S` selects the initial server and disables automatic discovery, useful for isolated setups. Repeat `--server` or `--server-path` to add entries. Clicking a server clears the previous display target before loading its displays and sessions.
 
+## Split mode
+
+By default tmm is the whole window, meant to sit beside a tmux client in another window. `--shell` instead splits its own window: the sidebar on the left, a one-column divider, and a shell on the right.
+
+```sh
+./zig-out/bin/tmm --shell
+./zig-out/bin/tmm --shell --split 36
+```
+
+The right side is an ordinary shell on an ordinary pty, with job control and live resizing, so `tmux attach` works in it exactly as in any terminal. tmm is not a multiplexer here; it draws both sides into one window so the sidebar costs no second window and no second click to focus.
+
+`--split` sets the starting sidebar width in columns and implies `--shell`; without it the sidebar starts at its content width. Drag the divider to resize, which resizes the shell with it. F12 moves keyboard focus between the sidebar and the shell, and clicking either side focuses it. The cursor shows which side has the keyboard. With focus on the shell, every key goes to it, so `q` quits tmm only from the sidebar.
+
+Mouse events are not forwarded into the shell yet, and images are parsed but not drawn. Without `--shell` nothing changes: no pty is opened and no terminal is created.
+
 ## Navigation
 
 Hover highlights an item; click selects it. Wheel scrolling moves the list without activating anything. `j`/`k` or arrows move among actionable rows; Enter activates. `q` or Ctrl-C exits.
@@ -71,11 +86,11 @@ zig build test
 python3 tests/integration.py
 ```
 
-`--dump` emits a read-only JSON snapshot without opening the UI. Build before running integration tests. Tests use unique sockets and disposable files under `/tmp`, never the default server. They cover shell and agent pane navigation, client isolation, sidebar mouse input, blink, unusual names and paths, resizing, disconnection, switching servers, failures, and exit.
+`--dump` emits a read-only JSON snapshot without opening the UI. Build before running integration tests. Tests use unique sockets and disposable files under `/tmp`, never the default server. They cover shell and agent pane navigation, client isolation, sidebar mouse input, blink, unusual names and paths, resizing, disconnection, switching servers, failures, and exit. `tests/split_shell.py` covers `--shell`: the divider geometry, focus, keys reaching the child, the child's output reaching the display, a real `tmux attach` inside the region at the region's exact size, and divider drags resizing both sides. Display assertions go through `tests/screen.py`, which replays the cursor, because libvaxis emits only the cells that changed and a rendered line does not appear contiguously in the output bytes.
 
 ## Implementation and remaining work
 
-`src/sidebar.zig` builds sidebar rows and discovers conventional server sockets. `src/main.zig` owns rendering and interaction. `src/backend.zig` polls tmux on a worker and handles navigation requests. `src/model.zig` handles length-prefixed records, client identity, and agent detection.
+`src/sidebar.zig` builds sidebar rows and discovers conventional server sockets. `src/main.zig` owns rendering and interaction. `src/backend.zig` polls tmux on a worker and handles navigation requests. `src/model.zig` handles length-prefixed records, client identity, and agent detection. For `--shell`, `src/pty.zig` opens a pty and starts a child on it as its controlling terminal, and `src/region.zig` pairs a libghostty-vt terminal with that pty and blits its grid into a libvaxis window.
 
 All requests stay within the selected server. Display identity includes tty/name, PID, and creation timestamp. Disconnects require explicit selection again. Failed refreshes retain the previous snapshot and display the tmux diagnostic.
 
