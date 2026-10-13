@@ -50,7 +50,8 @@ pure projection of tmux state.
    (porting work). Only control mode delivers that without patching tmux.
 
 3. **libghostty-vt per pane + libvaxis for output.** libghostty-vt is a Zig
-   module (escape parsing + terminal/screen state, no rendering, no input). It
+   module (escape parsing, terminal/screen state, input *encoding*, and a
+   render-state API for custom renderers; it does no drawing itself). It
    fully implements the kitty graphics protocol and exposes image data to
    embedders. libvaxis does the cell drawing tmm already uses.
 
@@ -136,9 +137,11 @@ anchors are from that tree.
   read Ghostling's renderer for the actual API before writing the image bridge.
 - **Sixel is not supported** by ghostty/libghostty and won't be. Not needed here
   (kitty is the target; the user's terminal is ghostty).
-- libghostty-vt (the `ghostty-vt` Zig module, upstream PR #8840): escape parsing
-  + terminal state + screen state only; **no rendering, no input**. API is
-  "extremely not stable" — **pin a revision** in build.zig.zon and expect churn.
+- libghostty-vt (the `ghostty-vt` Zig module): escape parsing, terminal and
+  screen state, **input encoding**, and a **render-state API built for custom
+  renderers**. It does no drawing. An earlier draft said "no rendering, no
+  input"; that was wrong on both counts — see section 8. API is "extremely not
+  stable", so **pin a revision** and expect churn.
 - **Kitty in the compositor is never transparent passthrough.** tmm parses the
   pane's kitty via libghostty-vt, owns the placement, and re-emits it positioned
   + clipped to the pane rect to the real terminal. The real terminal must be
@@ -574,6 +577,81 @@ still owns the grid blit, focus and input routing.
   wrapper+placeholder route if you deliberately keep the attach method.
 - **Add libghostty-vt now** — yes, Phase 3, pinned to a revision (API is
   "extremely not stable").
+
+---
+
+## 8. The terminal region: verified integration recipe
+
+Established 10/13/2026 by reading
+`~/src/quicktui/vendor/opentui/packages/native/src/embedded-terminal`, which
+embeds libghostty-vt for the same purpose, and checking every API against the
+copy vendored here. This supersedes earlier guesses about what libghostty-vt
+does and does not provide.
+
+### Three objects per terminal
+
+```zig
+terminal: vt.Terminal          // the state
+stream: vt.TerminalStream      // the parser; owns a handler
+render_state: vt.RenderState   // the readout, with dirty tracking
+```
+
+- **Feed**: `stream.nextSlice(bytes)` with raw bytes straight off the pty. The
+  handler carries a `semantic_failure` flag to check after each feed.
+- **Resize**: `stream.handler.resize(.{ .cols, .rows })` — through the handler,
+  not the terminal.
+- **Render**: `render_state.update(alloc, &terminal)`, then read `row_data`.
+
+### Terminal responses come back through the handler
+
+The handler receives data the terminal owes the *program*: device attribute
+replies, cursor position reports, and the kitty and OSC 7501 query responses
+that section 4 said tmm would have to synthesise. opentui routes them out
+through a `writePty(handler, data)` callback. **We route them; we do not
+generate them.** For a local pty that means writing to the master; in the
+compositor it means `send-keys -H` to the pane.
+
+### Input encoding is provided
+
+`vt.input` exports `encodeKey`, `encodeMouse`, `encodePaste` (with
+`isSafePaste` for bracketed-paste safety) and `encodeFocus`, plus `Key`,
+`KeyEvent`, `KeyMods` and size constants. Modifier handling, the kitty keyboard
+protocol and SGR mouse encoding do not need writing.
+
+### The blit, with dirty tracking
+
+```zig
+if (state.dirty == .false) return;             // nothing changed this frame
+const rows = state.row_data.slice();
+const row_dirty = rows.items(.dirty);
+const row_cells = rows.items(.cells);
+for (0..state.rows) |y| {
+    if (state.dirty == .partial and !row_dirty[y]) continue;
+    // ... draw row ...
+    row_dirty[y] = false;                      // the consumer clears row dirt
+}
+state.dirty = .false;                          // and the global flag
+```
+
+Per row, over `cells.items(.raw)`, `.grapheme` and `.style`:
+
+- `raw.codepoint()`, `raw.gridWidth()` (wide cells), `raw.hasStyling()`
+- `style.fg(.{ .default = colors.foreground, .palette = &colors.palette })`
+- `style.bg(&raw, &colors.palette) orelse colors.background`
+- swap fg and bg when `style.flags.inverse`
+- text is `raw.codepoint()` followed by each codepoint in `grapheme`
+- trailing blanks are trimmed by scanning back for `raw.codepoint() != 0`
+
+Per-row dirty flags pair well with libvaxis's own cell diffing: only changed
+rows are walked, and libvaxis then emits only changed cells.
+
+### How opentui vendors it, for comparison
+
+A `.path` dependency on an unpacked tree (`zig-deps/ghostty`, 16 MB) with
+`.lazy = true`, transitive deps vendored as paths too, for a hermetic build.
+Same version and fingerprint as the tarball vendored here. Ours is the tarball
+plus a relative `url`, keeping 4 MB in git rather than 16 MB of tree; theirs
+avoids an unpack step. Either is fine.
 
 ---
 
