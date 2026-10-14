@@ -20,6 +20,7 @@ run = [
   "python3 tests/control_mode.py",
   "python3 tests/reconcile_live.py",
   "python3 tests/measure_queries.py",
+  "python3 tests/follow.py",
   "python3 tests/split_shell.py",
 ]
 

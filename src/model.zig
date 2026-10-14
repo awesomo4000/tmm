@@ -42,7 +42,14 @@ pub const Client = struct {
     name: []const u8,
     pid: []const u8,
     created: []const u8,
+    /// Where this client currently is. tmux expands these per client when
+    /// `list-clients` formats them, which is the only way to ask: a
+    /// `display-message -c` reports the server's current pane, not this
+    /// client's, so it answers the same for every client. See backend.clients.
     session: []const u8,
+    window: []const u8 = "",
+    pane: []const u8 = "",
+    cwd: []const u8 = "",
     terminal: ?[]const u8 = null,
     pub fn same(a: Client, b: Client) bool {
         return std.mem.eql(u8, a.name, b.name) and std.mem.eql(u8, a.pid, b.pid) and std.mem.eql(u8, a.created, b.created);
