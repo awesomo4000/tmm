@@ -71,6 +71,20 @@ def main():
                         '#{client_control_mode}|#{client_name}|#{session_name}').splitlines()
             return dict(r.split('|', 2)[1:] for r in rows if r.startswith('0|'))
 
+        def where(client):
+            # Where one client currently is. `display-message -c` looks like
+            # the way to ask, but -c only selects the client for client
+            # formats: the target the formats expand against is the server's
+            # current pane, so every client answers the same and the answer
+            # does not move when a client navigates. list-clients expands per
+            # client. tmm had the same bug; see backend.clients.
+            for row in tmux('list-clients', '-F',
+                            '#{client_name}|#{pane_id}').splitlines():
+                name, _, pane = row.partition('|')
+                if name == client:
+                    return pane
+            raise AssertionError(('client not attached', client))
+
         def click(row, col=3):
             os.write(ui_fd, f'\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m'.encode())
             pump()
@@ -131,7 +145,7 @@ def main():
             os.write(ui_fd, b'\x1b[<0;3;24m')
             pump(1.2)
             assert sessions() == {first: 'beta', second: 'alpha'}, sessions()
-            shown = tmux('display-message', '-p', '-c', first, '#{pane_id}').strip()
+            shown = where(first)
             assert shown == agent, (shown, agent)
             # Ordinary shell panes are also listed and navigate to their exact pane.
             shell_pane = next(p for p in initial['panes'] if not p['agent'])
@@ -139,16 +153,16 @@ def main():
             click(23)  # the pane directory is part of the clickable entry
             pump(1.2)
             assert sessions() == {first: 'beta', second: 'alpha'}
-            assert tmux('display-message', '-p', '-c', first, '#{pane_id}').strip() == shell_pane['id']
+            assert where(first) == shell_pane['id']
             click(24)
             pump(1.2)
-            assert tmux('display-message', '-p', '-c', first, '#{pane_id}').strip() == agent
+            assert where(first) == agent
             split = tmux('split-window', '-d', '-t', agent, '-P', '-F', '#{pane_id}', '-c', root).strip()
             pump(1.2)
             marker = len(terminal_output[ui_fd])
             click(27)  # directory beneath the new split's row
             pump(1.2)
-            assert tmux('display-message', '-p', '-c', first, '#{pane_id}').strip() == split
+            assert where(first) == split
             assert sessions()[second] == 'alpha'
             assert '▸'.encode() in terminal_output[ui_fd][marker:], 'current-pane marker did not move on click'
             marker = len(terminal_output[ui_fd])
@@ -157,7 +171,7 @@ def main():
             assert '▸'.encode() in terminal_output[ui_fd][marker:], 'current-pane marker did not follow native navigation'
             click(24)
             pump(1.2)
-            assert tmux('display-message', '-p', '-c', first, '#{pane_id}').strip() == agent
+            assert where(first) == agent
             tmux('kill-pane', '-t', split)
             pump()
             pane_dir = root + '/pane-current-directory'
@@ -247,7 +261,7 @@ def main():
             # an inline field, supports cancellation and duplicate-name retry,
             # and switches only the selected display into an independent session.
             before_create = sessions()
-            source_pane = tmux('display-message', '-p', '-c', first, '#{pane_id}').strip()
+            source_pane = where(first)
             source_cwd = next(p['cwd'] for p in snapshot()['panes'] if p['id'] == source_pane)
             source_windows = tmux('list-windows', '-t', '=beta renamed é', '-F', '#{window_id}')
             marker = len(terminal_output[ui_fd])
@@ -315,7 +329,17 @@ def main():
             for pid, fd in children:
                 try:
                     os.kill(pid, signal.SIGKILL)
-                    os.waitpid(pid, 0)
+                    # Bounded, because a blocking waitpid here hangs the whole
+                    # run and takes any pending assertion failure with it: the
+                    # suite then looks like a timeout with no output at all.
+                    # Cleanup must never be the thing that hides the result.
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        if os.waitpid(pid, os.WNOHANG)[0]:
+                            break
+                        time.sleep(0.05)
+                    else:
+                        print('cleanup: pid', pid, 'did not exit after SIGKILL')
                 except (ProcessLookupError, ChildProcessError):
                     pass
                 os.close(fd)

@@ -230,12 +230,20 @@ fn query(connection: *Connection, args: []const []const u8) ![]u8 {
     connection.server.allocator.free(result.stderr);
     return result.stdout;
 }
+/// Attached displays and, for each, where it currently is.
+///
+/// The position fields have to come from here. `display-message -c <client>`
+/// looks like the way to ask where one client is, but `-c` only selects the
+/// client for client-specific formats: the target the formats expand against
+/// is the server's current pane, so every client gets the same answer and it
+/// does not move when a client navigates. `list-clients -F` expands per client
+/// and does follow navigation.
 pub fn clients(server: *Connection, alloc: Allocator) ![]m.Client {
-    const data = try queryRead(server, &.{ "list-clients", "-F", m.format(&.{ "client_name", "client_pid", "client_created", "session_id", "client_control_mode" }) });
-    const rows = try m.records(5, alloc, data);
+    const data = try queryRead(server, &.{ "list-clients", "-F", m.format(&.{ "client_name", "client_pid", "client_created", "session_id", "client_control_mode", "window_id", "pane_id", "pane_current_path" }) });
+    const rows = try m.records(8, alloc, data);
     var result: std.ArrayList(m.Client) = .empty;
     for (rows) |r| if (std.mem.eql(u8, r[4], "0")) {
-        try result.append(alloc, .{ .name = r[0], .pid = r[1], .created = r[2], .session = r[3] });
+        try result.append(alloc, .{ .name = r[0], .pid = r[1], .created = r[2], .session = r[3], .window = r[5], .pane = r[6], .cwd = r[7] });
     };
     return result.toOwnedSlice(alloc);
 }
@@ -273,16 +281,19 @@ pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Reque
                 _ = try query(server, &.{ "select-window", "-t", window_target });
                 _ = try query(server, &.{ "select-pane", "-t", pane });
             }
-            const data = try queryRead(server, &.{ "display-message", "-c", t.client.name, "-p", m.format(&.{ "session_id", "window_id", "pane_id", "pane_current_path" }) });
-            const rows = try m.records(4, a, data);
-            if (rows.len != 1) return error.MalformedContext;
-            snapshot.context = try std.fmt.allocPrint(a, "{s} {s} {s}", .{ rows[0][0], rows[0][1], rows[0][2] });
-            snapshot.cwd = rows[0][3];
-            snapshot.focused_pane = rows[0][2];
-            // Reflect a just-completed switch in this snapshot too.
-            for (snapshot.clients) |*c| if (c.same(t.client)) {
-                c.session = rows[0][0];
+            // Re-read the client list when this pass moved the display, so
+            // the snapshot describes where it ended up rather than where it
+            // was before. Without a navigation the list read above is current.
+            if (t.session != null or t.pane != null) snapshot.clients = try clients(server, a);
+            var located = false;
+            for (snapshot.clients) |c| if (c.same(t.client)) {
+                snapshot.context = try std.fmt.allocPrint(a, "{s} {s} {s}", .{ c.session, c.window, c.pane });
+                snapshot.cwd = c.cwd;
+                snapshot.focused_pane = c.pane;
+                located = true;
+                break;
             };
+            if (!located) return error.MalformedContext;
         }
     }
     const session_data = try queryRead(server, &.{ "list-sessions", "-F", m.format(&.{ "session_id", "session_name", "session_path" }) });
