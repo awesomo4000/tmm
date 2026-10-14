@@ -156,6 +156,54 @@ def main():
                                          '#{pane_id}').strip()
             settle(row_of('in-alpha'), 'marker after native switch-client')
 
+            # An agent in a session no client is attached to is still watched.
+            # Agent capture is skipped for a pane that produced no output, and
+            # %output only arrives for the session the control client attached
+            # to, so a pane anywhere else used to keep its first verdict for
+            # the rest of the run while a fresh --dump saw the truth.
+            fake = Path(root) / 'screen.txt'
+            program = Path(root) / 'screen.py'
+            program.write_text(
+                "import pathlib,sys,time\n"
+                "p=pathlib.Path(sys.argv[1])\nold=None\n"
+                "while True:\n text=p.read_text()\n"
+                " if text!=old:\n"
+                "  sys.stdout.write('\\x1b[2J\\x1b[H'+text);sys.stdout.flush();old=text\n"
+                " time.sleep(.05)\n")
+            quiet = '\u203a Ask Codex\n50% context left\n'
+            fake.write_text(quiet)
+            # beta_second is in beta; the client and so the control client are
+            # on alpha by now, which is the case that used to freeze.
+            tmux('set-option', '-p', '-t', beta_second, '@agent_hint', 'codex')
+            tmux('respawn-pane', '-k', '-t', beta_second, 'python3',
+                 str(program), str(fake))
+
+            def glyph():
+                """The status glyph on the watched agent's row, if drawn."""
+                for line in screen.lines():
+                    if 'codex' in line:
+                        parts = line.strip().split()
+                        return parts[0] if parts else ''
+                return None
+
+            def wait_glyph(want, what, limit=10):
+                deadline = time.monotonic() + limit
+                while time.monotonic() < deadline:
+                    pump(0.3)
+                    if glyph() == want:
+                        return
+                raise AssertionError((what, 'glyph is', glyph(),
+                                      'expected', want, screen.lines()))
+
+            # Give the first verdict time to land and its capture budget time
+            # to run out, which is the state the freeze showed up in.
+            wait_glyph('\u25cb', 'agent in another session never got a verdict')
+            pump(2.0)
+            fake.write_text('\u2022 Working (2s \u2022 esc to interrupt)\n' + quiet)
+            wait_glyph('\u25cf', 'working was not shown for an agent in another session')
+            fake.write_text(quiet)
+            wait_glyph('\u2713', 'completion was not shown for an agent in another session')
+
             print('ok')
         finally:
             subprocess.run(['tmux', '-S', socket, 'kill-server'], capture_output=True)

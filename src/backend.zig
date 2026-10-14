@@ -300,10 +300,10 @@ pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Reque
     const session_rows = try m.records(3, a, session_data);
     snapshot.sessions = try a.alloc(m.Session, session_rows.len);
     for (session_rows, snapshot.sessions) |r, *s| s.* = .{ .id = r[0], .name = r[1], .path = r[2] };
-    const pane_data = try queryRead(server, &.{ "list-panes", "-a", "-F", m.format(&.{ "session_id", "window_id", "pane_id", "pane_current_path", "pane_current_command", "@agent_hint", "@agent_state", "@agent_status_text", "pane_pid", "@agent_session_id" }) });
-    const pane_rows = try m.records(10, a, pane_data);
+    const pane_data = try queryRead(server, &.{ "list-panes", "-a", "-F", m.format(&.{ "session_id", "window_id", "pane_id", "pane_current_path", "pane_current_command", "@agent_hint", "@agent_state", "@agent_status_text", "pane_pid", "@agent_session_id", "window_activity" }) });
+    const pane_rows = try m.records(11, a, pane_data);
     snapshot.panes = try a.alloc(m.Pane, pane_rows.len);
-    for (pane_rows, snapshot.panes) |r, *p| p.* = .{ .session = r[0], .window = r[1], .id = r[2], .cwd = r[3], .command = r[4], .agent = r[5], .state = r[6], .status = r[7] };
+    for (pane_rows, snapshot.panes) |r, *p| p.* = .{ .session = r[0], .window = r[1], .id = r[2], .cwd = r[3], .command = r[4], .agent = r[5], .state = r[6], .status = r[7], .activity = r[10] };
     // One process table per refresh, never a shell command or pane-output scrape.
     const process_result = std.process.run(a, server.server.io, .{
         .argv = &.{ "ps", "-axo", "pid=,ppid=,comm=" },
@@ -348,7 +348,7 @@ pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Reque
         // settled: capture plus title is two queries and dominates a pass.
         if (agents) |cache| {
             const had_output = if (model) |mo| mo.hadOutput(pane.id) else true;
-            if (!cache.needsCapture(pane.id, had_output)) {
+            if (!cache.needsCapture(pane.id, had_output, pane.activity)) {
                 if (cache.cached(pane.id)) |v| {
                     pane.state = @tagName(v.state);
                     pane.status_source = "screen";
@@ -365,7 +365,7 @@ pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Reque
             const title_data = queryRead(server, &.{ "display-message", "-p", "-t", pane.id, "#{pane_title}" }) catch "";
             const result = status.classify(pane.agent, screen, std.mem.trim(u8, title_data, "\r\n"));
             try detections.put(pane.id, result);
-            if (agents) |cache| cache.record(pane.id, result);
+            if (agents) |cache| cache.record(pane.id, result, pane.activity);
             break :blk result;
         };
         pane.state = @tagName(verdict.state);
@@ -584,6 +584,9 @@ pub const AgentCache = struct {
         verdict: status.Verdict,
         /// Remaining captures owed; zero means the pane has settled.
         budget: u8,
+        /// `window_activity` when this verdict was taken, or null when tmux
+        /// did not report one. A change means the window produced output.
+        activity: ?u64,
     };
 
     pub fn init(alloc: Allocator) AgentCache {
@@ -597,18 +600,32 @@ pub const AgentCache = struct {
     }
 
     /// Whether this pane must be captured this pass.
-    pub fn needsCapture(self: *AgentCache, pane: []const u8, had_output: bool) bool {
+    ///
+    /// `had_output` comes from `%output` on the control stream, which is exact
+    /// and per pane but only arrives for the session our control client is
+    /// attached to. A pane in any other session would otherwise never be
+    /// captured again once its budget ran out, freezing its status for the
+    /// rest of the run. `window_activity` is reported for every window
+    /// whatever any client is looking at, so it covers the rest. It is a
+    /// one-second stamp for the whole window, which only makes this capture
+    /// more often than strictly needed.
+    pub fn needsCapture(self: *AgentCache, pane: []const u8, had_output: bool, activity: []const u8) bool {
+        const stamp = parseActivity(activity);
         const existing = self.entries.getPtr(pane) orelse return true;
-        if (had_output) {
+        if (had_output or existing.activity == null or stamp == null or
+            existing.activity.? != stamp.?)
+        {
             existing.budget = samples_after_output;
             return true;
         }
         return existing.budget > 0;
     }
 
-    pub fn record(self: *AgentCache, pane: []const u8, verdict: status.Verdict) void {
+    pub fn record(self: *AgentCache, pane: []const u8, verdict: status.Verdict, activity: []const u8) void {
+        const stamp = parseActivity(activity);
         if (self.entries.getPtr(pane)) |e| {
             e.verdict = verdict;
+            e.activity = stamp;
             if (e.budget > 0) e.budget -= 1;
             return;
         }
@@ -616,7 +633,16 @@ pub const AgentCache = struct {
         self.entries.put(key, .{
             .verdict = verdict,
             .budget = samples_after_output - 1,
+            .activity = stamp,
         }) catch self.alloc.free(key);
+    }
+
+    /// tmux reports `window_activity` as a unix time, and as an empty string
+    /// for a window that has produced nothing yet. Null means unknown, which
+    /// callers treat as a reason to capture rather than a reason to skip.
+    fn parseActivity(activity: []const u8) ?u64 {
+        if (activity.len == 0) return null;
+        return std.fmt.parseInt(u64, activity, 10) catch null;
     }
 
     pub fn cached(self: *AgentCache, pane: []const u8) ?status.Verdict {
@@ -736,22 +762,27 @@ pub fn controlWorker(io: std.Io, alloc: Allocator, opts: tmux.ServerOptions, sha
     }
 }
 
-fn attachedClient(server: *Connection, expected: m.Client) !void {
-    for (try clients(server, server.server.allocator)) |client| if (client.same(expected)) return;
+/// Confirm the display is still attached, and report where it is. The caller
+/// needs both, and taking them from one read means the check and the position
+/// cannot disagree.
+fn attachedClient(server: *Connection, expected: m.Client) !m.Client {
+    for (try clients(server, server.server.allocator)) |client| if (client.same(expected)) return client;
     return error.SelectedDisplayDisconnected;
 }
 fn createSession(server: *Connection, edit: Rename, created: *bool) !void {
     const display = edit.display orelse return error.SelectDisplayFirst;
-    try attachedClient(server, display.client);
-    const context = try query(server, &.{ "display-message", "-p", "-c", display.client.name, m.format(&.{"pane_current_path"}) });
-    const records = try m.records(1, server.server.allocator, context);
-    if (records.len != 1 or records[0][0].len == 0) return error.MissingPaneDirectory;
-    const output = try query(server, &.{ "new-session", "-d", "-P", "-F", "#{session_id}", "-s", edit.name, "-n", edit.name, "-c", records[0][0] });
+    // The new session starts in the directory of the pane the display is on.
+    // That path comes from the client listing for the same reason the marker
+    // does: `display-message -c` reports the server's current pane, not this
+    // client's. See `clients`.
+    const current = try attachedClient(server, display.client);
+    if (current.cwd.len == 0) return error.MissingPaneDirectory;
+    const output = try query(server, &.{ "new-session", "-d", "-P", "-F", "#{session_id}", "-s", edit.name, "-n", edit.name, "-c", current.cwd });
     // Creation is committed even if the display disconnects before switching.
     // Close the editor on that partial success so retry cannot duplicate it.
     created.* = true;
     const id = std.mem.trim(u8, output, "\r\n");
-    try attachedClient(server, display.client);
+    _ = try attachedClient(server, display.client);
     _ = try query(server, &.{ "switch-client", "-c", display.client.name, "-t", id });
 }
 
