@@ -722,6 +722,49 @@ The end-to-end assertion is on the server, not the display: with `mouse on`, a
 click in the region moves the attached client's pane and the wheel puts it in
 copy mode. That holds whatever the blit looks like.
 
+### Fixed 10/15/2026: a bare shift press inserted a blank
+
+Reported as "a space is inserted whenever I hit shift" while typing `:q!` in
+vi. The character was not a space: it was U+E061, which renders blank in most
+fonts. 57441 is the kitty keycode for left shift.
+
+A terminal that speaks the kitty keyboard protocol reports modifier keys
+themselves, and libvaxis asks for `report_all_as_ctl_seqs`, so tmm sees a key
+press for shift alone. `input.encodeKey` then re-encodes it from the codepoint
+whenever the child has *any* kitty flag set, so vi received `CSI 57441;2 u`.
+vi had turned on disambiguation only, which does not include modifier reports,
+so it decoded the sequence as text and inserted U+E061 into the command line.
+
+`Region.forwards` drops a modifier-only press unless the child set
+`report_all`. libvaxis has `Key.isModifier` for the test. The gate belongs in
+tmm because the encoder reports the key either way: in real Ghostty the filter
+lives in the layer above the encoder, which tmm is.
+
+Two things this made visible, both worth knowing before touching region input:
+
+- **While the child has kitty mode on, its shell cannot be driven.** A control
+  key is encoded as an escape sequence too, so neither Enter nor ctrl+c
+  reaches the line discipline. The regression test has the child set and pop
+  the mode on its own schedule for exactly this reason.
+- **The pty echo is the cheapest evidence of what arrived.** The line
+  discipline echoes input with `ECHOCTL`, so `^[[57441;2u` appears on screen
+  without needing a program in the region to read anything.
+
+### Fixed 10/15/2026: a lost server reported its Zig error name
+
+`tests/integration.py` failed about half the time on the query-failure case,
+and the failure was real rather than a test artifact: killing the server mid
+query sometimes showed `WriteFailed` in the sidebar instead of a message.
+Which one you get is a race. tmux usually prints "no server running" before
+the socket is noticed to be gone, and that diagnostic was preferred; when the
+write fails first there is no diagnostic to read and the bare `@errorName`
+went to the UI.
+
+`backend.reason` now maps the errors that only mean the socket is gone to
+"Server connection lost", and the connection-init path uses the same mapping.
+`FileNotFound` is deliberately not in the set: it also covers a missing tmux
+binary, which is a different problem.
+
 ### `TMM_INPUT_LOG`
 
 One line per key and mouse event, appended: the codepoint libvaxis reported

@@ -443,7 +443,8 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
         const s = alloc.create(Snapshot) catch return;
         s.* = .{ .arena = .init(alloc) };
         var server = Connection.init(s.arena.allocator(), io, environ, opts) catch |err| {
-            s.failure = @errorName(err);
+            // No connection yet, so there is no diagnostic to prefer.
+            s.failure = lostServer(err) orelse @errorName(err);
             loop.postEvent(.{ .snapshot = s }) catch {
                 s.destroy(alloc);
                 return;
@@ -460,16 +461,16 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
             s.rename_result = .{ .id = id, .success = false };
             if (r.create) {
                 createSession(&server, r, &s.rename_result.?.success) catch |err| {
-                    const reason = server.diagnostic orelse @errorName(err);
+                    const why = reason(&server, err);
                     rename_failure = if (s.rename_result.?.success)
-                        std.fmt.allocPrint(s.arena.allocator(), "Session {s} created; display switch failed: {s}", .{ r.name, reason }) catch "Session created; display switch failed"
+                        std.fmt.allocPrint(s.arena.allocator(), "Session {s} created; display switch failed: {s}", .{ r.name, why }) catch "Session created; display switch failed"
                     else
-                        reason;
+                        why;
                 };
             } else {
                 if (query(&server, &.{ "rename-session", "-t", r.id, "--", r.name })) |_| {
                     s.rename_result.?.success = true;
-                } else |err| rename_failure = server.diagnostic orelse @errorName(err);
+                } else |err| rename_failure = reason(&server, err);
             }
         }
         // A creation already navigated the display. Do not replay an older
@@ -479,12 +480,12 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
             if (target) |t| collect_target = .{ .client = t.client };
         };
         collectWithCache(&server, s, collect_target, &agents, &model) catch |err| {
-            s.failure = server.diagnostic orelse @errorName(err);
+            s.failure = reason(&server, err);
         };
         if (rename_failure) |failure| s.failure = failure;
         if (blink) |request| {
             flashDisplay(&server, request.client) catch |err| {
-                s.failure = server.diagnostic orelse @errorName(err);
+                s.failure = reason(&server, err);
             };
         }
         if (s.valid) tracker.update(s, target) catch {
@@ -664,6 +665,32 @@ pub const AgentCache = struct {
         }
     }
 };
+
+/// A human reason for a failed query, preferring whatever tmux said.
+///
+/// Without this a lost server reports whichever error surfaced first, and
+/// which one that is, is a race: tmux usually gets to print "no server
+/// running" before the socket is noticed to be gone, but when the write fails
+/// first there is no diagnostic to read and the sidebar showed the bare Zig
+/// error name instead.
+fn reason(server: *Connection, err: anyerror) []const u8 {
+    if (server.diagnostic) |d| return d;
+    return lostServer(err) orelse @errorName(err);
+}
+
+/// The message for an error that only means the socket is gone, or null when
+/// the error says something more specific.
+fn lostServer(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.WriteFailed,
+        error.ReadFailed,
+        error.EndOfStream,
+        error.BrokenPipe,
+        error.ConnectionResetByPeer,
+        => "Server connection lost",
+        else => null,
+    };
+}
 
 /// Append one collect's query count, for measuring the effect of changes to
 /// how much each pass asks tmux. Gated on TMM_QUERY_LOG; free when unset.
