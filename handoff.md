@@ -120,7 +120,34 @@ anchors are from that tree.
   (cmd-refresh-client.c ~63-100). tmux re-tiles and emits a fresh
   `%layout-change`. tmux (not tmm) delivers SIGWINCH to the pane processes.
 - **Input**: control clients send keys via `send-keys -t %<pane> -H <hex...>`
-  (robust for any byte). There is no separate raw key channel.
+  (robust for any byte). There is no separate raw key channel. Re-measured
+  10/15/2026 on stock 3.8: `\x1b[57441;2u` -- a kitty modifier report, which
+  tmux itself cannot generate -- arrives in the pane verbatim.
+- **Kitty keyboard NEGOTIATION also survives the compositor path**, for the
+  same reason graphics do, and this is what makes the keyboard half of the
+  goal reachable through a stock tmux. A program enabling the protocol writes
+  `CSI > <flags> u`, which is pane *output*, so it arrives raw in `%output`
+  and the pane's own libghostty-vt terminal records the flags. tmm then
+  encodes keys to those flags and injects them with `send-keys -H`; a query
+  needing a reply goes back out through the same `write_pty` effect
+  `region.zig` already uses, pointed at `send-keys -H` instead of a local pty.
+  tmux never has to understand the protocol: it is a transport both ways.
+  Measured on stock 3.8, one `%output` line carrying both halves at once:
+  `%output %0 \033[>1u\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\033\134`.
+  Note when checking this by hand that tmux escapes a literal backslash as
+  `\134`, so a shell echoing the *source text* `\033[...]` looks deceptively
+  like a real ESC byte; only `\033` not preceded by `\134` is the real thing.
+- **This is the distinction between `--shell` and the compositor.** With a real
+  tmux *client* in the region (`--shell`), tmux is the emulator and the
+  keyboard negotiator for its panes, and then tmux is a hard ceiling: 3.8 has
+  no kitty keyboard at all (`man tmux`: `extended-keys` is "the equivalent of
+  the modifyOtherKeys xterm resource", and `extended-keys-format csi-u` is
+  xterm `formatOtherKeys`, not the kitty protocol), and its screen model drops
+  images. Measured: a program inside a tmux pane pushing kitty flags left the
+  region terminal's flags at 0, so tmux swallowed the push rather than
+  proxying it. The requirement is not that tmux leave the input path, only
+  that it leave the *emulation and negotiation* path, which control mode plus
+  `send-keys -H` achieves while tmux keeps owning sessions and panes.
 - **Seeding**: `capture-pane -p -e -t %<pane>` gives text+attributes to seed a
   pane's VT on attach. tmux does NOT model images, so capture-pane carries no
   images → **images are live-only; pre-attach images are lost on reattach**
