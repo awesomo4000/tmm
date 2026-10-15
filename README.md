@@ -43,6 +43,8 @@ Once the shell has focus the mouse goes to it too, in whatever reporting mode an
 
 Images are parsed but not drawn. Without `--shell` nothing changes: no pty is opened and no terminal is created.
 
+Setting `TMM_INPUT_LOG` to a path appends one line per key and mouse event in the region: what the outer terminal reported, which keyboard mode the program inside had selected, and the exact bytes it was sent. That is the whole boundary an input bug lives on, and reading it beats inferring any of the three from how a program misbehaves.
+
 ## Navigation
 
 Hover highlights an item; click selects it. Wheel scrolling moves the list without activating anything. `j`/`k` or arrows move among actionable rows; Enter activates. `q` or Ctrl-C exits.

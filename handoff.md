@@ -722,6 +722,25 @@ The end-to-end assertion is on the server, not the display: with `mouse on`, a
 click in the region moves the attached client's pane and the wheel puts it in
 copy mode. That holds whatever the blit looks like.
 
+### `TMM_INPUT_LOG`
+
+One line per key and mouse event, appended: the codepoint libvaxis reported
+with its shifted and base-layout alternates, the modifiers, the text, the
+physical key we resolved, the bytes sent, and the child's current mode
+(`cursor_app`, `modify_other_2`, the kitty flag int). An input bug is always a
+disagreement between those, and the log makes the disagreement visible instead
+of inferred from how a program inside misbehaves.
+
+It immediately found one: libvaxis reports `text` for a key that produced
+text, but a terminal may report a key as a bare `CSI <cp> u` with no text
+field at all, and the encoder then had nothing to send, so the key was
+swallowed. `Region.keyText` falls back to the codepoint, gated on no modifier
+beyond shift being held, because ctrl and alt are encoded from the key itself
+and handing the encoder text as well would change what it produces. Modifier
+keys are excluded by range: kitty reserves `0xe000`-`0xf8ff` for functional
+keys, which is where libvaxis takes its constants from, so a codepoint in
+there is a key and never text however printable it looks to a UTF-8 encoder.
+
 Rendering assertions need a screen model, not a search of the captured bytes:
 libvaxis emits only the cells that changed, each after a cursor move, so a line
 reading `F12 sidebar` arrives as `F12`, `sid`, `bar`. `tests/screen.py` replays

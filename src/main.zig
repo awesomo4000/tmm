@@ -149,7 +149,8 @@ pub fn main(init: std.process.Init) !void {
         // Sized provisionally: vaxis has not measured the window yet, and will
         // not until the first resize event, so the real size is applied by the
         // first frame below. The child sees one resize at startup either way.
-        region = try region_mod.Region.create(a, io, argv, 80, 24);
+        region = try region_mod.Region.create(a, io, argv, 80, 24,
+            init.environ_map.get("TMM_INPUT_LOG"));
     }
     var region_task = if (region) |r| try io.concurrent(ptyWorker, .{ io, r, &loop }) else null;
     defer if (region) |r| {
