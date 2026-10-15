@@ -57,6 +57,14 @@ pub const Region = struct {
     /// `destroy` must not close a second time.
     pty_open: bool = true,
 
+    /// True while a non-wheel button is down, which the mouse encoder needs
+    /// to decide whether a motion off the region is still worth reporting.
+    mouse_held: bool = false,
+
+    /// Last cell reported to the child, so a motion inside one cell is not
+    /// sent again. Owned here because the encoder only borrows it.
+    last_mouse: MouseCell = null,
+
     cols: u16,
     rows: u16,
 
@@ -174,6 +182,105 @@ pub const Region = struct {
                 if (key.text) |text| try self.pty.write(self.io, text);
                 return;
             },
+        };
+        const encoded = writer.buffered();
+        if (encoded.len == 0) return;
+        try self.pty.write(self.io, encoded);
+    }
+
+    /// The encoder keeps the last reported cell in a slot the caller owns.
+    /// Its coordinate type is not exported, so name it through the option
+    /// field that takes a pointer to it.
+    const MouseCell = @typeInfo(@typeInfo(
+        @FieldType(ghostty.input.MouseEncodeOptions, "last_cell"),
+    ).optional.child).pointer.child;
+
+    /// Whether this button is a scroll wheel, which the protocol reports as
+    /// a press with no matching release.
+    fn isWheel(button: vaxis.Mouse.Button) bool {
+        return switch (button) {
+            .wheel_up, .wheel_down, .wheel_left, .wheel_right => true,
+            else => false,
+        };
+    }
+
+    /// Translate a vaxis mouse event into the one the encoder wants. `col`
+    /// and `row` are cells within the region; the encoder works in pixels,
+    /// and `sendMouse` gives it a one-pixel cell so the two coincide.
+    fn toMouseEvent(mouse: vaxis.Mouse, col: i16, row: i16) ghostty.input.MouseEncodeEvent {
+        return .{
+            // vaxis separates a drag from a bare motion. The protocol does
+            // not: it tells them apart by whether a button is named.
+            .action = switch (mouse.type) {
+                .press => .press,
+                .release => .release,
+                .motion, .drag => .motion,
+            },
+            // Wheels and the extra buttons are both reported as buttons 4 to
+            // 9, but the two enums number them differently, so map by name.
+            .button = switch (mouse.button) {
+                .none => null,
+                .left => .left,
+                .middle => .middle,
+                .right => .right,
+                .wheel_up => .four,
+                .wheel_down => .five,
+                .wheel_right => .six,
+                .wheel_left => .seven,
+                .button_8 => .eight,
+                .button_9 => .nine,
+                .button_10 => .ten,
+                .button_11 => .eleven,
+            },
+            .mods = .{
+                .shift = mouse.mods.shift,
+                .alt = mouse.mods.alt,
+                .ctrl = mouse.mods.ctrl,
+            },
+            .pos = .{ .x = @floatFromInt(col), .y = @floatFromInt(row) },
+        };
+    }
+
+    /// Encode a mouse event and send it to the child, in whatever reporting
+    /// mode and format the child selected. `col` and `row` are zero-based
+    /// cells within the region, not window coordinates. They are signed
+    /// because vaxis reports positions off the edge that way, and because
+    /// the encoder wants them: a drag off the region is still reported, and
+    /// deciding that needs to know the position left the viewport.
+    ///
+    /// Nothing is written unless the child turned reporting on, so a plain
+    /// shell is unaffected while a tmux inside the region gets its clicks.
+    pub fn sendMouse(self: *Region, mouse: vaxis.Mouse, col: i16, row: i16) !void {
+        if (!self.pty_open) return;
+
+        // A wheel click arrives as a press with no release to match, so it
+        // must not leave a button held behind it forever.
+        if (!isWheel(mouse.button)) switch (mouse.type) {
+            .press => self.mouse_held = true,
+            .release => self.mouse_held = false,
+            else => {},
+        };
+
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        // One pixel per cell. The encoder takes pixels because it serves a
+        // GPU surface; a cell one pixel across makes a cell position already
+        // a pixel position. libghostty-vt's own encoder tests do the same.
+        var opts: ghostty.input.MouseEncodeOptions = .fromTerminal(&self.terminal, .{
+            .screen = .{ .width = self.cols, .height = self.rows },
+            .cell = .{ .width = 1, .height = 1 },
+            .padding = .{},
+        });
+        opts.any_button_pressed = self.mouse_held or mouse.type == .drag;
+        opts.last_cell = &self.last_mouse;
+
+        var buf: [32]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        ghostty.input.encodeMouse(&writer, toMouseEvent(mouse, col, row), opts) catch |err| switch (err) {
+            // Nothing encodes to 32 bytes; the longest is SGR with three
+            // decimal parameters.
+            error.WriteFailed => return,
         };
         const encoded = writer.buffered();
         if (encoded.len == 0) return;
@@ -462,4 +569,124 @@ test "input encoding produces the bytes a child expects" {
     try std.testing.expectEqualStrings("\x1bOA", try encode(&buf, .{
         .codepoint = vaxis.Key.up,
     }, .{ .cursor_key_application = true }));
+}
+
+test "mouse encoding produces the bytes a mouse-aware child expects" {
+    var buf: [64]u8 = undefined;
+    const Size = @FieldType(ghostty.input.MouseEncodeOptions, "size");
+    // The same one-pixel cell `sendMouse` uses, so a cell position is
+    // already a pixel position.
+    const size: Size = .{
+        .screen = .{ .width = 80, .height = 24 },
+        .cell = .{ .width = 1, .height = 1 },
+        .padding = .{},
+    };
+    const encode = struct {
+        fn call(out: []u8, mouse: vaxis.Mouse, col: i16, row: i16, opts: ghostty.input.MouseEncodeOptions) ![]const u8 {
+            var writer: std.Io.Writer = .fixed(out);
+            try ghostty.input.encodeMouse(&writer, Region.toMouseEvent(mouse, col, row), opts);
+            return writer.buffered();
+        }
+    }.call;
+
+    const sgr: ghostty.input.MouseEncodeOptions = .{ .event = .any, .format = .sgr, .size = size };
+
+    // A shell that never asked for mouse reporting must see nothing, which
+    // is what lets the region forward unconditionally.
+    try std.testing.expectEqualStrings("", try encode(&buf, .{
+        .col = 0,
+        .row = 0,
+        .button = .left,
+        .mods = .{},
+        .type = .press,
+    }, 4, 9, .{ .event = .none, .format = .sgr, .size = size }));
+
+    // SGR parameters are one-based, so a click on the region's own first
+    // cell must arrive as 1;1 and not 0;0.
+    try std.testing.expectEqualStrings("\x1b[<0;1;1M", try encode(&buf, .{
+        .col = 0,
+        .row = 0,
+        .button = .left,
+        .mods = .{},
+        .type = .press,
+    }, 0, 0, sgr));
+
+    // A release is the lowercase terminator in SGR, which is how a tmux
+    // inside the region tells a click from a drag end.
+    try std.testing.expectEqualStrings("\x1b[<0;5;10m", try encode(&buf, .{
+        .col = 0,
+        .row = 0,
+        .button = .left,
+        .mods = .{},
+        .type = .release,
+    }, 4, 9, sgr));
+
+    // The two enums number the buttons differently. Middle must be 1 and
+    // right 2 on the wire, whatever ghostty calls them internally.
+    try std.testing.expectEqualStrings("\x1b[<1;1;1M", try encode(&buf, .{
+        .col = 0,
+        .row = 0,
+        .button = .middle,
+        .mods = .{},
+        .type = .press,
+    }, 0, 0, sgr));
+    try std.testing.expectEqualStrings("\x1b[<2;1;1M", try encode(&buf, .{
+        .col = 0,
+        .row = 0,
+        .button = .right,
+        .mods = .{},
+        .type = .press,
+    }, 0, 0, sgr));
+
+    // Scrolling is buttons 64 and 65, which is how a program inside the
+    // region scrolls instead of the sidebar.
+    try std.testing.expectEqualStrings("\x1b[<64;1;1M", try encode(&buf, .{
+        .col = 0,
+        .row = 0,
+        .button = .wheel_up,
+        .mods = .{},
+        .type = .press,
+    }, 0, 0, sgr));
+    try std.testing.expectEqualStrings("\x1b[<65;1;1M", try encode(&buf, .{
+        .col = 0,
+        .row = 0,
+        .button = .wheel_down,
+        .mods = .{},
+        .type = .press,
+    }, 0, 0, sgr));
+
+    // A drag is a motion carrying its button: 32 for motion plus the button.
+    // vaxis calls this `.drag`; the protocol has no such thing.
+    try std.testing.expectEqualStrings("\x1b[<32;3;2M", try encode(&buf, .{
+        .col = 0,
+        .row = 0,
+        .button = .left,
+        .mods = .{},
+        .type = .drag,
+    }, 2, 1, .{ .event = .any, .format = .sgr, .size = size, .any_button_pressed = true }));
+
+    // Modifiers are added to the button code, so ctrl-click is 0 + 16.
+    try std.testing.expectEqualStrings("\x1b[<16;1;1M", try encode(&buf, .{
+        .col = 0,
+        .row = 0,
+        .button = .left,
+        .mods = .{ .ctrl = true },
+        .type = .press,
+    }, 0, 0, sgr));
+
+    // Normal mode is what most programs select, and it does not want motion.
+    try std.testing.expectEqualStrings("", try encode(&buf, .{
+        .col = 0,
+        .row = 0,
+        .button = .none,
+        .mods = .{},
+        .type = .motion,
+    }, 3, 3, .{ .event = .normal, .format = .sgr, .size = size }));
+}
+
+test "a wheel press leaves no button held" {
+    try std.testing.expect(Region.isWheel(.wheel_up));
+    try std.testing.expect(Region.isWheel(.wheel_down));
+    try std.testing.expect(!Region.isWheel(.left));
+    try std.testing.expect(!Region.isWheel(.none));
 }

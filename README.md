@@ -39,7 +39,9 @@ The right side is an ordinary shell on an ordinary pty, with job control and liv
 
 `--split` sets the starting sidebar width in columns and implies `--shell`; without it the sidebar starts at its content width. Drag the divider to resize, which resizes the shell with it. F12 moves keyboard focus between the sidebar and the shell, and clicking either side focuses it. The cursor shows which side has the keyboard. With focus on the shell, every key goes to it, so `q` quits tmm only from the sidebar.
 
-Mouse events are not forwarded into the shell yet, and images are parsed but not drawn. Without `--shell` nothing changes: no pty is opened and no terminal is created.
+Once the shell has focus the mouse goes to it too, in whatever reporting mode and format the program inside selected, so a `tmux` in the region takes clicks on its panes and the wheel scrolls it rather than the sidebar. A program that never asked for mouse reporting sees nothing, and a click still only focuses. Forwarding is gated on focus so a stray hover does not reach a program the user is not working in.
+
+Images are parsed but not drawn. Without `--shell` nothing changes: no pty is opened and no terminal is created.
 
 ## Navigation
 
@@ -90,7 +92,7 @@ zig build test
 python3 tests/integration.py
 ```
 
-`--dump` emits a read-only JSON snapshot without opening the UI. Build before running integration tests. Tests use unique sockets and disposable files under `/tmp`, never the default server. They cover shell and agent pane navigation, client isolation, sidebar mouse input, blink, unusual names and paths, resizing, disconnection, switching servers, failures, and exit. `tests/split_shell.py` covers `--shell`: the divider geometry, focus, keys reaching the child, the child's output reaching the display, a real `tmux attach` inside the region at the region's exact size, and divider drags resizing both sides. Display assertions go through `tests/screen.py`, which replays the cursor, because libvaxis emits only the cells that changed and a rendered line does not appear contiguously in the output bytes.
+`--dump` emits a read-only JSON snapshot without opening the UI. Build before running integration tests. Tests use unique sockets and disposable files under `/tmp`, never the default server. They cover shell and agent pane navigation, client isolation, sidebar mouse input, blink, unusual names and paths, resizing, disconnection, switching servers, failures, and exit. `tests/split_shell.py` covers `--shell`: the divider geometry, focus, keys reaching the child, the child's output reaching the display, a real `tmux attach` inside the region at the region's exact size, a click and a wheel event inside it moving that client's pane and entering copy mode, and divider drags resizing both sides. Display assertions go through `tests/screen.py`, which replays the cursor, because libvaxis emits only the cells that changed and a rendered line does not appear contiguously in the output bytes.
 
 ## Implementation and remaining work
 
