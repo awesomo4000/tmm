@@ -691,6 +691,37 @@ Departures from the recipe, each for a reason:
   and `TIOCSCTTY` are computed in `pty.zig` the way std computes its one
   neighbour.
 
+### Built 10/15/2026: the mouse, into the region
+
+`Region.sendMouse` encodes a libvaxis mouse event with
+`input.encodeMouse` and writes it to the pty, so the region forwards clicks,
+drags and the wheel in whatever mode and format the child selected. Forwarded
+only while the region has focus, matching the keyboard. Two non-obvious parts:
+
+- **The encoder works in pixels; give it a one-pixel cell.** It serves a GPU
+  surface, so `MouseEncodeOptions.size` wants a screen size, a cell size and
+  padding in pixels. Setting the cell to 1x1 with no padding makes a cell
+  position already a pixel position, and the screen size the grid size.
+  libghostty-vt's own encoder tests use exactly this, so it is the intended
+  reading and not a trick.
+- **The two button enums disagree on the numbers, so map by name.** libvaxis
+  is `left=0, middle=1, right=2` (the wire codes); libghostty-vt is
+  `left=1, right=2, middle=3`. Mapping numerically swaps middle and right.
+  Covered by a test that fails if the two are swapped.
+
+Smaller notes: libvaxis separates `.drag` from `.motion` and the protocol does
+not, so both become `.motion` and the button tells them apart. A wheel click
+is a press with no matching release, so it must not be allowed to leave a
+button recorded as held — `any_button_pressed` is what decides whether a drag
+leaving the region is still reported. `last_cell` is the encoder's motion
+dedup and the slot belongs to the caller, so `Region` owns it. Positions are
+signed, because libvaxis reports a position off the edge that way and the
+encoder wants to know it left the viewport.
+
+The end-to-end assertion is on the server, not the display: with `mouse on`, a
+click in the region moves the attached client's pane and the wheel puts it in
+copy mode. That holds whatever the blit looks like.
+
 Rendering assertions need a screen model, not a search of the captured bytes:
 libvaxis emits only the cells that changed, each after a cursor move, so a line
 reading `F12 sidebar` arrives as `F12`, `sid`, `bar`. `tests/screen.py` replays
@@ -698,8 +729,6 @@ the cursor and is what every display assertion goes through.
 
 ### Not yet, in the region
 
-- Mouse events are not forwarded to the child; clicking the region only focuses
-  it. `vt.input.encodeMouse` is there for it.
 - Kitty graphics are parsed and stored (the storage limit is set) but not drawn.
   That is the Phase 4 bridge.
 - Scrollback is not reachable; the region shows the viewport only.

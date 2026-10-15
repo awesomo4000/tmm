@@ -276,11 +276,14 @@ pub fn main(init: std.process.Init) !void {
                         dragging = true;
                         break :mouse_event;
                     }
-                    // Clicking the shell focuses it. Mouse events are not
-                    // forwarded to the child yet, so a mouse-aware program
-                    // inside still needs the keyboard.
+                    // Clicking the shell focuses it, and once it has focus
+                    // the mouse goes to the child the way the keyboard does.
+                    // Forwarding only while focused keeps a stray hover from
+                    // reaching a program the user is not working in.
                     if (mouse.col > divider) {
                         if (mouse.type == .press) focus = .region;
+                        if (focus == .region) if (region) |r|
+                            r.sendMouse(mouse, mouse.col - @as(i16, @intCast(divider + 1)), mouse.row) catch {};
                         break :mouse_event;
                     }
                     if (mouse.type == .press) focus = .sidebar;

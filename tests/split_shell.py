@@ -96,6 +96,14 @@ def main():
                         '#{session_name}').splitlines()
             return [r.split('|', 1)[1] for r in rows if r.startswith('0|')]
 
+        def region_client(field):
+            """A field of the one non-control client, which is the one the
+            region attached. tmm itself is the control-mode client."""
+            rows = tmux('list-clients', '-F',
+                        '#{client_control_mode}|' + field).splitlines()
+            found = [r.split('|', 1)[1] for r in rows if r.startswith('0|')]
+            return found[0] if len(found) == 1 else None
+
         try:
             tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'alpha', '-c', root)
 
@@ -149,6 +157,45 @@ def main():
             assert until(lambda: 'alpha' in screen(ui_fd).region(SPLIT + 1)[ROWS - 1]), \
                 ('the attached tmux status line never rendered',
                  screen(ui_fd).region(SPLIT + 1)[ROWS - 1])
+
+            # ---- the mouse reaches the child ----------------------------
+            # A click only means something to the program inside the region if
+            # the region encodes it in the mode that program selected. tmux
+            # with `mouse on` turns a click into a pane selection, so the
+            # effect is visible on the server and does not depend on the blit.
+            tmux('set', '-g', 'mouse', 'on')
+            tmux('split-window', '-t', 'alpha', '-d')
+            panes = tmux('list-panes', '-t', 'alpha', '-F',
+                         '#{pane_id} #{pane_top} #{pane_bottom}').split('\n')
+            panes = [p.split() for p in panes if p]
+            assert len(panes) == 2, panes
+            # Whichever pane the client is not on, so the click has to move it.
+            start = region_client('#{pane_id}')
+            other = next(p for p in panes if p[0] != start)
+            # A row safely inside the target pane, in the region's own
+            # coordinates, offset into the window and made one-based for SGR.
+            row = int(other[1]) + 1
+            col = SPLIT + 1 + 2
+            os.write(ui_fd, f'\x1b[<0;{col + 1};{row + 1}M'.encode())
+            os.write(ui_fd, f'\x1b[<0;{col + 1};{row + 1}m'.encode())
+            moved = until(lambda: region_client('#{pane_id}') == other[0])
+            assert moved, ('a click in the region did not reach the child',
+                           start, other, region_client('#{pane_id}'))
+
+            # Scrolling inside the region must go to the child, not scroll the
+            # sidebar behind it. With `mouse on` tmux enters copy mode.
+            os.write(ui_fd, f'\x1b[<64;{col + 1};{row + 1}M'.encode())
+            assert until(lambda: region_client('#{pane_in_mode}') == '1'), \
+                ('a wheel event in the region did not reach the child',
+                 region_client('#{pane_in_mode}'))
+            os.write(ui_fd, b'q')  # leave copy mode
+            assert until(lambda: region_client('#{pane_in_mode}') == '0'), \
+                'the child never left copy mode'
+
+            # Put the client back on one pane so the resize assertion below
+            # reads a plain layout.
+            tmux('kill-pane', '-t', other[0])
+            tmux('set', '-g', 'mouse', 'off')
 
             # ---- dragging the divider resizes both sides -----------------
             new_split = SPLIT + 20
