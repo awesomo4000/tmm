@@ -57,6 +57,10 @@ pub const Region = struct {
     /// `destroy` must not close a second time.
     pty_open: bool = true,
 
+    /// Where to append a line per input event, or null. The slice is not
+    /// owned: it comes from the environment, which outlives the region.
+    input_log: ?[]const u8 = null,
+
     /// True while a non-wheel button is down, which the mouse encoder needs
     /// to decide whether a motion off the region is still worth reporting.
     mouse_held: bool = false,
@@ -78,6 +82,7 @@ pub const Region = struct {
         argv: []const []const u8,
         cols: u16,
         rows: u16,
+        input_log: ?[]const u8,
     ) !*Region {
         const self = try alloc.create(Region);
         errdefer alloc.destroy(self);
@@ -91,6 +96,7 @@ pub const Region = struct {
             .render_state = .empty,
             .cols = cols,
             .rows = rows,
+            .input_log = input_log,
         };
         errdefer self.pty.deinit(io);
 
@@ -175,17 +181,74 @@ pub const Region = struct {
         const opts: ghostty.input.KeyEncodeOptions = .fromTerminal(&self.terminal);
         var buf: [128]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
-        ghostty.input.encodeKey(&writer, toKeyEvent(key), opts) catch |err| switch (err) {
+        var scratch: [4]u8 = undefined;
+        ghostty.input.encodeKey(&writer, toKeyEvent(key, &scratch), opts) catch |err| switch (err) {
             // Only a long pre-edit overflows 128 bytes, and vaxis delivers
             // pre-edit text as `text` which we pass through below instead.
             error.WriteFailed => {
-                if (key.text) |text| try self.pty.write(self.io, text);
+                const text = key.text orelse return;
+                self.logKey(key, opts, text);
+                try self.pty.write(self.io, text);
                 return;
             },
         };
         const encoded = writer.buffered();
+        // Logged before the length check: a key that encodes to nothing is
+        // exactly the case worth seeing.
+        self.logKey(key, opts, encoded);
         if (encoded.len == 0) return;
         try self.pty.write(self.io, encoded);
+    }
+
+    /// Append one input event and the bytes it produced. Gated on
+    /// TMM_INPUT_LOG; free when unset.
+    ///
+    /// This is the boundary an input bug lives on: what the outer terminal
+    /// reported, which mode the child had selected, and what the child was
+    /// actually told. Guessing any of the three from a misbehaving program is
+    /// what this exists to avoid.
+    fn logKey(self: *Region, key: vaxis.Key, opts: ghostty.input.KeyEncodeOptions, sent: []const u8) void {
+        if (self.input_log == null) return;
+        const mods = modNames(key.mods);
+        self.logLine(
+            "key cp={d} shifted={?d} base={?d} mods={s} text=\"{f}\" -> key={s} sent=\"{f}\" " ++
+                "[cursor_app={} modify_other_2={} kitty={d}]",
+            .{
+                key.codepoint,
+                key.shifted_codepoint,
+                key.base_layout_codepoint,
+                &mods,
+                std.ascii.hexEscape(key.text orelse "", .lower),
+                @tagName(toKeyCode(key.codepoint)),
+                std.ascii.hexEscape(sent, .lower),
+                opts.cursor_key_application,
+                opts.modify_other_keys_state_2,
+                @as(u5, @bitCast(opts.kitty_flags)),
+            },
+        );
+    }
+
+    /// Held modifiers as a fixed-width set, so log lines stay in columns.
+    /// Returned by value; the caller keeps it alive while formatting.
+    fn modNames(mods: vaxis.Key.Modifiers) [6]u8 {
+        return .{
+            if (mods.shift) 'S' else '-',
+            if (mods.ctrl) 'C' else '-',
+            if (mods.alt) 'A' else '-',
+            if (mods.super) 'U' else '-',
+            if (mods.caps_lock) 'L' else '-',
+            if (mods.num_lock) 'N' else '-',
+        };
+    }
+
+    fn logLine(self: *Region, comptime fmt: []const u8, args: anytype) void {
+        const path = self.input_log orelse return;
+        const line = std.fmt.allocPrint(self.alloc, fmt ++ "\n", args) catch return;
+        defer self.alloc.free(line);
+        var file = std.Io.Dir.cwd().createFile(self.io, path, .{ .truncate = false }) catch return;
+        defer file.close(self.io);
+        const st = file.stat(self.io) catch return;
+        _ = file.writePositionalAll(self.io, line, st.size) catch {};
     }
 
     /// The encoder keeps the last reported cell in a slot the caller owns.
@@ -283,6 +346,25 @@ pub const Region = struct {
             error.WriteFailed => return,
         };
         const encoded = writer.buffered();
+        const mouse_mods = modNames(.{
+            .shift = mouse.mods.shift,
+            .ctrl = mouse.mods.ctrl,
+            .alt = mouse.mods.alt,
+        });
+        if (self.input_log != null) self.logLine(
+            "mouse {s} {s} col={d} row={d} mods={s} -> sent=\"{f}\" [event={s} format={s} held={}]",
+            .{
+                @tagName(mouse.type),
+                @tagName(mouse.button),
+                col,
+                row,
+                &mouse_mods,
+                std.ascii.hexEscape(encoded, .lower),
+                @tagName(opts.event),
+                @tagName(opts.format),
+                opts.any_button_pressed,
+            },
+        );
         if (encoded.len == 0) return;
         try self.pty.write(self.io, encoded);
     }
@@ -437,7 +519,32 @@ pub const Region = struct {
     /// from. vaxis reports a codepoint plus text; ghostty wants a physical key
     /// plus the text it produced, so named keys are mapped and everything
     /// else rides on `utf8`/`unshifted_codepoint`.
-    fn toKeyEvent(key: vaxis.Key) ghostty.input.KeyEvent {
+    /// Kitty reserves this range for functional keys, which is where vaxis
+    /// gets its constants for the arrows, the function keys and the modifier
+    /// keys themselves. A codepoint in here is a key, never text.
+    const functional_first: u21 = 0xe000;
+    const functional_last: u21 = 0xf8ff;
+
+    /// The text a key produced, or the codepoint when the terminal reported
+    /// the key without one. `text` is normally set, but a terminal is free to
+    /// report a key as a bare `CSI <cp> u` with no text field, and then the
+    /// encoder has nothing to send for an ordinary printable key.
+    ///
+    /// Only when no modifier beyond shift is held: ctrl and alt are encoded
+    /// from the key itself, and handing the encoder text as well would change
+    /// what it produces.
+    fn keyText(key: vaxis.Key, scratch: *[4]u8) []const u8 {
+        if (key.text) |text| return text;
+        if (key.mods.ctrl or key.mods.alt or key.mods.super) return "";
+        const cp = key.codepoint;
+        if (cp < 0x20 or cp == 0x7f) return "";
+        if (cp >= functional_first and cp <= functional_last) return "";
+        const n = std.unicode.utf8Encode(cp, scratch) catch return "";
+        return scratch[0..n];
+    }
+
+    fn toKeyEvent(key: vaxis.Key, scratch: *[4]u8) ghostty.input.KeyEvent {
+        const text = keyText(key, scratch);
         return .{
             .action = .press,
             .key = toKeyCode(key.codepoint),
@@ -452,8 +559,8 @@ pub const Region = struct {
             // vaxis has already applied shift to produce `text`, so the
             // shift that produced it is consumed and must not be encoded
             // again as a modifier.
-            .consumed_mods = .{ .shift = key.mods.shift and key.text != null },
-            .utf8 = key.text orelse "",
+            .consumed_mods = .{ .shift = key.mods.shift and text.len > 0 },
+            .utf8 = text,
             .unshifted_codepoint = @intCast(key.codepoint & 0x1fffff),
         };
     }
@@ -541,7 +648,8 @@ test "input encoding produces the bytes a child expects" {
     const encode = struct {
         fn call(out: []u8, key: vaxis.Key, opts: ghostty.input.KeyEncodeOptions) ![]const u8 {
             var writer: std.Io.Writer = .fixed(out);
-            try ghostty.input.encodeKey(&writer, Region.toKeyEvent(key), opts);
+            var scratch: [4]u8 = undefined;
+            try ghostty.input.encodeKey(&writer, Region.toKeyEvent(key, &scratch), opts);
             return writer.buffered();
         }
     }.call;
@@ -689,4 +797,54 @@ test "a wheel press leaves no button held" {
     try std.testing.expect(Region.isWheel(.wheel_down));
     try std.testing.expect(!Region.isWheel(.left));
     try std.testing.expect(!Region.isWheel(.none));
+}
+
+test "a key reported without text still sends the character" {
+    var buf: [64]u8 = undefined;
+    const encode = struct {
+        fn call(out: []u8, key: vaxis.Key, opts: ghostty.input.KeyEncodeOptions) ![]const u8 {
+            var writer: std.Io.Writer = .fixed(out);
+            var scratch: [4]u8 = undefined;
+            try ghostty.input.encodeKey(&writer, Region.toKeyEvent(key, &scratch), opts);
+            return writer.buffered();
+        }
+    }.call;
+
+    // A terminal may report a key as a bare `CSI <cp> u` with no text field.
+    // Without the fallback the encoder has nothing to send and the key is
+    // swallowed, which would lose every letter typed into the region.
+    try std.testing.expectEqualStrings("x", try encode(&buf, .{ .codepoint = 'x' }, .{}));
+    try std.testing.expectEqualStrings("é", try encode(&buf, .{ .codepoint = 'é' }, .{}));
+
+    // A modifier key is not text, however printable its codepoint looks to
+    // a UTF-8 encoder. These live in the range kitty reserves for keys.
+    for ([_]u21{
+        vaxis.Key.left_shift, vaxis.Key.left_control, vaxis.Key.left_alt,
+        vaxis.Key.left_super, vaxis.Key.right_shift,  vaxis.Key.f13,
+    }) |cp| try std.testing.expectEqualStrings("", try encode(&buf, .{
+        .codepoint = cp,
+        .mods = .{ .shift = true },
+    }, .{}));
+
+    // Nor is the fallback allowed to disturb ctrl and alt, which the encoder
+    // produces from the key rather than from text.
+    try std.testing.expectEqualStrings("\x06", try encode(&buf, .{
+        .codepoint = 'f',
+        .mods = .{ .ctrl = true },
+    }, .{}));
+    // alt is platform-dependent (macos_option_as_alt), so only assert that
+    // the fallback did not turn it into plain text.
+    try std.testing.expect(!std.mem.eql(u8, "f", try encode(&buf, .{
+        .codepoint = 'f',
+        .mods = .{ .alt = true },
+    }, .{})));
+
+    // Real text still wins over the fallback: vaxis resolves the shifted
+    // character and we must send that, not the unshifted codepoint.
+    try std.testing.expectEqualStrings("A", try encode(&buf, .{
+        .codepoint = 'a',
+        .shifted_codepoint = 'A',
+        .mods = .{ .shift = true },
+        .text = "A",
+    }, .{}));
 }
