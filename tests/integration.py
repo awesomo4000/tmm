@@ -313,7 +313,12 @@ def main():
             os.kill(ui_pid, signal.SIGWINCH)
             pump()
             output = terminal_output[ui_fd]
-            assert b'no server running' in output or b'error connecting to' in output, output[-2000:]
+            # Which error surfaces is a race: tmux usually prints its own
+            # diagnostic before the socket is noticed to be gone, and
+            # otherwise the write fails first with no diagnostic to read.
+            assert (b'no server running' in output
+                    or b'error connecting to' in output
+                    or b'Server connection lost' in output), output[-2000:]
             assert b'elsewhere' in output
             close_ui(ui_pid, ui_fd)
             # Exit at different points in the polling cycle. Cancellation may

@@ -192,12 +192,24 @@ pub const Region = struct {
                 return;
             },
         };
-        const encoded = writer.buffered();
-        // Logged before the length check: a key that encodes to nothing is
-        // exactly the case worth seeing.
-        self.logKey(key, opts, encoded);
-        if (encoded.len == 0) return;
-        try self.pty.write(self.io, encoded);
+        const sent = if (forwards(key, opts)) writer.buffered() else "";
+        // Logged before the length check: a key that sends nothing is exactly
+        // the case worth seeing.
+        self.logKey(key, opts, sent);
+        if (sent.len == 0) return;
+        try self.pty.write(self.io, sent);
+    }
+
+    /// Whether this key press should reach the child at all.
+    ///
+    /// A modifier pressed on its own is a key event only to a program that
+    /// asked for every key as an escape code. The encoder reports it either
+    /// way, from the codepoint, so the gate has to be here: vim turns on
+    /// kitty disambiguation alone, which does not include modifier reports,
+    /// and then decodes `CSI 57441 u` as text. 57441 is U+E061, which renders
+    /// blank, so a bare shift press shows up as a space in the command line.
+    fn forwards(key: vaxis.Key, opts: ghostty.input.KeyEncodeOptions) bool {
+        return !key.isModifier() or opts.kitty_flags.report_all;
     }
 
     /// Append one input event and the bytes it produced. Gated on
@@ -847,4 +859,36 @@ test "a key reported without text still sends the character" {
         .mods = .{ .shift = true },
         .text = "A",
     }, .{}));
+}
+
+test "a modifier pressed alone reaches only a child that asked for every key" {
+    const Flags = @FieldType(ghostty.input.KeyEncodeOptions, "kitty_flags");
+    const disambiguate: Flags = .{ .disambiguate = true };
+    const report_all: Flags = .{ .disambiguate = true, .report_all = true };
+
+    for ([_]u21{
+        vaxis.Key.left_shift,   vaxis.Key.left_control, vaxis.Key.left_alt,
+        vaxis.Key.left_super,   vaxis.Key.left_meta,    vaxis.Key.left_hyper,
+        vaxis.Key.right_shift,  vaxis.Key.right_control,
+    }) |cp| {
+        const key: vaxis.Key = .{ .codepoint = cp, .mods = .{ .shift = true } };
+        // Legacy and modifyOtherKeys children encode nothing for these, so
+        // the gate is invisible there; kitty disambiguation is where it bites.
+        try std.testing.expect(!Region.forwards(key, .{ .kitty_flags = disambiguate }));
+        try std.testing.expect(Region.forwards(key, .{ .kitty_flags = report_all }));
+    }
+
+    // Everything else is forwarded whatever the child selected, including a
+    // key with a modifier held, which is an ordinary key press.
+    for ([_]vaxis.Key{
+        .{ .codepoint = 'a' },
+        .{ .codepoint = 'a', .mods = .{ .shift = true }, .text = "A" },
+        .{ .codepoint = '1', .shifted_codepoint = '!', .mods = .{ .shift = true }, .text = "!" },
+        .{ .codepoint = 'c', .mods = .{ .ctrl = true } },
+        .{ .codepoint = vaxis.Key.escape },
+        .{ .codepoint = vaxis.Key.up },
+    }) |key| {
+        try std.testing.expect(Region.forwards(key, .{ .kitty_flags = disambiguate }));
+        try std.testing.expect(Region.forwards(key, .{}));
+    }
 }

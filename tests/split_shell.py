@@ -141,6 +141,47 @@ def main():
                 ('region output never reached the display',
                  screen(ui_fd).region(SPLIT + 1))
 
+            # ---- a modifier alone is not a key the child wants ----------
+            # A program that turns on kitty disambiguation has not asked for
+            # modifier-key reports, and decodes `CSI 57441 u` as text: U+E061,
+            # which renders blank, so a bare shift press appeared as a space
+            # in, say, a vi command line.
+            #
+            # The child sets the mode and pops it again on its own schedule,
+            # because while it is set we cannot drive its shell: a control key
+            # is encoded as an escape sequence too, so neither Enter nor
+            # ctrl+c reaches the line discipline. The evidence is the echo the
+            # pty itself produces for what arrives.
+            Path(root, 'probe.sh').write_text(
+                "printf '\\033[>1u'\nsleep 2\nprintf '\\033[<u'\necho rgn-ready\n")
+            os.write(ui_fd, f'sh {root}/probe.sh\r'.encode())
+            pump(0.6)
+            marker = len(output[ui_fd])
+            for modifier in (57441, 57442, 57443, 57444, 57447):
+                os.write(ui_fd, f'\x1b[{modifier};2u'.encode())
+            # An ordinary key in the same mode, so this pins the gate to
+            # modifiers rather than to kitty mode as a whole.
+            os.write(ui_fd, b'\x1b[122;;122u\x1b[113;;113u\x1b[122;;122u')
+            assert until(lambda: any('rgn-ready' in line for line in
+                                     screen(ui_fd).region(SPLIT + 1))), \
+                ('the region child never finished the keyboard-mode probe',
+                 screen(ui_fd).region(SPLIT + 1))
+            echoed = bytes(output[ui_fd][marker:])
+            assert b'zqz' in echoed, \
+                ('an ordinary key stopped reaching the child in kitty mode',
+                 repr(echoed))
+            assert not any(str(m).encode() in echoed for m in
+                           (57441, 57442, 57443, 57444, 57447)), \
+                ('a modifier pressed alone was forwarded to the child',
+                 repr(echoed))
+            # The typed `zqz` is still pending on the shell input line. Run it
+            # and wait for a clean prompt so what follows starts from one.
+            os.write(ui_fd, b'\r')
+            os.write(ui_fd, b'echo rgn-clear\r')
+            assert until(lambda: any('rgn-clear' in line for line in
+                                     screen(ui_fd).region(SPLIT + 1))), \
+                'the region shell did not return to a prompt'
+
             # ---- a real tmux client attaches inside the region -----------
             before = clients()
             os.write(ui_fd, f'tmux -S {socket} attach -t alpha\r'.encode())
