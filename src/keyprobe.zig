@@ -3,7 +3,16 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! A timestamping endpoint for latency measurement: it reads its stdin and
-//! records when each byte arrived, as exactly as the machine can say.
+//! records when each byte arrived, as exactly as the machine can say. With
+//! `--send` it is the other end instead, writing keys to a descriptor and
+//! recording when each one left.
+//!
+//! Both ends matter. With a Python sender, the reading is taken and then the
+//! interpreter calls `write`; anything that happens in between -- a
+//! deschedule, a garbage collection -- lands in the number and reads as
+//! latency in the thing being measured. Running both ends here leaves no
+//! interpreter in the timed path at all: the harness only sets up the pty
+//! and compares the two logs afterwards.
 //!
 //! It exists because the measurement harness used to be Python on both ends,
 //! which put the noise floor (one to five milliseconds of interpreter and
@@ -75,6 +84,12 @@ fn usage(io: std.Io) noreturn {
         \\  --clock       print one CLOCK_MONOTONIC reading in nanoseconds and exit
         \\  --overhead    report the cost of taking a timestamp and exit
         \\
+        \\ as the sender:
+        \\  --send        write keys to --fd and record when each one left
+        \\  --fd N        the descriptor to write to and drain (default 3)
+        \\  --keys N      how many keys to send (default 100)
+        \\  --gap-us N    microseconds between keys (default 20000)
+        \\
     ;
     var buf: [512]u8 = undefined;
     var w = std.Io.File.stderr().writer(io, &buf);
@@ -105,17 +120,64 @@ fn overhead(io: std.Io) void {
     w.interface.flush() catch {};
 }
 
+/// Send `keys` bytes to `fd`, recording when each write happened, and drain
+/// whatever comes back so the far side is never blocked on us.
+///
+/// The clock is read immediately before the write and nothing happens in
+/// between. Draining is done in the gap that follows, never between the
+/// reading and the write.
+fn sendKeys(fd: c_int, keys: usize, gap_us: u64) void {
+    // `Q` is the receiver's stop byte, so it is not in the alphabet: a key
+    // stream containing it would end the measurement halfway through.
+    const alphabet = "abcdefghijklmnoprstuvwxyz0123456789";
+    var discard: [4096]u8 = undefined;
+    var fds = [_]c.struct_pollfd{.{ .fd = fd, .events = c.POLLIN, .revents = 0 }};
+
+    for (0..keys) |i| {
+        const byte = alphabet[i % alphabet.len];
+        const at = now();
+        _ = c.write(fd, &byte, 1);
+        if (count < capacity) {
+            records[count] = .{ .at_ns = at, .bytes = undefined, .len = 1 };
+            records[count].bytes[0] = byte;
+            count += 1;
+        }
+        // Wait out the gap, draining as we go.
+        const until = at + gap_us * std.time.ns_per_us;
+        while (now() < until) {
+            if (c.poll(&fds, 1, 1) > 0) {
+                if (c.read(fd, &discard, discard.len) <= 0) break;
+            }
+        }
+    }
+    // Stop the receiver so it writes its own records out.
+    const stop: u8 = 'Q';
+    _ = c.write(fd, &stop, 1);
+}
+
 pub fn main(init: std.process.Init) !void {
     var args = init.minimal.args.iterate();
     _ = args.next();
     var log_path: ?[]const u8 = null;
     var load = false;
     var quit_byte: u8 = 'Q';
+    var send = false;
+    var send_fd: c_int = 3;
+    var key_count: usize = 100;
+    var gap_us: u64 = 20_000;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--log")) {
             log_path = args.next() orelse usage(init.io);
         } else if (std.mem.eql(u8, arg, "--load")) {
             load = true;
+        } else if (std.mem.eql(u8, arg, "--send")) {
+            send = true;
+        } else if (std.mem.eql(u8, arg, "--fd")) {
+            send_fd = std.fmt.parseInt(c_int, args.next() orelse usage(init.io), 10) catch usage(init.io);
+        } else if (std.mem.eql(u8, arg, "--keys")) {
+            key_count = std.fmt.parseInt(usize, args.next() orelse usage(init.io), 10) catch usage(init.io);
+        } else if (std.mem.eql(u8, arg, "--gap-us")) {
+            gap_us = std.fmt.parseInt(u64, args.next() orelse usage(init.io), 10) catch usage(init.io);
         } else if (std.mem.eql(u8, arg, "--quit")) {
             const v = args.next() orelse usage(init.io);
             if (v.len != 1) usage(init.io);
@@ -132,6 +194,12 @@ pub fn main(init: std.process.Init) !void {
             overhead(init.io);
             return;
         } else usage(init.io);
+    }
+
+    if (send) {
+        sendKeys(send_fd, key_count, gap_us);
+        try writeRecords(init.io, log_path);
+        return;
     }
 
     // Raw mode, so a byte is delivered the moment it arrives rather than at
@@ -190,8 +258,12 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // Written only now: a write between two keystrokes would land in the
-    // next measurement.
+    try writeRecords(init.io, log_path);
+}
+
+/// Write the records out. Only ever at the end: a write between two
+/// keystrokes would land in the next measurement.
+fn writeRecords(io: std.Io, log_path: ?[]const u8) !void {
     var out: [capacity * 48]u8 = undefined;
     var w: std.Io.Writer = .fixed(&out);
     for (records[0..count]) |rec| {
@@ -199,12 +271,12 @@ pub fn main(init: std.process.Init) !void {
     }
     const text = w.buffered();
     if (log_path) |path| {
-        var file = try std.Io.Dir.cwd().createFile(init.io, path, .{});
-        defer file.close(init.io);
-        _ = try file.writePositionalAll(init.io, text, 0);
+        var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+        defer file.close(io);
+        _ = try file.writePositionalAll(io, text, 0);
     } else {
         var obuf: [4096]u8 = undefined;
-        var out_writer = std.Io.File.stdout().writer(init.io, &obuf);
+        var out_writer = std.Io.File.stdout().writer(io, &obuf);
         try out_writer.interface.writeAll(text);
         try out_writer.interface.flush();
     }
