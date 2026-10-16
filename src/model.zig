@@ -213,6 +213,7 @@ test {
     _ = @import("layout.zig");
     _ = @import("vt.zig");
     _ = @import("region.zig");
+    _ = @import("surface.zig");
     _ = @import("reconcile.zig");
     _ = @import("state.zig");
 }
