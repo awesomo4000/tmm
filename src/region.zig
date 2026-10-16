@@ -57,6 +57,15 @@ pub const Region = struct {
     /// `destroy` must not close a second time.
     pty_open: bool = true,
 
+    /// Backing bytes for the non-ASCII graphemes handed to libvaxis.
+    ///
+    /// libvaxis does not copy a cell's grapheme: it keeps the slice, and
+    /// re-renders unchanged cells from the screen it retains. So the bytes
+    /// have to outlive the frame that wrote them, which a per-frame arena
+    /// does not. They are reset at the top of each draw that rewrites the
+    /// region, which is exactly when libvaxis stops needing the old ones.
+    graphemes: std.heap.ArenaAllocator,
+
     /// Where to append a line per input event, or null. The slice is not
     /// owned: it comes from the environment, which outlives the region.
     input_log: ?[]const u8 = null,
@@ -97,6 +106,7 @@ pub const Region = struct {
             .cols = cols,
             .rows = rows,
             .input_log = input_log,
+            .graphemes = .init(alloc),
         };
         errdefer self.pty.deinit(io);
 
@@ -132,6 +142,7 @@ pub const Region = struct {
         const alloc = self.alloc;
         self.closePty();
         self.render_state.deinit(alloc);
+        self.graphemes.deinit();
         self.stream.deinit();
         self.terminal.deinit(alloc);
         alloc.destroy(self);
@@ -383,7 +394,7 @@ pub const Region = struct {
 
     /// Draw the region into `win`. `fa` is a per-frame allocator, used only
     /// for graphemes that are not single-byte ASCII.
-    pub fn draw(self: *Region, win: vaxis.Window, fa: Allocator) !void {
+    pub fn draw(self: *Region, win: vaxis.Window) !void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
@@ -394,6 +405,11 @@ pub const Region = struct {
         // Without this the whole region is rewritten on every sidebar refresh.
         if (state.dirty == .false) return;
 
+        // Past this point every row is rewritten, so every grapheme libvaxis
+        // still holds is about to be replaced and the old bytes are free.
+        _ = self.graphemes.reset(.retain_capacity);
+        const ga = self.graphemes.allocator();
+
         const range = state.rowDataRange();
         const row_dirty = state.row_data.items(.dirty);
         const rows_slice = state.row_data.items(.cells);
@@ -402,9 +418,11 @@ pub const Region = struct {
         for (range.start..range.end) |i| {
             defer y += 1;
             if (y >= win.height) break;
-            // vaxis diffs cells itself, so a clean row still has to be written
-            // on a full redraw; only a partial update may skip clean rows.
-            if (state.dirty == .partial and !row_dirty[i]) continue;
+            // Every row is rewritten, clean or not. Skipping a clean row on a
+            // partial update would leave libvaxis holding that row's
+            // graphemes from an earlier draw, and the reset above has already
+            // freed them. libvaxis diffs cells itself, so rewriting a clean
+            // row costs a loop and no output.
             row_dirty[i] = false;
 
             const cells = rows_slice[i];
@@ -424,7 +442,7 @@ pub const Region = struct {
                 const width = raw.gridWidth();
                 win.writeCell(x, y, .{
                     .char = .{
-                        .grapheme = try grapheme(fa, raw, graphemes[x]),
+                        .grapheme = try grapheme(ga, raw, graphemes[x]),
                         .width = width,
                     },
                     .style = toStyle(style, raw),
@@ -453,22 +471,26 @@ pub const Region = struct {
         return .{ .col = vp.x, .row = vp.y };
     }
 
-    fn grapheme(fa: Allocator, raw: ghostty.Cell, cps: []const u21) ![]const u8 {
+    /// The bytes for one cell. `ga` must be the region's own grapheme arena,
+    /// not a per-frame one: libvaxis keeps the slice. Single-byte ASCII comes
+    /// from a static table and needs no storage at all, which is why the bug
+    /// this guards against only ever showed up on box drawing and symbols.
+    fn grapheme(ga: Allocator, raw: ghostty.Cell, cps: []const u21) ![]const u8 {
         if (!raw.hasText()) return " ";
         const cp = raw.codepoint();
         if (raw.content_tag != .codepoint_grapheme) {
             if (cp < 0x80) return &ascii[cp];
             var buf: [4]u8 = undefined;
             const n = try std.unicode.utf8Encode(cp, &buf);
-            return fa.dupe(u8, buf[0..n]);
+            return ga.dupe(u8, buf[0..n]);
         }
         var out: std.ArrayList(u8) = .empty;
         var buf: [4]u8 = undefined;
         const n = try std.unicode.utf8Encode(cp, &buf);
-        try out.appendSlice(fa, buf[0..n]);
+        try out.appendSlice(ga, buf[0..n]);
         for (cps) |extra| {
             const k = try std.unicode.utf8Encode(extra, &buf);
-            try out.appendSlice(fa, buf[0..k]);
+            try out.appendSlice(ga, buf[0..k]);
         }
         return out.items;
     }
