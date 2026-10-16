@@ -284,7 +284,7 @@ pub fn main(init: std.process.Init) !void {
                     if (mouse.col > divider) {
                         if (mouse.type == .press) focus = .region;
                         if (focus == .region) if (region) |r|
-                            r.sendMouse(mouse, mouse.col - @as(i16, @intCast(divider + 1)), mouse.row) catch {};
+                            r.sendMouse(mouse, mouse.col - @as(i16, @intCast(divider + 1)), mouse.row);
                         break :mouse_event;
                     }
                     if (mouse.type == .press) focus = .sidebar;
@@ -327,7 +327,7 @@ pub fn main(init: std.process.Init) !void {
                         break :key_event;
                     }
                     if (focus == .region) {
-                        r.sendKey(key) catch {};
+                        r.sendKey(key);
                         break :key_event;
                     }
                 }
