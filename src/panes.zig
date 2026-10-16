@@ -294,8 +294,8 @@ pub const Compositor = struct {
         return self.panes.get(self.focused);
     }
 
-    pub fn sendKey(self: *Compositor, key: vaxis.Key) void {
-        if (self.focusedPane()) |pane| pane.surface.sendKey(key);
+    pub fn sendKey(self: *Compositor, key: vaxis.Key, action: surface.Action) void {
+        if (self.focusedPane()) |pane| pane.surface.sendKey(key, action);
     }
 
     pub fn sendMouse(self: *Compositor, mouse: vaxis.Mouse, col: i16, row: i16) void {
