@@ -77,6 +77,22 @@ pub const Surface = struct {
     /// surface, which is exactly when libvaxis stops needing the old ones.
     graphemes: std.heap.ArenaAllocator,
 
+    /// The encoder's view of the terminal's modes, published by the parser
+    /// so a keystroke can be encoded without taking the lock.
+    ///
+    /// The parser holds that lock, and under continuous output it re-acquires
+    /// faster than a sleeping waiter can be woken, so anything on the key
+    /// path that waits for it inherits the whole backlog: a keypress took
+    /// 23ms to reach the child while the same key took 0.2ms on a quiet
+    /// terminal. Nothing on this path may wait for the parser.
+    ///
+    /// Reading a snapshot one chunk old is not a loss of accuracy. The child
+    /// has not seen the bytes the parser is working through either, so a key
+    /// that arrives mid-parse genuinely precedes them, and encoding it
+    /// against the modes in force before that chunk is what the child will
+    /// expect. The lock gave the same answer, only slower.
+    modes: std.atomic.Value(u32),
+
     /// Where to append a line per input event, or null. The slice is not
     /// owned: it comes from the environment, which outlives the surface.
     input_log: ?[]const u8 = null,
@@ -117,6 +133,7 @@ pub const Surface = struct {
             .input_log = input_log,
             .cols = cols,
             .rows = rows,
+            .modes = .init(0),
         };
         errdefer self.graphemes.deinit();
 
@@ -136,6 +153,9 @@ pub const Surface = struct {
         // them ourselves.
         handler.effects.write_pty = writeOut;
         self.stream = .init(.{ .handler = handler, .allocator = alloc });
+        // Seeded here so the first keypress reads the terminal's real
+        // defaults rather than an all-zero word.
+        self.publishModes();
     }
 
     pub fn deinit(self: *Surface) void {
@@ -163,13 +183,21 @@ pub const Surface = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         self.stream.nextSlice(bytes);
+        // The bytes just parsed are what changes a mode, so this is the only
+        // place that has to republish.
+        self.publishModes();
     }
 
-    // Slicing the parse so the lock is released every 1KB was measured and
-    // reverted: the draw's wait went from 11ms to 23ms. A parser that
-    // re-acquires in a tight loop barges past a waiter that has to be woken,
-    // so shorter holds turned into starvation. Taking the lock less often is
-    // what helps, not holding it for less time.
+    // Two attempts at this lock were measured and reverted. Slicing the parse
+    // to release it every 1KB took the draw's wait from 11ms to 23ms, and
+    // having the parser sleep 200us whenever a reader was queued changed
+    // nothing measurable. `std.Io.Mutex` is a plain futex with no fairness:
+    // a woken waiter re-races for it and can lose repeatedly, which is why
+    // an acquisition costs about 10ms here while the work costs 0.25ms.
+    // Taking it less often is what helps. Not taking it at all would mean
+    // the parser publishing render state the way it publishes `modes`, with
+    // the buffers double-buffered so a draw never reads the one being
+    // written.
 
     /// Resize the terminal. The owner resizes whatever sits on the other end.
     pub fn resize(self: *Surface, cols: u16, rows: u16) !void {
@@ -190,12 +218,10 @@ pub const Surface = struct {
         var scratch: [4]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
 
-        // The encoding needs the terminal's modes, so it runs under the
-        // lock. The write does not, and must not: the sink is a pty write or
-        // a tmux command, and holding the lock across it makes the parser
-        // wait on the very terminal the keystroke is bound for.
-        self.mutex.lockUncancelable(self.io);
-        const opts: ghostty.input.KeyEncodeOptions = .fromTerminal(&self.terminal);
+        // No lock on this path at all. The modes come from the snapshot the
+        // parser publishes, and the write goes straight to the sink.
+        const modes: Modes = @bitCast(self.modes.load(.acquire));
+        const opts: ghostty.input.KeyEncodeOptions = modes.options();
         const sent: []const u8 = encoded: {
             ghostty.input.encodeKey(&writer, toKeyEvent(key, &scratch), opts) catch |err| switch (err) {
                 // Only a long pre-edit overflows 128 bytes, and vaxis
@@ -205,7 +231,6 @@ pub const Surface = struct {
             };
             break :encoded if (forwards(key, opts)) writer.buffered() else "";
         };
-        self.mutex.unlock(self.io);
 
         // Logged before the length check: a key that sends nothing is exactly
         // the case worth seeing.
@@ -233,6 +258,51 @@ pub const Surface = struct {
     /// reported, which mode the child had selected, and what the child was
     /// actually told. Guessing any of the three from a misbehaving program is
     /// what this exists to avoid.
+    /// The subset of `KeyEncodeOptions` that comes from terminal state,
+    /// narrow enough to publish in one atomic word. `macos_option_as_alt` is
+    /// left out on purpose: `fromTerminal` does not set it either.
+    const Modes = packed struct(u32) {
+        cursor_key_application: bool = false,
+        keypad_key_application: bool = false,
+        backarrow_key_mode: bool = false,
+        ignore_keypad_with_numlock: bool = false,
+        alt_esc_prefix: bool = false,
+        modify_other_keys_state_2: bool = false,
+        kitty_flags: u5 = 0,
+        unused: u21 = 0,
+
+        fn from(opts: ghostty.input.KeyEncodeOptions) Modes {
+            return .{
+                .cursor_key_application = opts.cursor_key_application,
+                .keypad_key_application = opts.keypad_key_application,
+                .backarrow_key_mode = opts.backarrow_key_mode,
+                .ignore_keypad_with_numlock = opts.ignore_keypad_with_numlock,
+                .alt_esc_prefix = opts.alt_esc_prefix,
+                .modify_other_keys_state_2 = opts.modify_other_keys_state_2,
+                .kitty_flags = @bitCast(opts.kitty_flags),
+            };
+        }
+
+        fn options(self: Modes) ghostty.input.KeyEncodeOptions {
+            return .{
+                .cursor_key_application = self.cursor_key_application,
+                .keypad_key_application = self.keypad_key_application,
+                .backarrow_key_mode = self.backarrow_key_mode,
+                .ignore_keypad_with_numlock = self.ignore_keypad_with_numlock,
+                .alt_esc_prefix = self.alt_esc_prefix,
+                .modify_other_keys_state_2 = self.modify_other_keys_state_2,
+                .kitty_flags = @bitCast(self.kitty_flags),
+            };
+        }
+    };
+
+    /// Publish the modes the encoder needs. Called with the lock held, by
+    /// whoever just changed terminal state.
+    fn publishModes(self: *Surface) void {
+        const packed_modes: Modes = .from(.fromTerminal(&self.terminal));
+        self.modes.store(@bitCast(packed_modes), .release);
+    }
+
     fn logKey(self: *Surface, key: vaxis.Key, opts: ghostty.input.KeyEncodeOptions, sent: []const u8) void {
         if (self.input_log == null) return;
         const mods = modNames(key.mods);
@@ -397,10 +467,17 @@ pub const Surface = struct {
     /// Draw the region into `win`. `fa` is a per-frame allocator, used only
     /// for graphemes that are not single-byte ASCII.
     pub fn draw(self: *Surface, win: vaxis.Window) !void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-
-        try self.render_state.update(self.alloc, &self.terminal);
+        // The lock covers the update and nothing else. The update is the only
+        // part that reads terminal state, which the parser owns; everything
+        // after it reads `render_state`, which the parser never touches. The
+        // acquisition costs about 10ms under continuous output and the work
+        // costs 0.25ms, so what matters is how often this is taken, not how
+        // long it is held.
+        {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            try self.render_state.update(self.alloc, &self.terminal);
+        }
         const state = &self.render_state;
         // libvaxis keeps the previous frame's cells, and only the sidebar is
         // cleared each frame, so an unchanged terminal needs no work at all.
@@ -464,9 +541,11 @@ pub const Surface = struct {
     }
 
     /// Where the child's cursor is within `win`, if it is visible.
+    /// No lock: `render_state` is written only by `draw`, and both are
+    /// called from the thread that owns the display. Taking it here cost a
+    /// second acquisition per frame, and an acquisition under continuous
+    /// output is 10ms of starvation, not a handful of nanoseconds.
     pub fn cursor(self: *Surface) ?Position {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
         const c = self.render_state.cursor;
         if (!c.visible) return null;
         const vp = c.viewport orelse return null;

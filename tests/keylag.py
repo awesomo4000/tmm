@@ -188,6 +188,46 @@ def shell_mode(root, load):
                        capture_output=True, timeout=10)
 
 
+def panes_mode(root, load):
+    """The same measurement through `--panes`, where a key leaves tmm as a
+    `send-keys -H` down the pipe of a long-lived `tmux -C attach` rather than
+    a write to a pty tmm owns. tmux's own share of that path is measured
+    separately and is under a millisecond, so what shows up here beyond that
+    belongs to tmm."""
+    marker = os.path.join(root, 'marker-panes-%d' % load)
+    open(marker, 'wb').close()
+    child = os.path.join(root, 'child.py')
+    Path(child).write_text(CHILD)
+    socket = os.path.join(root, 'sock-panes-%d' % load)
+    subprocess.run(['tmux', '-S', socket, 'new-session', '-d', '-s', 'lag',
+                    '-x', str(COLS), '-y', str(ROWS),
+                    '-e', 'LAG_MARKER=%s' % marker,
+                    '-e', 'LAG_LOAD=%d' % (1 if load else 0),
+                    '%s %s' % (sys.executable, child)],
+                   capture_output=True, timeout=10)
+    pid, fd = spawn([str(BINARY), '-S', socket, '--panes', '--session', 'lag',
+                     '--split', str(SPLIT)], {})
+    try:
+        pump(fd, 2.0)
+        os.write(fd, b'\x1b[24~')   # F12: move the keyboard to the region
+        pump(fd, 0.5)
+        return measure(fd, marker, load)
+    finally:
+        for sig in (15, 9):
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                break
+            time.sleep(0.2)
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
+        os.close(fd)
+        subprocess.run(['tmux', '-S', socket, 'kill-server'],
+                       capture_output=True, timeout=10)
+
+
 def main():
     if not BINARY.exists():
         raise SystemExit('build first: zig build')
@@ -199,7 +239,16 @@ def main():
         loaded = shell_mode(root, load=True)
         median, worst = report('under output load', loaded)
         if median > BUDGET_MS:
-            failures.append('loaded median %.1fms over the %.1fms budget' % (median, BUDGET_MS))
+            failures.append('--shell loaded median %.1fms over the %.1fms budget'
+                            % (median, BUDGET_MS))
+
+        print('--panes: key -> process in a tmux pane')
+        report('quiet', panes_mode(root, load=False))
+        panes_loaded = panes_mode(root, load=True)
+        median, worst = report('under output load', panes_loaded)
+        if median > BUDGET_MS:
+            failures.append('--panes loaded median %.1fms over the %.1fms budget'
+                            % (median, BUDGET_MS))
     for f in failures:
         print('FAIL', f)
     print('PASS' if not failures else 'FAIL')

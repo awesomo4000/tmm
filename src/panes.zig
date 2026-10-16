@@ -124,6 +124,15 @@ pub const Compositor = struct {
     }
 
     fn sendKeys(self: *Compositor, pane: []const u8, bytes: []const u8) void {
+        // Formatted on the stack: this is the key path. Three characters per
+        // byte plus the command and the pane id, and an encoded key is at
+        // most 128 bytes, so the buffer only ever falls short for a paste,
+        // which has no deadline and can afford the allocator.
+        var buf: [512]u8 = undefined;
+        if (control.Command.sendKeysHexBuf(&buf, pane, bytes)) |cmd| {
+            self.stream.send(cmd) catch {};
+            return;
+        } else |_| {}
         const cmd = control.Command.sendKeysHex(self.alloc, pane, bytes) catch return;
         defer self.alloc.free(cmd);
         self.stream.send(cmd) catch {};
