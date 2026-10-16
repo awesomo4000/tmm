@@ -107,8 +107,8 @@ pub const Region = struct {
         self.surface.sendMouse(mouse, col, row);
     }
 
-    pub fn draw(self: *Region, win: vaxis.Window) !void {
-        return self.surface.draw(win);
+    pub fn draw(self: *Region, win: vaxis.Window, images: surface.ImageSink) !void {
+        return self.surface.draw(win, images);
     }
 
     pub fn cursor(self: *Region) ?surface.Position {

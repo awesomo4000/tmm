@@ -312,7 +312,7 @@ pub const Compositor = struct {
     /// Draw every pane into `win`, with a border between neighbours. The rects
     /// are already in `win`'s coordinates because tmux tiled to the size we
     /// gave it.
-    pub fn draw(self: *Compositor, win: vaxis.Window) !void {
+    pub fn draw(self: *Compositor, win: vaxis.Window, images: surface.ImageSink) !void {
         self.mutex.lockUncancelable(self.io);
         const panes = try self.alloc.dupe(*Pane, self.panes.values());
         const focused = self.focused;
@@ -332,7 +332,7 @@ pub const Compositor = struct {
                 .width = @intCast(@min(r.w, win.width - r.x)),
                 .height = @intCast(@min(r.h, win.height - r.y)),
             });
-            try pane.surface.draw(child);
+            try pane.surface.draw(child, images);
             // tmux leaves one column and one row between panes for the
             // border; it is ours to draw because tmux draws it on its own
             // screen, which we never see.
