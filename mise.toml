@@ -25,6 +25,7 @@ run = [
   "python3 tests/compositor.py",
   "python3 tests/keylag.py",
   "python3 tests/keyscope.py --self-test",
+  "python3 tests/tmux_floor.py",
 ]
 
 [tasks.probe]

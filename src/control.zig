@@ -249,6 +249,21 @@ pub const Command = struct {
         const id = if (window.len != 0 and window[0] == '@') window[1..] else window;
         return std.fmt.allocPrint(alloc, "refresh-client -C @{s}:{d}x{d}\n", .{ id, w, h });
     }
+    /// `sendKeysHex` into a caller-supplied buffer, for the key path, which
+    /// must not allocate: a keystroke is the one thing in tmm with a
+    /// deadline, and an allocator is a lock and a syscall it does not need.
+    /// Returns `error.NoSpaceLeft` if the buffer is too small, which leaves
+    /// the caller free to fall back to the allocating form.
+    pub fn sendKeysHexBuf(buf: []u8, pane: []const u8, bytes: []const u8) ![]const u8 {
+        var w: std.Io.Writer = .fixed(buf);
+        try w.writeAll("send-keys -t ");
+        try w.writeAll(pane);
+        try w.writeAll(" -H");
+        for (bytes) |b| try w.print(" {x:0>2}", .{b});
+        try w.writeByte('\n');
+        return w.buffered();
+    }
+
     /// Send raw input bytes to a pane as hex key codes (survives any byte).
     pub fn sendKeysHex(alloc: Allocator, pane: []const u8, bytes: []const u8) ![]u8 {
         var out: std.ArrayList(u8) = .empty;
