@@ -37,6 +37,13 @@ pub fn build(b: *std.Build) void {
     b.step("cmprobe", "Run the control-mode probe").dependOn(&probe_run.step);
     b.getInstallStep().dependOn(&b.addInstallArtifact(probe, .{}).step);
 
+    // Timestamping endpoint for the latency harness. Installed, because
+    // tests/keylag.py runs it as the program whose keystrokes are timed.
+    const keyprobe_mod = b.createModule(.{ .root_source_file = b.path("src/keyprobe.zig"), .target = target, .optimize = optimize });
+    keyprobe_mod.link_libc = true;
+    const keyprobe = b.addExecutable(.{ .name = "keyprobe", .root_module = keyprobe_mod });
+    b.installArtifact(keyprobe);
+
     const run = b.addRunArtifact(exe);
     if (b.args) |args| run.addArgs(args);
     b.step("run", "Run tmm").dependOn(&run.step);

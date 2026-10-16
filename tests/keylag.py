@@ -5,21 +5,29 @@
 
 """Measures how long a keypress takes to reach the program inside tmm.
 
-The number that matters is the one the program inside experiences, so that
-is what is timed: the harness records a monotonic clock reading immediately
-before writing the key byte into tmm's pty, and the child records one the
-instant `read` returns it. CLOCK_MONOTONIC is shared across processes on
-this machine, so the difference is the delivery latency with nothing of the
-harness in it.
+Both ends read the same clock, `CLOCK_MONOTONIC_RAW`, and the far end is
+`keyprobe` (src/keyprobe.zig) rather than a Python script: the harness takes
+a reading immediately before writing the key byte, and the probe takes one
+on the line after its own `read` returns it. The difference is delivery
+latency with nothing of either program in it.
 
-Each condition is measured twice over: quiet, and with the child writing
-continuously the way a redrawing program does. The loaded case is the one
-that regressed in practice -- a flood of output and a keypress compete for
-the same event queue, and the key is behind the flood.
+The probe exists because this harness used to be Python on both ends, which
+put the noise floor -- one to five milliseconds of interpreter and scheduler
+jitter -- above the thing being measured, a tenth of a millisecond. An
+instrument has to be quicker than its subject or a worst case cannot be told
+from a hiccup in the instrument. `keyprobe --overhead` reports what a
+reading costs (19ns mean, 125ns worst here) and `--clock` is how the two
+clocks are checked to be the same source rather than assumed to be.
 
-The child never blocks on its own output (its stdout is nonblocking and
-EAGAIN is dropped), so a latency measured here is time tmm took to deliver
-the byte, not time the child spent stuck in write.
+Each mode is measured quiet and with the far end writing continuously the
+way a redrawing program does, because only the loaded case ever regressed.
+`--shell` writes to a pty tmm owns; `--panes` goes out as `send-keys -H`
+through tmux, whose own share of that path is measured by tests/tmux_floor.py
+and is under a millisecond.
+
+The probe never blocks on its own output and writes its records only at
+exit, so a latency reported here is time tmm took and not time the probe
+spent in `write`.
 
 Only disposable files and tmux sockets under /tmp are mutated.
 """
@@ -47,41 +55,48 @@ KEYS = 12
 BUDGET_MS = 5.0
 WCET_MS = 10.0
 
-CHILD = r'''
-import os, select, sys, time
-marker = os.environ['LAG_MARKER']
-load = os.environ.get('LAG_LOAD') == '1'
-os.set_blocking(1, False)
-import termios, tty
-try:
-    tty.setraw(0)
-except Exception:
-    pass
-# A full screen of output per iteration, like a program repainting itself.
-chunk = (('x' * 78) + '\r\n').encode() * 40
-log = open(marker, 'ab', buffering=0)
-while True:
-    r, _, _ = select.select([0], [], [], 0 if load else 0.05)
-    if r:
+PROBE = Path(__file__).resolve().parents[1] / 'zig-out/bin/keyprobe'
+CLOCK = getattr(time, 'CLOCK_MONOTONIC_RAW', time.CLOCK_MONOTONIC)
+
+
+def clock_ns():
+    """The one clock, read the same way the probe reads it."""
+    return time.clock_gettime_ns(CLOCK)
+
+
+def runner(root, load, log):
+    """A tiny script for tmm's SHELL, so the region's child is the probe."""
+    path = os.path.join(root, 'run-%d.sh' % load)
+    Path(path).write_text('#!/bin/sh\nexec %s --log %s%s\n'
+                          % (PROBE, log, ' --load' if load else ''))
+    os.chmod(path, 0o755)
+    return path
+
+
+def arrivals(log):
+    """Parse the probe's records: one `<nanoseconds> <hex bytes>` per read."""
+    out = {}
+    try:
+        text = Path(log).read_text()
+    except FileNotFoundError:
+        return out
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
         try:
-            data = os.read(0, 64)
-        except OSError:
-            break
-        if not data:
-            break
-        now = time.monotonic()
-        for byte in data:
-            log.write(('%r %.6f\n' % (bytes([byte]), now)).encode())
-        if b'Q' in data:
-            break
-    if load:
-        try:
-            os.write(1, chunk)
-        except BlockingIOError:
-            pass
-        except OSError:
-            break
-'''
+            at = int(parts[0])
+        except ValueError:
+            continue
+        raw = parts[1]
+        # A single read can carry several keys; each gets that reading.
+        for i in range(0, len(raw) - 1, 2):
+            try:
+                char = bytes([int(raw[i:i + 2], 16)]).decode('latin-1')
+            except ValueError:
+                continue
+            out.setdefault(char, at)
+    return out
 
 
 def spawn(argv, env, rows=ROWS, cols=COLS):
@@ -111,45 +126,40 @@ def pump(fd, duration):
                 os.write(fd, b'\x1b[?62;c')
 
 
-def measure(fd, marker, load):
+def measure(fd, log, load):
     """Send KEYS distinct keys one at a time, return per-key latency in ms."""
     sent = {}
     keys = 'abcdefghijkl'[:KEYS]
     for key in keys:
         pump(fd, 0.12 if load else 0.05)
-        sent[key] = time.monotonic()
+        sent[key] = clock_ns()
         os.write(fd, key.encode())
-        pump(fd, 0.35)
-
-    def collected():
-        found = {}
-        for line in Path(marker).read_bytes().decode(errors='replace').splitlines():
-            try:
-                raw, stamp = line.rsplit(' ', 1)
-                found.setdefault(eval(raw).decode(), float(stamp))   # b'a' -> a
-            except Exception:
-                continue
-        return found
-
-    # A key still in flight is the symptom, so wait well past the budget for
-    # it rather than reporting it as lost.
-    deadline = time.monotonic() + 10.0
-    arrived = collected()
-    while time.monotonic() < deadline and any(k not in arrived for k in keys):
         pump(fd, 0.25)
-        arrived = collected()
-    missing = [k for k in keys if k not in arrived]
+
+    # The probe writes its records at exit, so that writing a file between
+    # two keystrokes cannot be charged to the next one. Stop it, then read.
+    os.write(fd, b'Q')
+    pump(fd, 1.0)
+    got = arrivals(log)
+    missing = [k for k in keys if k not in got]
     if missing:
-        raise AssertionError('keys never reached the child: %r (load=%s)' % (missing, load))
-    return [(arrived[k] - sent[k]) * 1000.0 for k in keys]
+        raise AssertionError('keys never reached the probe: %r (load=%s)'
+                             % (missing, load))
+    return [(got[k] - sent[k]) / 1e6 for k in keys]
 
 
 def report(label, samples):
-    samples = sorted(samples)
-    p90 = samples[min(len(samples) - 1, int(len(samples) * 0.9))]
-    print('  %-22s min %6.1f  median %6.1f  p90 %6.1f  max %6.1f  ms'
-          % (label, samples[0], statistics.median(samples), p90, samples[-1]))
-    return statistics.median(samples), samples[-1]
+    """Where the worst sample fell is reported too: the first keystroke being
+    the slow one means something settling, and a late one means something
+    recurring. Guessing between those cost a wrong answer once already."""
+    worst_at = max(range(len(samples)), key=samples.__getitem__)
+    ordered = sorted(samples)
+    p90 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.9))]
+    print('  %-22s min %7.3f  median %7.3f  p90 %7.3f  max %7.3f  ms  '
+          '(worst at key %d of %d)'
+          % (label, ordered[0], statistics.median(ordered), p90, ordered[-1],
+             worst_at, len(samples)))
+    return statistics.median(ordered), ordered[-1]
 
 
 def check(failures, mode, median, worst):
@@ -162,30 +172,19 @@ def check(failures, mode, median, worst):
 
 
 def shell_mode(root, load):
-    marker = os.path.join(root, 'marker-shell-%d' % load)
-    open(marker, 'wb').close()
-    child = os.path.join(root, 'child.py')
-    Path(child).write_text(CHILD)
-    runner = os.path.join(root, 'run.sh')
-    Path(runner).write_text('#!/bin/sh\nexec %s %s\n' % (sys.executable, child))
-    os.chmod(runner, 0o755)
-    socket = os.path.join(root, 'sock-shell')
+    """A key into the region, whose child is the probe on a pty tmm owns."""
+    log = os.path.join(root, 'shell-%d.log' % load)
+    socket = os.path.join(root, 'sock-shell-%d' % load)
     subprocess.run(['tmux', '-S', socket, 'new-session', '-d', '-s', 'lag'],
                    capture_output=True, timeout=10)
     pid, fd = spawn([str(BINARY), '-S', socket, '--shell', '--split', str(SPLIT)],
-                    {'SHELL': runner, 'LAG_MARKER': marker,
-                     'LAG_LOAD': '1' if load else '0'})
+                    {'SHELL': runner(root, load, log)})
     try:
         pump(fd, 1.2)
         os.write(fd, b'\x1b[24~')   # F12: move the keyboard to the region
         pump(fd, 0.3)
-        return measure(fd, marker, load)
+        return measure(fd, log, load)
     finally:
-        try:
-            os.write(fd, b'Q')
-        except OSError:
-            pass
-        pump(fd, 0.2)
         for sig in (15, 9):
             try:
                 os.kill(pid, sig)
@@ -204,19 +203,14 @@ def shell_mode(root, load):
 def panes_mode(root, load):
     """The same measurement through `--panes`, where a key leaves tmm as a
     `send-keys -H` down the pipe of a long-lived `tmux -C attach` rather than
-    a write to a pty tmm owns. tmux's own share of that path is measured
-    separately and is under a millisecond, so what shows up here beyond that
-    belongs to tmm."""
-    marker = os.path.join(root, 'marker-panes-%d' % load)
-    open(marker, 'wb').close()
-    child = os.path.join(root, 'child.py')
-    Path(child).write_text(CHILD)
+    a write to a pty tmm owns. tmux's own share of that path is measured by
+    tests/tmux_floor.py and is under a millisecond, so what shows up here
+    beyond that belongs to tmm."""
+    log = os.path.join(root, 'panes-%d.log' % load)
     socket = os.path.join(root, 'sock-panes-%d' % load)
     subprocess.run(['tmux', '-S', socket, 'new-session', '-d', '-s', 'lag',
                     '-x', str(COLS), '-y', str(ROWS),
-                    '-e', 'LAG_MARKER=%s' % marker,
-                    '-e', 'LAG_LOAD=%d' % (1 if load else 0),
-                    '%s %s' % (sys.executable, child)],
+                    '%s --log %s%s' % (PROBE, log, ' --load' if load else '')],
                    capture_output=True, timeout=10)
     pid, fd = spawn([str(BINARY), '-S', socket, '--panes', '--session', 'lag',
                      '--split', str(SPLIT)], {})
@@ -224,7 +218,7 @@ def panes_mode(root, load):
         pump(fd, 2.0)
         os.write(fd, b'\x1b[24~')   # F12: move the keyboard to the region
         pump(fd, 0.5)
-        return measure(fd, marker, load)
+        return measure(fd, log, load)
     finally:
         for sig in (15, 9):
             try:
@@ -242,8 +236,9 @@ def panes_mode(root, load):
 
 
 def main():
-    if not BINARY.exists():
-        raise SystemExit('build first: zig build')
+    for binary in (BINARY, PROBE):
+        if not binary.exists():
+            raise SystemExit('build first: zig build (missing %s)' % binary.name)
     failures = []
     with tempfile.TemporaryDirectory(prefix='tmm-keylag-', dir='/tmp') as root:
         print('--shell: key -> program inside the region')
