@@ -273,10 +273,17 @@ pub const Stream = struct {
 
     /// Write a tmux command for the control client to run. The reply arrives as
     /// a guard block (`reply_begin` .. `reply_end`) in the event stream.
+    /// Write one command line to the control client.
+    ///
+    /// Exactly one newline is written, whatever the caller supplied. A blank
+    /// line is not a harmless no-op to tmux: the control client takes it as
+    /// end of input and answers `%exit`, detaching with no error anywhere.
+    /// The `control.Command` builders end in a newline of their own, so
+    /// passing one here used to kill the stream on its first command.
     pub fn send(self: *Stream, command: []const u8) !void {
         var buf: [1024]u8 = undefined;
         var w = self.child.stdin.?.writer(self.io, &buf);
-        try w.interface.writeAll(command);
+        try w.interface.writeAll(std.mem.trimEnd(u8, command, "\r\n"));
         try w.interface.writeAll("\n");
         try w.interface.flush();
     }

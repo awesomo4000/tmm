@@ -832,6 +832,47 @@ went to the UI.
 `FileNotFound` is deliberately not in the set: it also covers a missing tmux
 binary, which is a different problem.
 
+### Built 10/15/2026: the compositor, first cut (`tmm --panes`)
+
+`src/panes.zig`. One `Surface` per tmux pane, fed from a dedicated control
+client. tmux keeps the session, the processes and the scrollback; tmm is the
+terminal. Neither direction goes through tmux's emulation, which is the whole
+point: `%output` is tapped before tmux's parser, and `send-keys -H` is a raw
+byte channel back.
+
+Working and asserted by `tests/compositor.py`: layout from `%layout-change`
+through `layout.zig`, a pane VT per leaf sized from the rect, `%output`
+decoded and routed, pane borders, panes appearing and disappearing with the
+layout, keys reaching the focused pane's process, and a click moving the
+keyboard. Each pane gets its own directory in that test, so where a typed
+command lands proves which pane received it.
+
+Sizing goes out with `refresh-client -C`; tmux re-tiles, delivers SIGWINCH to
+the pane processes itself and answers with a fresh layout. tmm never sizes a
+pane.
+
+**The sharp edge that cost the most time: a blank command line detaches a
+control client.** tmux takes it as end of input and answers `%exit`, with no
+error anywhere -- the stream simply stops. `control.Command.*` builders end in
+a newline and `Stream.send` added another, so the compositor died on its first
+command and looked like it had never attached. `Stream.send` now writes
+exactly one newline whatever it is handed. `tests/compositor.py` guards it:
+without the fix the client never reaches the region width and the test says
+so.
+
+Two lifetime notes for whoever extends this:
+
+- The live-set in `applyLayout` is keyed by the pane's own id, never by the
+  stack buffer the id is formatted into. That buffer is reused each iteration,
+  so a key into it dangles before the sweep reads it -- which presents as
+  every pane being destroyed the moment it is created.
+- `Pane` pointers are heap-allocated and stable because a `Surface` must not
+  move; the map stores pointers for that reason.
+
+Not yet: kitty graphics are parsed and stored per pane but not drawn (Phase
+4), scrollback is not reachable, and only the session's current window is
+composited.
+
 ### tmm inside tmm is the region's fidelity test
 
 `tests/split_shell.py` nests tmm three deep inside its own region and asserts

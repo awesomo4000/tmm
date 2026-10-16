@@ -9,6 +9,7 @@ const m = @import("model.zig");
 const sidebar = @import("sidebar.zig");
 const backend = @import("backend.zig");
 const region_mod = @import("region.zig");
+const panes_mod = @import("panes.zig");
 pub const panic = std.debug.FullPanic(struct {
     fn call(message: []const u8, address: ?usize) noreturn {
         vaxis.recover();
@@ -59,6 +60,10 @@ const help =
     \\       Drag the divider to resize. F12 moves focus between the two.
     \\       The shell is an ordinary one, so tmux attach works inside it.
     \\--split sets the starting sidebar width in columns; it implies --shell.
+    \\--panes composites a session's panes on the right instead of a shell.
+    \\       tmm is the terminal for each pane; tmux still owns the session,
+    \\       the processes and the scrollback. Implies the split layout.
+    \\--session picks which session --panes shows; the newest by default.
     \\
 ;
 pub fn main(init: std.process.Init) !void {
@@ -71,6 +76,8 @@ pub fn main(init: std.process.Init) !void {
     var label: ?[]const u8 = null;
     var dump = false;
     var shell = false;
+    var panes = false;
+    var panes_session: ?[]const u8 = null;
     var split_request: ?u16 = null;
     var config_arena = std.heap.ArenaAllocator.init(a);
     defer config_arena.deinit();
@@ -99,6 +106,10 @@ pub fn main(init: std.process.Init) !void {
             try servers.append(ca, .{ .name = std.fs.path.basename(path), .options = .{ .socket_path = path } });
         } else if (std.mem.eql(u8, arg, "--shell")) {
             shell = true;
+        } else if (std.mem.eql(u8, arg, "--panes")) {
+            panes = true;
+        } else if (std.mem.eql(u8, arg, "--session")) {
+            panes_session = args.next() orelse return error.MissingSessionName;
         } else if (std.mem.eql(u8, arg, "--split")) {
             const text = args.next() orelse return error.MissingSplitWidth;
             split_request = std.fmt.parseInt(u16, text, 10) catch return error.InvalidSplitWidth;
@@ -143,14 +154,30 @@ pub fn main(init: std.process.Init) !void {
     // client. Created before the backend tasks so a failure here exits before
     // anything else needs tearing down.
     var split: ?u16 = split_request;
+    var compositor: ?*panes_mod.Compositor = null;
+    if (panes) {
+        compositor = try panes_mod.Compositor.create(a, io, .{
+            .socket = opts.socket_path,
+            .label = opts.socket_name,
+            .session = panes_session,
+        }, init.environ_map.get("TMM_INPUT_LOG"));
+    }
+    var compositor_task = if (compositor) |c|
+        try io.concurrent(paneWorker, .{ io, c, &loop })
+    else
+        null;
+    defer if (compositor) |c| {
+        c.stream.close();
+        if (compositor_task) |*t| t.cancel(io);
+        c.destroy();
+    };
     var region: ?*region_mod.Region = null;
-    if (shell) {
+    if (shell and !panes) {
         const argv = try ca.dupe([]const u8, &.{init.environ_map.get("SHELL") orelse "/bin/sh"});
         // Sized provisionally: vaxis has not measured the window yet, and will
         // not until the first resize event, so the real size is applied by the
         // first frame below. The child sees one resize at startup either way.
-        region = try region_mod.Region.create(a, io, argv, 80, 24,
-            init.environ_map.get("TMM_INPUT_LOG"));
+        region = try region_mod.Region.create(a, io, argv, 80, 24, init.environ_map.get("TMM_INPUT_LOG"));
     }
     var region_task = if (region) |r| try io.concurrent(ptyWorker, .{ io, r, &loop }) else null;
     defer if (region) |r| {
@@ -267,7 +294,7 @@ pub fn main(init: std.process.Init) !void {
             },
             .mouse => |mouse| mouse_event: {
                 mouse_cursor = true;
-                if (region != null) {
+                if (region != null or compositor != null) {
                     const divider: i32 = split.?;
                     if (dragging) {
                         if (mouse.type == .release) dragging = false else split = clampSplit(mouse.col, vx.window().width);
@@ -283,8 +310,11 @@ pub fn main(init: std.process.Init) !void {
                     // reaching a program the user is not working in.
                     if (mouse.col > divider) {
                         if (mouse.type == .press) focus = .region;
-                        if (focus == .region) if (region) |r|
-                            r.sendMouse(mouse, mouse.col - @as(i16, @intCast(divider + 1)), mouse.row);
+                        if (focus == .region) {
+                            const col = mouse.col - @as(i16, @intCast(divider + 1));
+                            if (region) |r| r.sendMouse(mouse, col, mouse.row);
+                            if (compositor) |c| c.sendMouse(mouse, col, mouse.row);
+                        }
                         break :mouse_event;
                     }
                     if (mouse.type == .press) focus = .sidebar;
@@ -318,7 +348,7 @@ pub fn main(init: std.process.Init) !void {
                 mouse_cursor = false;
                 if (pressed) |p| a.free(p);
                 pressed = null;
-                if (region) |r| {
+                if (region != null or compositor != null) {
                     // One key moves focus, and it is deliberately not a
                     // plausible shell or tmux binding: ctrl+b belongs to the
                     // tmux that may be running inside the region.
@@ -327,7 +357,8 @@ pub fn main(init: std.process.Init) !void {
                         break :key_event;
                     }
                     if (focus == .region) {
-                        r.sendKey(key);
+                        if (region) |r| r.sendKey(key);
+                        if (compositor) |c| c.sendKey(key);
                         break :key_event;
                     }
                 }
@@ -493,8 +524,8 @@ pub fn main(init: std.process.Init) !void {
         // The split is kept as the width the user asked for, and clamped to
         // the window only here: the window is not measured until the first
         // resize event, so clamping any earlier collapses it to the minimum.
-        if (region != null and split == null) split = natural;
-        const win = if (region == null) full else full.child(.{
+        if ((region != null or compositor != null) and split == null) split = natural;
+        const win = if (region == null and compositor == null) full else full.child(.{
             .width = clampSplit(split.?, full.width),
             .height = full.height,
         });
@@ -510,6 +541,12 @@ pub fn main(init: std.process.Init) !void {
         if (region) |r| {
             if (r.exited.load(.acquire)) focus = .sidebar;
             r.resize(full.width -| (win.width + 1), full.height) catch {};
+        }
+        if (compositor) |c| {
+            if (c.ended.load(.acquire)) focus = .sidebar;
+            // tmux re-tiles to this and answers with a fresh layout; tmm
+            // never sizes a pane itself.
+            c.resize(full.width -| (win.width + 1), full.height);
         }
         win.clear();
         win.hideCursor();
@@ -558,13 +595,13 @@ pub fn main(init: std.process.Init) !void {
         if (win.height >= 2) draw(win, fa, win.height - 2, error_text orelse "", .{ .fg = .{ .index = 1 } });
         if (win.height >= 1) draw(win, fa, win.height - 1, if (editor) |edit|
             if (edit.pending) "saving..." else "Enter save  Esc cancel"
-        else if (region == null)
+        else if (region == null and compositor == null)
             "j/k move  q quit"
         else if (focus == .region)
             "F12 sidebar"
         else
             "j/k move  F12 shell  q quit", .{ .fg = .{ .index = 8 } });
-        if (region) |r| {
+        if (region != null or compositor != null) {
             const divider = win.width;
             for (0..full.height) |y| full.writeCell(divider, @intCast(y), .{
                 .char = .{ .grapheme = "\u{2502}", .width = 1 },
@@ -573,10 +610,12 @@ pub fn main(init: std.process.Init) !void {
             const region_width = full.width -| (divider + 1);
             if (region_width > 0) {
                 const pane = full.child(.{ .x_off = divider + 1, .width = region_width, .height = full.height });
-                try r.draw(pane);
+                if (region) |r| try r.draw(pane);
+                if (compositor) |c| try c.draw(pane);
                 // The sidebar hid the cursor above, so showing it here is
                 // also what tells the user which side has the keyboard.
-                if (focus == .region) if (r.cursor()) |c| {
+                const at = if (region) |r| r.cursor() else if (compositor) |c| c.cursor() else null;
+                if (focus == .region) if (at) |c| {
                     if (c.col < region_width and c.row < full.height)
                         full.showCursor(divider + 1 + c.col, c.row);
                 };
@@ -601,6 +640,22 @@ fn clampSplit(col: i32, width: u16) u16 {
 /// Read the region's child forever, feeding its output to the terminal and
 /// nudging the UI. The loop ends when the pty closes, which is either the
 /// child exiting or shutdown closing it underneath us.
+/// Read the compositor's control stream forever, applying each event and
+/// nudging the UI when one changed something worth drawing. The loop ends
+/// when the stream closes, which is tmux exiting or shutdown closing it.
+fn paneWorker(io: std.Io, c: *panes_mod.Compositor, loop: *vaxis.Loop(Event)) void {
+    _ = io;
+    while (true) {
+        const event = c.stream.next() catch break orelse break;
+        const changed = c.apply(event) catch continue;
+        if (!changed) continue;
+        // A dropped wake is harmless: the draw always reads the newest state.
+        _ = loop.tryPostEvent(.pty) catch break;
+    }
+    c.ended.store(true, .release);
+    _ = loop.tryPostEvent(.pty) catch {};
+}
+
 fn ptyWorker(io: std.Io, region: *region_mod.Region, loop: *vaxis.Loop(Event)) void {
     var buf: [16 * 1024]u8 = undefined;
     while (true) {

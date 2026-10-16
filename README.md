@@ -49,6 +49,16 @@ A modifier key pressed on its own is not forwarded unless the program inside ask
 
 Setting `TMM_INPUT_LOG` to a path appends one line per key and mouse event in the region: what the outer terminal reported, which keyboard mode the program inside had selected, and the exact bytes it was sent. That is the whole boundary an input bug lives on, and reading it beats inferring any of the three from how a program misbehaves.
 
+## Compositor mode
+
+`--panes` composites a tmux session's panes on the right instead of a shell, with `--session` to pick one. tmm is the terminal for every pane: it attaches a control client, sizes it with `refresh-client -C` so tmux re-tiles to the space available, builds one terminal per pane from the layout, and feeds each one the raw `%output` for its pane. Keys go back the other way as `send-keys -H`.
+
+Neither direction passes through tmux's own terminal emulation. That is what makes it possible to give a pane capabilities tmux does not have: `%output` is tapped before tmux's parser runs, so a pane's bytes arrive verbatim, and `send-keys -H` carries any byte back. Clicking a pane moves the keyboard to it.
+
+tmux still owns the session, the windows, the processes, the scrollback and the persistence, and still delivers SIGWINCH itself. tmm never resizes a pane.
+
+Kitty graphics are parsed and stored per pane but not yet drawn, scrollback is not reachable, and only the session's current window is composited.
+
 ## Navigation
 
 Hover highlights an item; click selects it. Wheel scrolling moves the list without activating anything. `j`/`k` or arrows move among actionable rows; Enter activates. `q` or Ctrl-C exits.
