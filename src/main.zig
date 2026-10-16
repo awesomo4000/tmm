@@ -200,6 +200,8 @@ pub fn main(init: std.process.Init) !void {
         if (region_task) |*t| t.cancel(io);
         r.destroy();
     };
+    var transmitter: ImageTransmitter = .{ .vx = &vx, .tty = &tty, .alloc = a };
+    const images = transmitter.sink();
     var focus: enum { sidebar, region } = .sidebar;
     var dragging = false;
     var shared: backend.Shared = .{};
@@ -692,8 +694,8 @@ pub fn main(init: std.process.Init) !void {
             const region_width = full.width -| (divider + 1);
             if (region_width > 0) {
                 const pane = full.child(.{ .x_off = divider + 1, .width = region_width, .height = full.height });
-                if (region) |r| try r.draw(pane);
-                if (compositor) |c| try c.draw(pane);
+                if (region) |r| try r.draw(pane, images);
+                if (compositor) |c| try c.draw(pane, images);
                 // The sidebar hid the cursor above, so showing it here is
                 // also what tells the user which side has the keyboard.
                 const at = if (region) |r| r.cursor() else if (compositor) |c| c.cursor() else null;
@@ -735,6 +737,39 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 }
+/// The display side of `surface.ImageSink`: it owns the vaxis instance and
+/// the real terminal, which is what transmitting an image needs.
+const ImageTransmitter = struct {
+    vx: *vaxis.Vaxis,
+    tty: *vaxis.Tty,
+    alloc: std.mem.Allocator,
+
+    fn sink(self: *ImageTransmitter) surface.ImageSink {
+        return .{ .ctx = self, .transmit = transmit };
+    }
+
+    fn transmit(
+        ctx: ?*anyopaque,
+        bytes: []const u8,
+        width: u16,
+        height: u16,
+        format: vaxis.Image.TransmitFormat,
+    ) anyerror!vaxis.Image {
+        const self: *ImageTransmitter = @ptrCast(@alignCast(ctx.?));
+        // Base64, because `transmitPreEncodedImage` writes what it is given
+        // and the protocol carries the payload inside an APC: a pixel that
+        // happens to be 0x1b would end the sequence in the middle of the
+        // image. "PreEncoded" means the caller encodes, which is this.
+        const encoder = std.base64.standard.Encoder;
+        const encoded = try self.alloc.alloc(u8, encoder.calcSize(bytes.len));
+        defer self.alloc.free(encoded);
+        _ = encoder.encode(encoded, bytes);
+        // A terminal without kitty graphics reports that here, and the
+        // surface leaves the image undrawn.
+        return self.vx.transmitPreEncodedImage(self.tty.writer(), encoded, width, height, format);
+    }
+};
+
 /// Hand a key to whichever of the two owns the region.
 fn forwardKey(region: ?*region_mod.Region, compositor: ?*panes_mod.Compositor, key: vaxis.Key, action: surface.Action) void {
     if (region) |r| r.sendKey(key, action);

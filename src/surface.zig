@@ -48,6 +48,48 @@ pub const Position = struct { col: u16, row: u16 };
 /// nothing for a program that wants presses only.
 pub const Action = enum { press, release };
 
+/// How an image reaches the outer terminal.
+///
+/// The surface cannot do this itself: transmitting means writing the pixels
+/// down the real tty, which belongs to the display, and only the thread that
+/// owns the vaxis instance may touch it. So the owner passes this in and the
+/// surface calls it at most once per image.
+pub const ImageSink = struct {
+    ctx: ?*anyopaque,
+    transmit: *const fn (
+        ctx: ?*anyopaque,
+        bytes: []const u8,
+        width: u16,
+        height: u16,
+        format: vaxis.Image.TransmitFormat,
+    ) anyerror!vaxis.Image,
+
+    fn unsupported(_: ?*anyopaque, _: []const u8, _: u16, _: u16, _: vaxis.Image.TransmitFormat) anyerror!vaxis.Image {
+        return error.NoGraphicsCapability;
+    }
+
+    /// For a display that cannot show images, or has not been asked to.
+    pub const none: ImageSink = .{ .ctx = null, .transmit = unsupported };
+};
+
+/// Where one image sits on the surface, as the parser last published it.
+///
+/// A snapshot rather than a live read: the placements live in terminal state
+/// behind the parse lock, and the draw must not wait for that lock -- the
+/// parser holds it most of the time under load. Only the position is copied,
+/// which is a few words per image; the pixels stay where they are and are
+/// fetched once, when the image is first transmitted.
+pub const ImagePlacement = struct {
+    image_id: u32,
+    col: u16,
+    row: u16,
+    z: i32,
+    source_x: u32,
+    source_y: u32,
+    source_width: u32,
+    source_height: u32,
+};
+
 /// Where a surface's output goes. `write` must tolerate being called from
 /// inside a `feed`, which already holds the surface mutex.
 pub const Sink = struct {
@@ -112,6 +154,34 @@ pub const Surface = struct {
     /// takes `render` alone, because it reads no terminal state.
     render: std.Io.Mutex = .init,
 
+    /// Where the images are, refreshed with the render state and read under
+    /// the same lock.
+    placements: std.ArrayListUnmanaged(ImagePlacement) = .empty,
+
+    /// How many placements are published, readable without the lock.
+    ///
+    /// Most frames have no images at all, and the render lock is unfair: a
+    /// draw that asks for it every frame can be starved by a parser that
+    /// publishes on every chunk of output. Taking it unconditionally cost
+    /// the compositor's worst-case keystroke, which went from 0.6ms to
+    /// 8.8ms until this check was put in front of it.
+    image_count: std.atomic.Value(u32),
+
+    /// Where the draw copies placements to, so it can let go of the lock
+    /// before transmitting. Touched only by the thread that draws.
+    placement_scratch: std.ArrayListUnmanaged(ImagePlacement) = .empty,
+
+    /// Images already handed to the outer terminal, keyed by the id the child
+    /// gave them. Transmitting sends every pixel down the real tty, so it
+    /// happens once per image and never once per frame.
+    transmitted: std.AutoHashMapUnmanaged(u32, vaxis.Image) = .empty,
+
+    /// The storage generation the cache above was built from. The generation
+    /// moves when image data or the placement set changes and deliberately
+    /// does not move for a scroll or a resize, which is exactly the
+    /// distinction a transmit cache needs.
+    images_generation: u64 = 0,
+
     /// Set when a published update carried a change, cleared by the draw
     /// that consumes it.
     ///
@@ -164,6 +234,7 @@ pub const Surface = struct {
             .cols = cols,
             .rows = rows,
             .modes = .init(0),
+            .image_count = .init(0),
             .needs_draw = .init(true),
         };
         errdefer self.graphemes.deinit();
@@ -191,6 +262,9 @@ pub const Surface = struct {
     }
 
     pub fn deinit(self: *Surface) void {
+        self.placements.deinit(self.alloc);
+        self.placement_scratch.deinit(self.alloc);
+        self.transmitted.deinit(self.alloc);
         self.render_state.deinit(self.alloc);
         self.graphemes.deinit();
         self.stream.deinit();
@@ -338,6 +412,59 @@ pub const Surface = struct {
         defer self.render.unlock(self.io);
         self.render_state.update(self.alloc, &self.terminal) catch return;
         if (self.render_state.dirty != .false) self.needs_draw.store(true, .release);
+        self.publishPlacements();
+    }
+
+    /// Copy out where each image sits. Called with both locks held, by the
+    /// publisher, so the draw can read positions without the parse lock.
+    ///
+    /// Only placements pinned to the screen are published. A virtual
+    /// placement is drawn by the text layout through unicode placeholders and
+    /// has no position of its own, and a relative one is anchored to a parent
+    /// chain; neither is resolved here yet.
+    fn publishPlacements(self: *Surface) void {
+        const storage = &self.terminal.screens.active.kitty_images;
+        if (!storage.dirty and storage.generation == self.images_generation) return;
+
+        const had_images = self.placements.items.len != 0;
+        self.placements.clearRetainingCapacity();
+        var it = storage.placements.iterator();
+        while (it.next()) |entry| {
+            const placement = entry.value_ptr;
+            const pin = switch (placement.location) {
+                .pin => |pin| pin,
+                else => continue,
+            };
+            const image = storage.imageById(entry.key_ptr.image_id) orelse continue;
+            const point = self.terminal.screens.active.pages.pointFromPin(.viewport, pin.*) orelse continue;
+            const source = placement.sourceRect(image);
+            self.placements.append(self.alloc, .{
+                .image_id = entry.key_ptr.image_id,
+                .col = @intCast(point.viewport.x),
+                .row = @intCast(point.viewport.y),
+                .z = placement.z,
+                .source_x = source.x,
+                .source_y = source.y,
+                .source_width = source.width,
+                .source_height = source.height,
+            }) catch break;
+        }
+        // A changed generation means the pixels may have changed too, so
+        // whatever the outer terminal holds for these ids is stale.
+        if (storage.generation != self.images_generation) {
+            self.images_generation = storage.generation;
+            self.transmitted.clearRetainingCapacity();
+        }
+        self.image_count.store(@intCast(self.placements.items.len), .release);
+        // Only when images are actually involved. `storage.dirty` is set by
+        // scrolling, so this runs on nearly every chunk of output, and
+        // marking every one of those frames as needing a redraw undid the
+        // clean-frame check that the whole draw path rests on: the worst-case
+        // keystroke went from 0.6ms to 29ms, which is the parse lock being
+        // waited for again by a draw that no longer had any reason to run.
+        if (had_images or self.placements.items.len != 0) {
+            self.needs_draw.store(true, .release);
+        }
     }
 
     /// Publish the modes the encoder needs. Called with the lock held, by
@@ -510,11 +637,17 @@ pub const Surface = struct {
 
     /// Draw the region into `win`. `fa` is a per-frame allocator, used only
     /// for graphemes that are not single-byte ASCII.
-    pub fn draw(self: *Surface, win: vaxis.Window) !void {
+    pub fn draw(self: *Surface, win: vaxis.Window, sink: ImageSink) !void {
         // libvaxis keeps the previous frame's cells, and only the sidebar is
         // cleared each frame, so an unchanged terminal needs no work at all.
         // Without this the whole region is rewritten on every sidebar refresh.
-        if (!self.needs_draw.swap(false, .acq_rel)) return;
+        // Images are placed every frame whatever the cells did: libvaxis
+        // keeps a placement only for the frame it was drawn in, so a frame
+        // that skips this one drops the image off the screen.
+        if (!self.needs_draw.swap(false, .acq_rel)) {
+            self.drawImages(win, sink);
+            return;
+        }
 
         // Only the render lock, which the parser holds for one update. The
         // parse lock is never taken here, so how long this waits no longer
@@ -580,6 +713,97 @@ pub const Surface = struct {
     }
 
     /// Where the child's cursor is within `win`, if it is visible.
+    /// Place every published image into `win`.
+    ///
+    /// Transmission happens at most once per image: the bytes go down the
+    /// real tty, and an image redrawn per frame would saturate it. The
+    /// pixels are read under the parse lock, which is the one place the
+    /// display still waits for the parser -- acceptable because it happens
+    /// when an image first appears and not while it is on screen.
+    fn drawImages(self: *Surface, win: vaxis.Window, sink: ImageSink) void {
+        const count = self.image_count.load(.acquire);
+        if (count == 0) return;
+
+        // The placements are copied out, not iterated in place and not
+        // iterated under the lock.
+        //
+        // Not in place, because the publisher clears the list and refills it,
+        // so an unlocked walk would be reading memory being rewritten. Not
+        // under the lock either, because transmitting an image takes the
+        // parse lock, and taking that while holding this one deadlocks
+        // against the publisher, which takes them the other way round.
+        self.placement_scratch.ensureTotalCapacity(self.alloc, count) catch return;
+        self.render.lockUncancelable(self.io);
+        self.placement_scratch.clearRetainingCapacity();
+        const available = @min(self.placements.items.len, self.placement_scratch.capacity);
+        self.placement_scratch.appendSliceAssumeCapacity(self.placements.items[0..available]);
+        self.render.unlock(self.io);
+
+        for (self.placement_scratch.items) |placement| {
+            if (placement.col >= win.width or placement.row >= win.height) continue;
+            const image = self.transmit(placement.image_id, sink) orelse continue;
+            const child = win.child(.{
+                .x_off = placement.col,
+                .y_off = placement.row,
+                .width = win.width - placement.col,
+                .height = win.height - placement.row,
+            });
+            image.draw(child, .{
+                .scale = .none,
+                .z_index = placement.z,
+                .clip_region = .{
+                    .x = @intCast(@min(placement.source_x, std.math.maxInt(u16))),
+                    .y = @intCast(@min(placement.source_y, std.math.maxInt(u16))),
+                    .width = if (placement.source_width == 0) null else @intCast(@min(placement.source_width, std.math.maxInt(u16))),
+                    .height = if (placement.source_height == 0) null else @intCast(@min(placement.source_height, std.math.maxInt(u16))),
+                },
+            }) catch continue;
+        }
+    }
+
+    /// The outer terminal's handle for an image, transmitting it the first
+    /// time it is asked for. Null when the image cannot be shown: a format
+    /// this does not handle, or a display without graphics.
+    fn transmit(self: *Surface, image_id: u32, sink: ImageSink) ?vaxis.Image {
+        if (self.transmitted.get(image_id)) |cached| return cached;
+
+        // The pixels live in terminal state, so this is the one read that
+        // needs the parse lock. Copied out, because the parser may evict the
+        // image the moment the lock is released.
+        self.mutex.lockUncancelable(self.io);
+        const copied: ?struct { bytes: []const u8, width: u16, height: u16, format: vaxis.Image.TransmitFormat } = copy: {
+            const storage = &self.terminal.screens.active.kitty_images;
+            const image = storage.imageById(image_id) orelse break :copy null;
+            const bytes = switch (image.data) {
+                .complete => |b| b,
+                .pending => break :copy null,
+            };
+            if (bytes.len == 0) break :copy null;
+            // The stored bytes are already decoded; only the channel count
+            // has to be told apart. Anything else is left undrawn rather
+            // than guessed at.
+            const format: vaxis.Image.TransmitFormat = switch (image.format) {
+                .rgb => .rgb,
+                .rgba => .rgba,
+                else => break :copy null,
+            };
+            const owned = self.alloc.dupe(u8, bytes) catch break :copy null;
+            break :copy .{
+                .bytes = owned,
+                .width = @intCast(@min(image.width, std.math.maxInt(u16))),
+                .height = @intCast(@min(image.height, std.math.maxInt(u16))),
+                .format = format,
+            };
+        };
+        self.mutex.unlock(self.io);
+
+        const data = copied orelse return null;
+        defer self.alloc.free(data.bytes);
+        const sent = sink.transmit(sink.ctx, data.bytes, data.width, data.height, data.format) catch return null;
+        self.transmitted.put(self.alloc, image_id, sent) catch return sent;
+        return sent;
+    }
+
     /// The render lock, not the parse lock: the parser publishes
     /// `render_state` now, so this is shared, but a hold here is one update
     /// long rather than one parse long.

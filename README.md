@@ -41,7 +41,11 @@ The right side is an ordinary shell on an ordinary pty, with job control and liv
 
 Once the shell has focus the mouse goes to it too, in whatever reporting mode and format the program inside selected, so a `tmux` in the region takes clicks on its panes and the wheel scrolls it rather than the sidebar. A program that never asked for mouse reporting sees nothing, and a click still only focuses. Forwarding is gated on focus so a stray hover does not reach a program the user is not working in.
 
-Images are parsed but not drawn. Without `--shell` nothing changes: no pty is opened and no terminal is created.
+Images a program draws are shown. A kitty transmission is parsed and stored by the region's terminal, and the parser publishes where each placement sits along with the render state; the draw then hands the pixels to the outer terminal once per image and places them every frame, because libvaxis keeps a placement only for the frame it was drawn in. Transmission is what costs -- every pixel goes down the real terminal -- so it happens once and is cached against the storage generation, which moves when image data or the set of placements changes and deliberately does not move for a scroll.
+
+The pixels are base64 encoded on the way out. The protocol carries the payload inside an APC, so a pixel that happens to be 0x1b would end the sequence in the middle of the image; `transmitPreEncodedImage` writes what it is given, and the encoding is the caller's job.
+
+Placements pinned to the screen are drawn. A virtual placement, which a program positions with unicode placeholders, and a relative one, which is anchored to a parent placement, are not resolved yet. Nor are formats other than RGB and RGBA, which are left undrawn rather than guessed at. Without `--shell` nothing changes: no pty is opened and no terminal is created.
 
 The region owns the backing bytes for the characters it draws, because libvaxis keeps a cell's grapheme slice rather than copying it and re-renders unchanged cells from the screen it retains. Anything shorter-lived decays as soon as a frame repaints only the sidebar.
 
