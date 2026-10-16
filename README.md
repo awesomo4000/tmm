@@ -43,6 +43,8 @@ Once the shell has focus the mouse goes to it too, in whatever reporting mode an
 
 Images are parsed but not drawn. Without `--shell` nothing changes: no pty is opened and no terminal is created.
 
+The region owns the backing bytes for the characters it draws, because libvaxis keeps a cell's grapheme slice rather than copying it and re-renders unchanged cells from the screen it retains. Anything shorter-lived decays as soon as a frame repaints only the sidebar.
+
 A modifier key pressed on its own is not forwarded unless the program inside asked for every key as an escape code. Terminals that speak the kitty keyboard protocol report modifier keys, and a program that turned on only disambiguation decodes such a report as text, which used to insert U+E061 -- a blank-looking character -- when you pressed shift.
 
 Setting `TMM_INPUT_LOG` to a path appends one line per key and mouse event in the region: what the outer terminal reported, which keyboard mode the program inside had selected, and the exact bytes it was sent. That is the whole boundary an input bug lives on, and reading it beats inferring any of the three from how a program misbehaves.

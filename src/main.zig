@@ -573,7 +573,7 @@ pub fn main(init: std.process.Init) !void {
             const region_width = full.width -| (divider + 1);
             if (region_width > 0) {
                 const pane = full.child(.{ .x_off = divider + 1, .width = region_width, .height = full.height });
-                try r.draw(pane, fa);
+                try r.draw(pane);
                 // The sidebar hid the cursor above, so showing it here is
                 // also what tells the user which side has the keyboard.
                 if (focus == .region) if (r.cursor()) |c| {

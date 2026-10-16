@@ -699,8 +699,12 @@ Departures from the recipe, each for a reason:
 - **`inverse` swaps fg and bg rather than setting libvaxis `reverse`.** The
   outer terminal would otherwise reverse a second time, against its own
   defaults instead of the colors the child named.
-- **Clean rows are only skipped when `dirty == .partial`.** libvaxis keeps its
-  own previous-frame screen, so a `.full` redraw has to write every row.
+- **Every row is rewritten on any draw that runs at all.** libvaxis keeps its
+  own previous-frame screen, so a `.full` redraw has to write every row --
+  and, since 10/15/2026, so does a `.partial` one. See the grapheme-lifetime
+  fix below: a skipped row keeps graphemes from an earlier draw alive, and
+  nothing else can then know when those bytes may be freed. libvaxis diffs
+  cells itself, so rewriting a clean row costs a loop and no output.
 - **No trailing-blank trim.** libvaxis diffs cells itself, so writing the
   blanks costs nothing on the wire and keeps the region from retaining stale
   cells after a resize.
@@ -748,6 +752,42 @@ encoder wants to know it left the viewport.
 The end-to-end assertion is on the server, not the display: with `mouse on`, a
 click in the region moves the attached client's pane and the wheel puts it in
 copy mode. That holds whatever the blit looks like.
+
+### Fixed 10/15/2026: box drawing decayed into sidebar text
+
+Seen as tmux pane borders inside `--shell` turning into `���`
+columns, with a smear of green running across the divider and into the
+sidebar.
+
+**libvaxis does not copy a cell's grapheme.** It keeps the slice, and
+re-renders unchanged cells from the screen it retains. The region was handing
+it bytes from the per-frame arena, which `main` resets with
+`.retain_capacity` at the top of every frame. Any frame that repainted only
+the sidebar therefore overwrote the region's grapheme bytes with sidebar
+strings while libvaxis was still pointing at them. Reproduced exactly:
+`BOXMARK ┌──┐ │ ┼ END` became
+`BOXMARK erverdiplaet` -- fragments of "s*erver*s" and "*di*s*plae*ys".
+
+Single-byte ASCII comes from the static `ascii` table and needs no storage,
+which is why only box drawing and symbols ever showed it. That is also why it
+looked like a tmux or charset problem rather than a lifetime one: everything
+tmux draws a border with is non-ASCII, and all the ordinary text beside it was
+fine.
+
+`Region` now owns a `graphemes` arena, reset at the top of each draw that
+rewrites the region -- which is exactly when libvaxis stops needing the
+previous bytes. Two consequences worth keeping straight:
+
+- The reset is **after** the `dirty == .false` early return. A clean draw must
+  not free what libvaxis is still rendering from.
+- Clean-row skipping on `.partial` had to go, because a skipped row's
+  graphemes must survive the reset and nothing tracks that.
+
+The sidebar was never at risk itself: it calls `win.clear()` and rewrites every
+cell each frame, so its slices are always from the current frame. The damage
+visible there was the renderer desynchronising on invalid UTF-8 of the wrong
+width, which is why the test now also asserts the divider column survives
+whole.
 
 ### Fixed 10/15/2026: a bare shift press inserted a blank
 

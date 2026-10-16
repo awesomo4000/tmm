@@ -141,6 +141,43 @@ def main():
                 ('region output never reached the display',
                  screen(ui_fd).region(SPLIT + 1))
 
+            # ---- non-ASCII survives a redraw it did not take part in ----
+            # libvaxis keeps a cell's grapheme slice rather than copying it,
+            # and re-renders unchanged cells from the screen it retains. The
+            # region therefore cannot hand it bytes from the per-frame arena:
+            # a sidebar-only repaint resets that arena and the region's
+            # characters turn into fragments of sidebar text. Single-byte
+            # ASCII comes from a static table, so only box drawing and symbols
+            # ever showed it -- which is everything tmux draws borders with.
+            Path(root, 'box.txt').write_text(
+                'BOXMARK \u250c\u2500\u2500\u2510 \u2502 \u253c END\n')
+            os.write(ui_fd, f'cat {root}/box.txt\r'.encode())
+            expect = 'BOXMARK \u250c\u2500\u2500\u2510 \u2502 \u253c END'
+            assert until(lambda: any(expect in line for line in
+                                     screen(ui_fd).region(SPLIT + 1))), \
+                ('box drawing never rendered in the region',
+                 screen(ui_fd).region(SPLIT + 1))
+            # Churn the outer server so the sidebar repaints several times
+            # while the region's own terminal stays clean.
+            for i in range(3):
+                tmux('new-session', '-d', '-s', f'churn{i}', '-c', root)
+                pump(0.4)
+                tmux('kill-session', '-t', f'churn{i}')
+                pump(0.4)
+            assert any(expect in line for line in screen(ui_fd).region(SPLIT + 1)), \
+                ('region characters decayed across a sidebar-only redraw',
+                 [line.rstrip() for line in screen(ui_fd).region(SPLIT + 1)
+                  if 'BOXMARK' in line])
+            # A decayed grapheme is invalid UTF-8 of the wrong width, which
+            # desynchronises the renderer's column accounting and smears
+            # output across the divider into the sidebar. The divider staying
+            # whole is the cheapest check for that.
+            assert screen(ui_fd).column(SPLIT) == '\u2502' * ROWS, \
+                ('output smeared across the divider',
+                 repr(screen(ui_fd).column(SPLIT)))
+            assert all('\ufffd' not in line for line in screen(ui_fd).lines()), \
+                'replacement characters reached the display'
+
             # ---- a modifier alone is not a key the child wants ----------
             # A program that turns on kitty disambiguation has not asked for
             # modifier-key reports, and decodes `CSI 57441 u` as text: U+E061,
