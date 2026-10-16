@@ -97,9 +97,9 @@ pub const Region = struct {
         try self.pty.setSize(.{ .cols = cols, .rows = rows });
     }
 
-    pub fn sendKey(self: *Region, key: vaxis.Key) void {
+    pub fn sendKey(self: *Region, key: vaxis.Key, action: surface.Action) void {
         if (!self.pty_open) return;
-        self.surface.sendKey(key);
+        self.surface.sendKey(key, action);
     }
 
     pub fn sendMouse(self: *Region, mouse: vaxis.Mouse, col: i16, row: i16) void {

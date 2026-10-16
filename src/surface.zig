@@ -41,6 +41,13 @@ const ascii: [128][1]u8 = blk: {
 /// A cell position within a surface.
 pub const Position = struct { col: u16, row: u16 };
 
+/// Whether a key went down or came up. A terminal only reports the second
+/// kind when it has been asked to, with the kitty event-types flag, and the
+/// encoder drops a release when the program inside did not ask -- so a
+/// release can be forwarded unconditionally and will simply encode to
+/// nothing for a program that wants presses only.
+pub const Action = enum { press, release };
+
 /// Where a surface's output goes. `write` must tolerate being called from
 /// inside a `feed`, which already holds the surface mutex.
 pub const Sink = struct {
@@ -240,7 +247,7 @@ pub const Surface = struct {
     }
 
     /// Encode a key press and send it to the child.
-    pub fn sendKey(self: *Surface, key: vaxis.Key) void {
+    pub fn sendKey(self: *Surface, key: vaxis.Key, action: Action) void {
         var buf: [128]u8 = undefined;
         var scratch: [4]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
@@ -250,11 +257,11 @@ pub const Surface = struct {
         const modes: Modes = @bitCast(self.modes.load(.acquire));
         const opts: ghostty.input.KeyEncodeOptions = modes.options();
         const sent: []const u8 = encoded: {
-            ghostty.input.encodeKey(&writer, toKeyEvent(key, &scratch), opts) catch |err| switch (err) {
+            ghostty.input.encodeKey(&writer, toKeyEvent(key, action, &scratch), opts) catch |err| switch (err) {
                 // Only a long pre-edit overflows 128 bytes, and vaxis
                 // delivers pre-edit text as `text`, which goes through
                 // unencoded instead.
-                error.WriteFailed => break :encoded key.text orelse "",
+                error.WriteFailed => break :encoded if (action == .press) key.text orelse "" else "",
             };
             break :encoded if (forwards(key, opts)) writer.buffered() else "";
         };
@@ -691,10 +698,15 @@ pub const Surface = struct {
         return scratch[0..n];
     }
 
-    fn toKeyEvent(key: vaxis.Key, scratch: *[4]u8) ghostty.input.KeyEvent {
-        const text = keyText(key, scratch);
+    fn toKeyEvent(key: vaxis.Key, action: Action, scratch: *[4]u8) ghostty.input.KeyEvent {
+        // A release carries no text: it is the key coming up, not the
+        // character it produced going in.
+        const text = if (action == .press) keyText(key, scratch) else "";
         return .{
-            .action = .press,
+            .action = switch (action) {
+                .press => .press,
+                .release => .release,
+            },
             .key = toKeyCode(key.codepoint),
             .mods = .{
                 .shift = key.mods.shift,
@@ -797,7 +809,7 @@ test "input encoding produces the bytes a child expects" {
         fn call(out: []u8, key: vaxis.Key, opts: ghostty.input.KeyEncodeOptions) ![]const u8 {
             var writer: std.Io.Writer = .fixed(out);
             var scratch: [4]u8 = undefined;
-            try ghostty.input.encodeKey(&writer, Surface.toKeyEvent(key, &scratch), opts);
+            try ghostty.input.encodeKey(&writer, Surface.toKeyEvent(key, .press, &scratch), opts);
             return writer.buffered();
         }
     }.call;
@@ -953,7 +965,7 @@ test "a key reported without text still sends the character" {
         fn call(out: []u8, key: vaxis.Key, opts: ghostty.input.KeyEncodeOptions) ![]const u8 {
             var writer: std.Io.Writer = .fixed(out);
             var scratch: [4]u8 = undefined;
-            try ghostty.input.encodeKey(&writer, Surface.toKeyEvent(key, &scratch), opts);
+            try ghostty.input.encodeKey(&writer, Surface.toKeyEvent(key, .press, &scratch), opts);
             return writer.buffered();
         }
     }.call;
@@ -995,6 +1007,34 @@ test "a key reported without text still sends the character" {
         .mods = .{ .shift = true },
         .text = "A",
     }, .{}));
+}
+
+test "a release is encoded only for a program that asked for event types" {
+    const encode = struct {
+        fn call(out: []u8, key: vaxis.Key, action: Action, opts: ghostty.input.KeyEncodeOptions) ![]const u8 {
+            var writer: std.Io.Writer = .fixed(out);
+            var scratch: [4]u8 = undefined;
+            try ghostty.input.encodeKey(&writer, Surface.toKeyEvent(key, action, &scratch), opts);
+            return writer.buffered();
+        }
+    }.call;
+    var buf: [64]u8 = undefined;
+
+    // Disambiguation alone: the terminal may report a release, but the
+    // program did not ask, so nothing goes out. This is why a release can be
+    // forwarded without checking what the program turned on.
+    const presses_only: ghostty.input.KeyEncodeOptions = .{ .kitty_flags = .{ .disambiguate = true } };
+    try std.testing.expectEqualStrings("", try encode(&buf, .{ .codepoint = 'a', .text = "a" }, .release, presses_only));
+    try std.testing.expectEqualStrings("a", try encode(&buf, .{ .codepoint = 'a', .text = "a" }, .press, presses_only));
+
+    // With event types on, a release is its own report and carries no text.
+    const with_events: ghostty.input.KeyEncodeOptions = .{
+        .kitty_flags = .{ .disambiguate = true, .report_events = true },
+    };
+    try std.testing.expectEqualStrings("\x1b[97;1:3u", try encode(&buf, .{ .codepoint = 'a', .text = "a" }, .release, with_events));
+
+    // A legacy program, no kitty flags at all: a release is never encoded.
+    try std.testing.expectEqualStrings("", try encode(&buf, .{ .codepoint = 'a', .text = "a" }, .release, .{}));
 }
 
 test "a modifier pressed alone reaches only a child that asked for every key" {

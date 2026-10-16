@@ -10,6 +10,7 @@ const sidebar = @import("sidebar.zig");
 const backend = @import("backend.zig");
 const region_mod = @import("region.zig");
 const panes_mod = @import("panes.zig");
+const surface = @import("surface.zig");
 pub const panic = std.debug.FullPanic(struct {
     fn call(message: []const u8, address: ?usize) noreturn {
         vaxis.recover();
@@ -19,7 +20,9 @@ pub const panic = std.debug.FullPanic(struct {
 pub const std_options: std.Options = .{ .log_level = .err };
 const new_button_col = 11; // "sessions" plus three spaces
 const new_button_text = "[new]";
-const Event = union(enum) { key_press: vaxis.Key, mouse: vaxis.Mouse, winsize: vaxis.Winsize, snapshot: *backend.Snapshot, pty };
+/// `key_release` is here because libvaxis posts an event kind only when the
+/// union names it: without the field, releases are parsed and dropped.
+const Event = union(enum) { key_press: vaxis.Key, key_release: vaxis.Key, mouse: vaxis.Mouse, winsize: vaxis.Winsize, snapshot: *backend.Snapshot, pty };
 /// Narrowest sidebar and terminal region a drag may leave behind.
 const min_pane = 8;
 const Editor = struct {
@@ -138,7 +141,16 @@ pub fn main(init: std.process.Init) !void {
     var tty_buf: [4096]u8 = undefined;
     var tty = try vaxis.Tty.init(io, &tty_buf);
     defer tty.deinit();
-    var vx = try vaxis.init(io, a, init.environ_map, .{});
+    // Ask the outer terminal to report key releases, which libvaxis does not
+    // by default: its KittyFlags leaves `report_events` off, so the terminal
+    // sends presses only and nothing downstream can report what it never
+    // received. A program in the region that wants hold-to-move, or wants to
+    // see a chord come apart, needs them -- and a program that does not ask
+    // is unaffected, because the encoder drops a release unless the program
+    // inside turned the same flag on.
+    var vx = try vaxis.init(io, a, init.environ_map, .{
+        .kitty_keyboard_flags = .{ .report_events = true },
+    });
     defer vx.deinit(a, tty.writer());
     var loop: vaxis.Loop(Event) = .init(io, &tty, &vx);
     try loop.start();
@@ -378,6 +390,15 @@ pub fn main(init: std.process.Init) !void {
                     }
                 }
             },
+            // A release is for the region and for nothing else: the sidebar
+            // acts on presses, and treating a release as one would move the
+            // cursor twice for a single keystroke.
+            .key_release => |key| {
+                if (focus == .region and (region != null or compositor != null)) {
+                    if (!key.matches(vaxis.Key.f12, .{}))
+                        forwardKey(region, compositor, key, .release);
+                }
+            },
             .key_press => |key| key_event: {
                 mouse_cursor = false;
                 if (pressed) |p| a.free(p);
@@ -391,7 +412,7 @@ pub fn main(init: std.process.Init) !void {
                         break :key_event;
                     }
                     if (focus == .region) {
-                        forwardKey(region, compositor, key);
+                        forwardKey(region, compositor, key, .press);
                         // The rest of the queued keys go with it. A key bound
                         // for the region changes nothing the sidebar draws,
                         // so there is no reason to draw between two of them,
@@ -400,16 +421,23 @@ pub fn main(init: std.process.Init) !void {
                         // over 250ms for the last. movy's loop drains its
                         // input every frame for the same reason.
                         while (try loop.tryEvent()) |next| {
-                            if (next != .key_press) {
-                                pending_event = next;
-                                break;
-                            }
-                            const queued = next.key_press;
+                            const queued: vaxis.Key, const kind: surface.Action = switch (next) {
+                                .key_press => |k| .{ k, .press },
+                                .key_release => |k| .{ k, .release },
+                                else => {
+                                    pending_event = next;
+                                    break;
+                                },
+                            };
+                            // Focus moves on the press. The release that
+                            // follows belongs to the side that now has the
+                            // keyboard, and is dropped rather than delivered
+                            // to a program that never saw the press.
                             if (queued.matches(vaxis.Key.f12, .{})) {
-                                focus = .sidebar;
+                                if (kind == .press) focus = .sidebar;
                                 break;
                             }
-                            forwardKey(region, compositor, queued);
+                            forwardKey(region, compositor, queued, kind);
                         }
                         break :key_event;
                     }
@@ -708,9 +736,9 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 /// Hand a key to whichever of the two owns the region.
-fn forwardKey(region: ?*region_mod.Region, compositor: ?*panes_mod.Compositor, key: vaxis.Key) void {
-    if (region) |r| r.sendKey(key);
-    if (compositor) |c| c.sendKey(key);
+fn forwardKey(region: ?*region_mod.Region, compositor: ?*panes_mod.Compositor, key: vaxis.Key, action: surface.Action) void {
+    if (region) |r| r.sendKey(key, action);
+    if (compositor) |c| c.sendKey(key, action);
 }
 
 /// Where a frame's time goes, written to `TMM_FRAME_LOG` as a mean and a
