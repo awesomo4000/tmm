@@ -12,20 +12,14 @@ lock, so a `kill-pane` arriving in between left the display reading freed
 memory. This drives that window: keys and clicks continuously, panes
 appearing and disappearing underneath them.
 
-What this test does and does not show, stated plainly: it did **not**
-reproduce the use-after-free. It passes against the code that has the bug,
-and still passes with a 60ms delay inserted between the lookup and the use
-to widen the window. Freed memory stays mapped and poisoned, so a stale read
-produces nonsense rather than a fault, and the free has to land inside a
-window measured in nanoseconds.
-
-So the fix rests on reading the code -- a heap pointer outliving the lock
-that guards its lifetime, freed by another thread under that same lock --
-and this test is a guard against the fix going wrong rather than evidence
-the bug was there. Holding a lock for longer risks a deadlock and risks
-starving the event worker, and this is what would catch either: keys,
-clicks, blits and cursor lookups all competing with panes appearing and
-being destroyed.
+This one is the broad guard: keys, clicks, blits and cursor lookups all
+competing with panes appearing and being destroyed. It does not demonstrate
+the use-after-free -- it passes against the buggy build, because freed memory
+stays mapped and poisoned so a stale read yields nonsense rather than a
+fault. tests/pane_use_after_free.py proves that one directly, with a
+sentinel. What this guards is the fix: holding a lock for longer risks a
+deadlock and risks starving the event worker, and churn is what would show
+either.
 
 Only disposable tmux sockets, processes, and files under /tmp are mutated.
 """

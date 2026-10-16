@@ -173,6 +173,12 @@ pub fn main(init: std.process.Init) !void {
             .label = opts.socket_name,
             .session = panes_session,
         }, init.environ_map.get("TMM_INPUT_LOG"));
+        // Proof scaffolding for tests/pane_use_after_free.py; both off
+        // unless asked for.
+        if (compositor) |c| {
+            c.uaf_log = init.environ_map.get("TMM_UAF_LOG");
+            c.unsafe_lookup = init.environ_map.get("TMM_UNSAFE_PANE_LOOKUP") != null;
+        }
     }
     var compositor_task = if (compositor) |c|
         try io.concurrent(paneWorker, .{ io, c, &loop })
