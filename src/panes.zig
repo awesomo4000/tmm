@@ -34,7 +34,13 @@ const surface = @import("surface.zig");
 const Allocator = std.mem.Allocator;
 
 /// One tmux pane: its id, where the layout puts it, and our terminal for it.
+/// Set while a pane is alive and cleared just before it is freed. Only for
+/// the proof in tests/pane_use_after_free.py: a freed Pane is poisoned, so a
+/// pointer used past its lifetime reads something other than this.
+const pane_alive: u64 = 0xA11_FE_1234_5678;
+
 pub const Pane = struct {
+    magic: u64 = pane_alive,
     /// With the `%` sigil, as tmux writes it everywhere else.
     id: []const u8,
     rect: layout.PaneRect,
@@ -84,6 +90,12 @@ pub const Compositor = struct {
     /// pane. Kept because that command must not go down the control stream:
     /// see `seed`.
     opts: cmstream.Options,
+
+    /// Proof scaffolding, both off unless the environment asks: reinstate the
+    /// lookup that released the lock before using the pane, and where to
+    /// report a pane used after it was freed.
+    unsafe_lookup: bool = false,
+    uaf_log: ?[]const u8 = null,
 
     pub fn create(
         alloc: Allocator,
@@ -184,6 +196,7 @@ pub const Compositor = struct {
             const pane = try self.alloc.create(Pane);
             errdefer self.alloc.destroy(pane);
             pane.* = .{
+                .magic = pane_alive,
                 .id = try self.alloc.dupe(u8, id),
                 .rect = rect,
                 .surface = undefined,
@@ -216,6 +229,7 @@ pub const Compositor = struct {
             // and releasing the lock first, which is what `focusedPane` and
             // `paneAt` used to do, let a keystroke land on a pane this loop
             // had already destroyed.
+            pane.magic = 0;
             pane.surface.deinit();
             self.alloc.free(pane.id);
             self.alloc.destroy(pane);
@@ -342,9 +356,42 @@ pub const Compositor = struct {
     }
 
     pub fn sendKey(self: *Compositor, key: vaxis.Key, action: surface.Action) void {
+        if (self.unsafe_lookup) {
+            // The pattern this replaced: look the pane up, release the lock,
+            // then use the pointer. The wait only makes a window that is
+            // nanoseconds wide in normal operation long enough to observe.
+            self.mutex.lockUncancelable(self.io);
+            const pane = self.panes.get(self.focused);
+            self.mutex.unlock(self.io);
+            if (pane) |p| {
+                self.io.sleep(.{ .nanoseconds = 60 * std.time.ns_per_ms }, .awake) catch {};
+                self.noteIfDead(p);
+                p.surface.sendKey(key, action);
+            }
+            return;
+        }
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        if (self.focusedPaneLocked()) |pane| pane.surface.sendKey(key, action);
+        if (self.focusedPaneLocked()) |pane| {
+            self.noteIfDead(pane);
+            pane.surface.sendKey(key, action);
+        }
+    }
+
+    /// Report a pane used past its lifetime. The sentinel is cleared before
+    /// the free and the allocator poisons what it reclaims, so a stale
+    /// pointer reads neither.
+    fn noteIfDead(self: *Compositor, pane: *Pane) void {
+        if (pane.magic == pane_alive) return;
+        const path = self.uaf_log orelse return;
+        var buf: [128]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "use-after-free: pane magic {x}\n", .{pane.magic}) catch return;
+        if (std.Io.Dir.cwd().createFile(self.io, path, .{ .truncate = false })) |file| {
+            defer file.close(self.io);
+            if (file.stat(self.io)) |st| {
+                _ = file.writePositionalAll(self.io, line, st.size) catch {};
+            } else |_| {}
+        } else |_| {}
     }
 
     pub fn sendMouse(self: *Compositor, mouse: vaxis.Mouse, col: i16, row: i16) void {
