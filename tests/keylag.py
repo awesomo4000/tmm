@@ -64,6 +64,50 @@ def clock_ns():
     return time.clock_gettime_ns(CLOCK)
 
 
+def scheduler_noise_ms(samples=200):
+    """How late a short sleep comes back: the machine's own jitter.
+
+    A floor measurement is only worth reading on a quiet machine, and
+    "quiet" is not something to assume. Asking for a millisecond repeatedly
+    and seeing how much more than a millisecond comes back is a cheap proxy
+    for whether anything else is competing for the CPU.
+    """
+    worst = 0.0
+    for _ in range(samples):
+        start = clock_ns()
+        time.sleep(0.001)
+        late = (clock_ns() - start) / 1e6 - 1.0
+        worst = max(worst, late)
+    return worst
+
+
+def report_noise(where):
+    """Print the machine's jitter as context for the numbers that follow.
+
+    Deliberately without a verdict. A threshold was tried and could not be
+    justified: twelve busy processes moved this from 0.29ms to 0.63ms, while
+    the same conditions that actually spoiled a floor reading -- running it
+    at the end of the full suite -- produced a 28ms sample. So jitter is
+    reported, and whether a reading is a clean floor is judged from the
+    dispersion of the samples themselves, by `floor_verdict` below.
+    """
+    print('%s: scheduler jitter %.3f ms' % (where, scheduler_noise_ms()))
+
+
+def floor_verdict(slow, total):
+    """Say plainly when a floor reading is not a floor.
+
+    A floor is the cost with nothing in the way, so it should be tight. Any
+    sample a thousand times the median means something else was running, and
+    the number says more about that than about the machine.
+    """
+    if not slow:
+        return True
+    print('       NOT A CLEAN FLOOR: %d of %d samples over 1ms. Something else '
+          'was running; rerun on an idle machine.' % (len(slow), total))
+    return False
+
+
 def runner(root, load, log):
     """A tiny script for tmm's SHELL, so the region's child is the probe."""
     path = os.path.join(root, 'run-%d.sh' % load)
