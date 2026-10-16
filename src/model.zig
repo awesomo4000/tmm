@@ -214,6 +214,7 @@ test {
     _ = @import("vt.zig");
     _ = @import("region.zig");
     _ = @import("surface.zig");
+    _ = @import("panes.zig");
     _ = @import("reconcile.zig");
     _ = @import("state.zig");
 }

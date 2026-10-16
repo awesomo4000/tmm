@@ -22,6 +22,7 @@ run = [
   "python3 tests/measure_queries.py",
   "python3 tests/follow.py",
   "python3 tests/split_shell.py",
+  "python3 tests/compositor.py",
 ]
 
 [tasks.probe]
