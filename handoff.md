@@ -832,6 +832,35 @@ went to the UI.
 `FileNotFound` is deliberately not in the set: it also covers a missing tmux
 binary, which is a different problem.
 
+### tmm inside tmm is the region's fidelity test
+
+`tests/split_shell.py` nests tmm three deep inside its own region and asserts
+the innermost one is live, not merely drawn: a keystroke crosses terminal,
+tmm, tmm, tmm, shell, tmux and the session appears on the server.
+
+This is worth the ~8 seconds because a full-screen libvaxis app is a far
+harder client than a shell. To draw at all it needs DA1 and DSR answered, the
+alternate screen, synchronised output, mouse-mode negotiation, colour and a
+correct size -- and at three levels every one of those survives two round
+trips. It is a single assertion on the property the whole compositor rests on:
+*the region is a real terminal*. The grapheme-lifetime bug above would have
+been caught instantly by it, since every sidebar is box drawing and symbols.
+
+Verified by A/B: reverting mouse forwarding stops it at two levels exactly,
+because the click can no longer descend.
+
+**F12 does not nest, and cannot.** Every tmm matches it before forwarding, so
+the outermost one swallows it and there is no keystroke that addresses level
+3. Clicking does nest, and correctly: each level sees a column inside its own
+region, focuses it, and forwards the click down with the column rebased by
+`divider + 1`, so one click focuses the entire chain. An off-by-one in that
+rebasing would compound per level, which makes nesting a good check on it too.
+
+Making a hotkey nest would mean a tmm knowing it is running inside another
+tmm. That is a real design discussion, deferred 10/15/2026: mouse focus is
+enough for now, and Phase 3 multiplies focus targets rather than nesting them,
+so it needs its own answer regardless.
+
 ### `TMM_INPUT_LOG`
 
 One line per key and mouse event, appended: the codepoint libvaxis reported

@@ -219,6 +219,68 @@ def main():
                                      screen(ui_fd).region(SPLIT + 1))), \
                 'the region shell did not return to a prompt'
 
+            # ---- the region is a real terminal: tmm inside tmm ----------
+            # A full-screen libvaxis app is a much harder client than a shell.
+            # To draw at all it needs DA1 and DSR answered, the alternate
+            # screen, synchronised output, mouse-mode negotiation, colour and
+            # a correct size -- and at three levels every one of those has to
+            # survive two round trips. This is the property the compositor
+            # rests on, so it is worth one slow test.
+            banner = 'tmm : tmux micro manager'
+            def sidebars():
+                row = screen(ui_fd).line(0)
+                return [i for i in range(COLS) if row.startswith(banner, i)]
+
+            def focus_deepest():
+                # One click focuses every level: each tmm sees a column inside
+                # its own region, focuses it, and forwards the click down with
+                # the column rebased. F12 cannot do this -- every tmm matches
+                # it before forwarding, so it never reaches the one below.
+                deep = COLS - 4
+                os.write(ui_fd, f'\x1b[<0;{deep + 1};11M'.encode())
+                os.write(ui_fd, f'\x1b[<0;{deep + 1};11m'.encode())
+                pump(0.5)
+
+            for level in (2, 3):
+                focus_deepest()
+                os.write(ui_fd, f'{BINARY} -S {socket} --shell --split {SPLIT}\r'
+                         .encode())
+                want = [i * (SPLIT + 1) for i in range(level)]
+                assert until(lambda: sidebars() == want), \
+                    (f'tmm nested {level} deep did not render', sidebars(), want,
+                     repr(screen(ui_fd).line(0)))
+            assert [i for i in range(COLS)
+                    if screen(ui_fd).column(i) == '\u2502' * ROWS] == \
+                [SPLIT, 2 * SPLIT + 1, 3 * SPLIT + 2], \
+                ('nested dividers are not where the layout says',
+                 [i for i in range(COLS)
+                  if screen(ui_fd).column(i) == '\u2502' * ROWS])
+
+            # Drawing is not enough: the innermost one has to be live. This
+            # keystroke crosses terminal, tmm, tmm, tmm, shell, tmux.
+            focus_deepest()
+            assert screen(ui_fd).line(ROWS - 1).count('F12 sidebar') == 3, \
+                ('a click did not focus every level',
+                 repr(screen(ui_fd).line(ROWS - 1)))
+            os.write(ui_fd, f'tmux -S {socket} new-session -d -s depth3\r'.encode())
+            assert until(lambda: 'depth3' in tmux('list-sessions', '-F',
+                                                  '#{session_name}'), limit=15), \
+                'a command typed three levels down never reached the server'
+
+            # Tear the nest down from the middle: a click on level 2's own
+            # sidebar focuses it there, and q quits it. Level 3 lives on level
+            # 2's pty, so it goes too, and level 1 gets its shell back.
+            os.write(ui_fd, f'\x1b[<0;{SPLIT + 6};11M'.encode())
+            os.write(ui_fd, f'\x1b[<0;{SPLIT + 6};11m'.encode())
+            pump(0.5)
+            os.write(ui_fd, b'q')
+            assert until(lambda: sidebars() == [0]), \
+                ('the nested tmms did not exit', sidebars())
+            os.write(ui_fd, b"echo rgn-unnested\r")
+            assert until(lambda: any('rgn-unnested' in line for line in
+                                     screen(ui_fd).region(SPLIT + 1))), \
+                'the region shell did not come back after unnesting'
+
             # ---- a real tmux client attaches inside the region -----------
             before = clients()
             os.write(ui_fd, f'tmux -S {socket} attach -t alpha\r'.encode())
