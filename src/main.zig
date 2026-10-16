@@ -251,6 +251,25 @@ pub fn main(init: std.process.Init) !void {
             // the event, and the sidebar hit is null throughout.
             if (!dragging and mouse_cursor and cursor == mouseHit(rows, offset, event.mouse, sidebar_width, sidebar_height, column_width)) continue;
         }
+        // A `.pty` event carries nothing: the worker has already fed the
+        // output, and the draw below reads the newest state. So a backlog of
+        // them collapses into the single draw they all ask for. Without this
+        // a keypress waits behind every queued redraw, because one 512-slot
+        // FIFO carries both: a program writing continuously pushed key
+        // latency past a second, while a quiet one stayed under a
+        // millisecond. See tests/keylag.py.
+        if (event == .pty) {
+            while (try loop.tryEvent()) |next| {
+                if (next != .pty) {
+                    pending_event = next;
+                    break;
+                }
+            }
+            // A real event found behind the backlog is handled before the
+            // draw those wakeups asked for. A redraw one iteration late is
+            // invisible; a key held back by one is felt.
+            if (pending_event != null) continue;
+        }
         var action: ?sidebar.Action = null;
         var reveal = false;
         const old_key = if (cursor) |c| if (c < rows.len) try a.dupe(u8, rows[c].key) else null else null;

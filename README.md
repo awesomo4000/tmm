@@ -47,6 +47,8 @@ The region owns the backing bytes for the characters it draws, because libvaxis 
 
 A modifier key pressed on its own is not forwarded unless the program inside asked for every key as an escape code. Terminals that speak the kitty keyboard protocol report modifier keys, and a program that turned on only disambiguation decodes such a report as text, which used to insert U+E061 -- a blank-looking character -- when you pressed shift.
 
+A `.pty` wakeup carries nothing: the worker has already fed the output and a draw reads the newest state, so a backlog of them collapses into the single draw they all ask for, and a real event found behind the backlog is handled before that draw. One 512-slot queue carries both output wakeups and input, so without this a keypress waited behind every queued redraw: a program writing continuously took a second to see a key, measured at a median of 1003ms, against 0.1ms when it was quiet.
+
 Setting `TMM_INPUT_LOG` to a path appends one line per key and mouse event in the region: what the outer terminal reported, which keyboard mode the program inside had selected, and the exact bytes it was sent. That is the whole boundary an input bug lives on, and reading it beats inferring any of the three from how a program misbehaves.
 
 ## Compositor mode
@@ -109,6 +111,8 @@ python3 tests/integration.py
 ```
 
 `--dump` emits a read-only JSON snapshot without opening the UI. Build before running integration tests. Tests use unique sockets and disposable files under `/tmp`, never the default server. They cover shell and agent pane navigation, client isolation, sidebar mouse input, blink, unusual names and paths, resizing, disconnection, switching servers, failures, and exit. tmm runs inside its own region, which is the shortest statement of how complete the region is: `tests/split_shell.py` nests it three deep and checks that a keystroke typed at the bottom reaches the tmux server. Focus descends by clicking, which rebases the column at each level; F12 does not descend, because every level matches it before forwarding.
+
+`tests/keylag.py` measures what the program inside actually waits: the harness reads the monotonic clock immediately before writing a key byte into tmm's pty, and the child reads it again the instant its own `read` returns, which makes the difference pure delivery latency with none of the harness in it. It is measured quiet and against a child writing continuously, because only the loaded case ever regressed. The child's stdout is nonblocking and drops EAGAIN, so a latency it reports is time tmm took and not time the child spent stuck in `write`. The loaded figure includes however fast the harness itself drains tmm's output, so treat it as an upper bound.
 
 `tests/split_shell.py` covers `--shell`: the divider geometry, focus, keys reaching the child, the child's output reaching the display, a real `tmux attach` inside the region at the region's exact size, a click and a wheel event inside it moving that client's pane and entering copy mode, box drawing surviving a redraw it took no part in, three levels of nested tmm, and divider drags resizing both sides. Display assertions go through `tests/screen.py`, which replays the cursor, because libvaxis emits only the cells that changed and a rendered line does not appear contiguously in the output bytes.
 
