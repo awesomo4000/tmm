@@ -152,7 +152,8 @@ pub const Compositor = struct {
         defer self.alloc.free(rects);
 
         self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
+        var locked = true;
+        defer if (locked) self.mutex.unlock(self.io);
 
         if (!std.mem.eql(u8, self.window, window)) {
             if (self.window.len != 0) self.alloc.free(self.window);
@@ -161,6 +162,10 @@ pub const Compositor = struct {
 
         var live: std.StringArrayHashMapUnmanaged(void) = .empty;
         defer live.deinit(self.alloc);
+
+        // Panes created by this pass, seeded once the lock is released.
+        var fresh: std.ArrayList(*Pane) = .empty;
+        defer fresh.deinit(self.alloc);
 
         for (rects) |rect| {
             const n = rect.id orelse continue;
@@ -192,10 +197,9 @@ pub const Compositor = struct {
             try self.panes.put(self.alloc, pane.id, pane);
             try live.put(self.alloc, pane.id, {});
             if (self.focused.len == 0) self.focused = try self.alloc.dupe(u8, pane.id);
-            // Seed from tmux's own screen so a pane that existed before we
-            // attached is not blank until it next writes. tmux models no
-            // images, so anything drawn before the attach is text only.
-            self.seed(pane) catch {};
+            // Seeded after the lock is released, below: it runs a tmux
+            // command, and a keystroke needs this lock to find its pane.
+            try fresh.append(self.alloc, pane);
         }
 
         var i: usize = 0;
@@ -207,10 +211,22 @@ pub const Compositor = struct {
             }
             const key = pane.id;
             _ = self.panes.orderedRemove(key);
+            // Safe to free here only because every reader of a `*Pane` holds
+            // this lock for as long as it uses the pointer. Handing one out
+            // and releasing the lock first, which is what `focusedPane` and
+            // `paneAt` used to do, let a keystroke land on a pane this loop
+            // had already destroyed.
             pane.surface.deinit();
             self.alloc.free(pane.id);
             self.alloc.destroy(pane);
         }
+
+        self.mutex.unlock(self.io);
+        locked = false;
+        // Seeding runs a `tmux capture-pane`, so it waits on another process.
+        // Nothing else frees a pane -- only this thread does -- so these
+        // pointers stay good without the lock held.
+        for (fresh.items) |pane| self.seed(pane) catch {};
     }
 
     /// Seed a pane from tmux's own screen, so one that existed before we
@@ -299,16 +315,13 @@ pub const Compositor = struct {
     pub fn focus(self: *Compositor, pane: []const u8) !void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        if (std.mem.eql(u8, self.focused, pane)) return;
-        if (!self.panes.contains(pane)) return;
-        if (self.focused.len != 0) self.alloc.free(self.focused);
-        self.focused = try self.alloc.dupe(u8, pane);
+        return self.focusLocked(pane);
     }
 
-    /// The pane at a point, in compositor coordinates.
-    pub fn paneAt(self: *Compositor, col: u16, row: u16) ?*Pane {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
+    /// The pane at a point, in compositor coordinates. Caller holds the lock
+    /// and must not keep the pointer past it: the event worker frees panes
+    /// that disappear from the layout.
+    fn paneAtLocked(self: *Compositor, col: u16, row: u16) ?*Pane {
         for (self.panes.values()) |pane| {
             const r = pane.rect;
             if (col >= r.x and col < r.x + r.w and row >= r.y and row < r.y + r.h)
@@ -317,20 +330,29 @@ pub const Compositor = struct {
         return null;
     }
 
-    fn focusedPane(self: *Compositor) ?*Pane {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
+    fn focusedPaneLocked(self: *Compositor) ?*Pane {
         return self.panes.get(self.focused);
     }
 
+    fn focusLocked(self: *Compositor, pane: []const u8) !void {
+        if (std.mem.eql(u8, self.focused, pane)) return;
+        if (!self.panes.contains(pane)) return;
+        if (self.focused.len != 0) self.alloc.free(self.focused);
+        self.focused = try self.alloc.dupe(u8, pane);
+    }
+
     pub fn sendKey(self: *Compositor, key: vaxis.Key, action: surface.Action) void {
-        if (self.focusedPane()) |pane| pane.surface.sendKey(key, action);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.focusedPaneLocked()) |pane| pane.surface.sendKey(key, action);
     }
 
     pub fn sendMouse(self: *Compositor, mouse: vaxis.Mouse, col: i16, row: i16) void {
         if (col < 0 or row < 0) return;
-        const pane = self.paneAt(@intCast(col), @intCast(row)) orelse return;
-        if (mouse.type == .press) self.focus(pane.id) catch {};
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const pane = self.paneAtLocked(@intCast(col), @intCast(row)) orelse return;
+        if (mouse.type == .press) self.focusLocked(pane.id) catch {};
         pane.surface.sendMouse(
             mouse,
             col - @as(i16, @intCast(pane.rect.x)),
@@ -342,15 +364,19 @@ pub const Compositor = struct {
     /// are already in `win`'s coordinates because tmux tiled to the size we
     /// gave it.
     pub fn draw(self: *Compositor, win: vaxis.Window, images: surface.ImageSink) !void {
+        // Held across the whole draw, not just the lookup. Copying the
+        // pointers out and releasing first left the blit reading panes the
+        // event worker had freed, and `focused` is a slice that the same
+        // worker reallocates. Holding it only delays a layout change, which
+        // happens when a pane appears or goes; the output path takes this
+        // lock just long enough to find a pane and feeds outside it.
         self.mutex.lockUncancelable(self.io);
-        const panes = try self.alloc.dupe(*Pane, self.panes.values());
-        const focused = self.focused;
+        defer self.mutex.unlock(self.io);
+        const panes = self.panes.values();
         var focus_rect: ?layout.PaneRect = null;
-        for (panes) |pane| if (std.mem.eql(u8, pane.id, focused)) {
+        for (panes) |pane| if (std.mem.eql(u8, pane.id, self.focused)) {
             focus_rect = pane.rect;
         };
-        self.mutex.unlock(self.io);
-        defer self.alloc.free(panes);
 
         for (panes) |pane| {
             const r = pane.rect;
@@ -398,7 +424,9 @@ pub const Compositor = struct {
 
     /// The focused pane's cursor, in compositor coordinates.
     pub fn cursor(self: *Compositor) ?surface.Position {
-        const pane = self.focusedPane() orelse return null;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const pane = self.focusedPaneLocked() orelse return null;
         const c = pane.surface.cursor() orelse return null;
         return .{
             .col = @intCast(pane.rect.x + c.col),
