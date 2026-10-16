@@ -165,6 +165,12 @@ pub const Surface = struct {
         self.stream.nextSlice(bytes);
     }
 
+    // Slicing the parse so the lock is released every 1KB was measured and
+    // reverted: the draw's wait went from 11ms to 23ms. A parser that
+    // re-acquires in a tight loop barges past a waiter that has to be woken,
+    // so shorter holds turned into starvation. Taking the lock less often is
+    // what helps, not holding it for less time.
+
     /// Resize the terminal. The owner resizes whatever sits on the other end.
     pub fn resize(self: *Surface, cols: u16, rows: u16) !void {
         if (cols == 0 or rows == 0) return;
@@ -180,23 +186,27 @@ pub const Surface = struct {
 
     /// Encode a key press and send it to the child.
     pub fn sendKey(self: *Surface, key: vaxis.Key) void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        const opts: ghostty.input.KeyEncodeOptions = .fromTerminal(&self.terminal);
         var buf: [128]u8 = undefined;
-        var writer: std.Io.Writer = .fixed(&buf);
         var scratch: [4]u8 = undefined;
-        ghostty.input.encodeKey(&writer, toKeyEvent(key, &scratch), opts) catch |err| switch (err) {
-            // Only a long pre-edit overflows 128 bytes, and vaxis delivers
-            // pre-edit text as `text` which we pass through below instead.
-            error.WriteFailed => {
-                const text = key.text orelse return;
-                self.logKey(key, opts, text);
-                self.sink.write(self.sink.ctx, text);
-                return;
-            },
+        var writer: std.Io.Writer = .fixed(&buf);
+
+        // The encoding needs the terminal's modes, so it runs under the
+        // lock. The write does not, and must not: the sink is a pty write or
+        // a tmux command, and holding the lock across it makes the parser
+        // wait on the very terminal the keystroke is bound for.
+        self.mutex.lockUncancelable(self.io);
+        const opts: ghostty.input.KeyEncodeOptions = .fromTerminal(&self.terminal);
+        const sent: []const u8 = encoded: {
+            ghostty.input.encodeKey(&writer, toKeyEvent(key, &scratch), opts) catch |err| switch (err) {
+                // Only a long pre-edit overflows 128 bytes, and vaxis
+                // delivers pre-edit text as `text`, which goes through
+                // unencoded instead.
+                error.WriteFailed => break :encoded key.text orelse "",
+            };
+            break :encoded if (forwards(key, opts)) writer.buffered() else "";
         };
-        const sent = if (forwards(key, opts)) writer.buffered() else "";
+        self.mutex.unlock(self.io);
+
         // Logged before the length check: a key that sends nothing is exactly
         // the case worth seeing.
         self.logKey(key, opts, sent);

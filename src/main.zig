@@ -228,6 +228,17 @@ pub fn main(init: std.process.Init) !void {
     defer if (editor) |*e| e.deinit(a);
     var error_text: ?[]const u8 = null;
     defer if (error_text) |e| a.free(e);
+    // A frame budget, so the loop is not always mid-draw when a key lands.
+    // Without one tmm drew as fast as output arrived, which left no moment
+    // in which a keypress could be picked up first. movy paces a game loop
+    // to an absolute deadline and sleeps the remainder for the same reason.
+    // `TMM_FRAME_BUDGET_MS=0` turns it off, for measuring what it buys.
+    const frame_budget_ns: u64 = budget: {
+        const text = init.environ_map.get("TMM_FRAME_BUDGET_MS") orelse break :budget 16 * std.time.ns_per_ms;
+        const ms = std.fmt.parseInt(u64, std.mem.trim(u8, text, " \t\r\n"), 10) catch break :budget 16 * std.time.ns_per_ms;
+        break :budget ms * std.time.ns_per_ms;
+    };
+    var last_draw: std.Io.Timestamp = .now(io, .awake);
     var frames: ?FrameLog = if (init.environ_map.get("TMM_FRAME_LOG")) |path|
         .{ .io = io, .alloc = a, .path = path }
     else
@@ -380,8 +391,26 @@ pub fn main(init: std.process.Init) !void {
                         break :key_event;
                     }
                     if (focus == .region) {
-                        if (region) |r| r.sendKey(key);
-                        if (compositor) |c| c.sendKey(key);
+                        forwardKey(region, compositor, key);
+                        // The rest of the queued keys go with it. A key bound
+                        // for the region changes nothing the sidebar draws,
+                        // so there is no reason to draw between two of them,
+                        // and taking one per frame capped typing at the frame
+                        // rate: ten keys pressed together arrived 24ms apart,
+                        // over 250ms for the last. movy's loop drains its
+                        // input every frame for the same reason.
+                        while (try loop.tryEvent()) |next| {
+                            if (next != .key_press) {
+                                pending_event = next;
+                                break;
+                            }
+                            const queued = next.key_press;
+                            if (queued.matches(vaxis.Key.f12, .{})) {
+                                focus = .sidebar;
+                                break;
+                            }
+                            forwardKey(region, compositor, queued);
+                        }
                         break :key_event;
                     }
                 }
@@ -647,13 +676,43 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         if (frames) |*f| stamp = f.mark(1, stamp);
+
+        // Wait out the rest of the frame budget, and hand over the moment
+        // input arrives: a frame rendered late is invisible, and the key
+        // that interrupted it is now in front of the render rather than
+        // behind it.
+        //
+        // Only the render waits. Everything above it is this frame's layout
+        // -- the clamped split, the scroll offset, the hit-test extents and
+        // the resize the region is owed -- and skipping that is not a
+        // deferred redraw but a dropped update. Waiting earlier cost the
+        // region its resize and left the divider a cell short of the drag.
+        while (frame_budget_ns > 0) {
+            const now: std.Io.Timestamp = .now(io, .awake);
+            const since: u64 = @intCast(@max(0, last_draw.durationTo(now).nanoseconds));
+            if (since >= frame_budget_ns) break;
+            if (try loop.tryEvent()) |next| {
+                pending_event = next;
+                break;
+            }
+            io.sleep(.{ .nanoseconds = 500 * std.time.ns_per_us }, .awake) catch break;
+        }
+        if (pending_event != null) continue;
+
         try vx.render(tty.writer());
+        last_draw = .now(io, .awake);
         if (frames) |*f| {
             _ = f.mark(2, stamp);
             f.flush();
         }
     }
 }
+/// Hand a key to whichever of the two owns the region.
+fn forwardKey(region: ?*region_mod.Region, compositor: ?*panes_mod.Compositor, key: vaxis.Key) void {
+    if (region) |r| r.sendKey(key);
+    if (compositor) |c| c.sendKey(key);
+}
+
 /// Where a frame's time goes, written to `TMM_FRAME_LOG` as a mean and a
 /// peak over a window of frames rather than a line each. A line per frame
 /// would cost an open and a write inside the thing being measured, which is
@@ -689,7 +748,7 @@ const FrameLog = struct {
         }.f;
         const line = std.fmt.allocPrint(
             self.alloc,
-            "frames={d} sidebar mean={d:.2} peak={d:.2} | blit mean={d:.2} peak={d:.2} " ++
+            "frames={d} sidebar mean={d:.2} peak={d:.2} | region mean={d:.2} peak={d:.2} " ++
                 "| render mean={d:.2} peak={d:.2} | frame mean={d:.2} ms\n",
             .{
                 self.frames,
