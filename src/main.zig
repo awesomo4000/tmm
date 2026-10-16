@@ -228,6 +228,10 @@ pub fn main(init: std.process.Init) !void {
     defer if (editor) |*e| e.deinit(a);
     var error_text: ?[]const u8 = null;
     defer if (error_text) |e| a.free(e);
+    var frames: ?FrameLog = if (init.environ_map.get("TMM_FRAME_LOG")) |path|
+        .{ .io = io, .alloc = a, .path = path }
+    else
+        null;
     var pending_event: ?Event = null;
     defer if (pending_event) |event| switch (event) {
         .snapshot => |s| s.destroy(a),
@@ -532,6 +536,7 @@ pub fn main(init: std.process.Init) !void {
             cursor = i;
             break;
         };
+        var stamp: std.Io.Timestamp = if (frames != null) .now(io, .awake) else .zero;
         const full = vx.window();
         // The sidebar's content width, measured before the split is known so
         // that a first frame can size itself to what it has to show.
@@ -620,6 +625,7 @@ pub fn main(init: std.process.Init) !void {
             "F12 sidebar"
         else
             "j/k move  F12 shell  q quit", .{ .fg = .{ .index = 8 } });
+        if (frames) |*f| stamp = f.mark(0, stamp);
         if (region != null or compositor != null) {
             const divider = win.width;
             for (0..full.height) |y| full.writeCell(divider, @intCast(y), .{
@@ -640,9 +646,70 @@ pub fn main(init: std.process.Init) !void {
                 };
             }
         }
+        if (frames) |*f| stamp = f.mark(1, stamp);
         try vx.render(tty.writer());
+        if (frames) |*f| {
+            _ = f.mark(2, stamp);
+            f.flush();
+        }
     }
 }
+/// Where a frame's time goes, written to `TMM_FRAME_LOG` as a mean and a
+/// peak over a window of frames rather than a line each. A line per frame
+/// would cost an open and a write inside the thing being measured, which is
+/// how a profile ends up reporting its own overhead.
+const FrameLog = struct {
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    path: []const u8,
+    frames: u32 = 0,
+    sums: [3]u64 = @splat(0),
+    peaks: [3]u64 = @splat(0),
+
+    const window = 60;
+
+    /// Charge the time since `from` to `phase` and return the reading, so
+    /// each phase ends where the next begins and nothing falls between.
+    fn mark(self: *FrameLog, phase: usize, from: std.Io.Timestamp) std.Io.Timestamp {
+        const now: std.Io.Timestamp = .now(self.io, .awake);
+        const ns: u64 = @intCast(@max(0, from.durationTo(now).nanoseconds));
+        self.sums[phase] += ns;
+        self.peaks[phase] = @max(self.peaks[phase], ns);
+        return now;
+    }
+
+    fn flush(self: *FrameLog) void {
+        self.frames += 1;
+        if (self.frames < window) return;
+        const n: f64 = @floatFromInt(self.frames);
+        const ms = struct {
+            fn f(ns: u64) f64 {
+                return @as(f64, @floatFromInt(ns)) / std.time.ns_per_ms;
+            }
+        }.f;
+        const line = std.fmt.allocPrint(
+            self.alloc,
+            "frames={d} sidebar mean={d:.2} peak={d:.2} | blit mean={d:.2} peak={d:.2} " ++
+                "| render mean={d:.2} peak={d:.2} | frame mean={d:.2} ms\n",
+            .{
+                self.frames,
+                ms(self.sums[0]) / n, ms(self.peaks[0]),
+                ms(self.sums[1]) / n, ms(self.peaks[1]),
+                ms(self.sums[2]) / n, ms(self.peaks[2]),
+                ms(self.sums[0] + self.sums[1] + self.sums[2]) / n,
+            },
+        ) catch return;
+        defer self.alloc.free(line);
+        self.frames = 0;
+        self.sums = @splat(0);
+        self.peaks = @splat(0);
+        var file = std.Io.Dir.cwd().createFile(self.io, self.path, .{ .truncate = false }) catch return;
+        defer file.close(self.io);
+        const st = file.stat(self.io) catch return;
+        _ = file.writePositionalAll(self.io, line, st.size) catch {};
+    }
+};
+
 fn mouseHit(rows: []const sidebar.Row, offset: usize, mouse: vaxis.Mouse, width: u16, height: u16, column_width: u16) ?usize {
     if (mouse.row < 2 or mouse.row >= @as(i32, height) - 2 or mouse.col < 0 or mouse.col >= @min(width, column_width)) return null;
     const i = offset + @as(usize, @intCast(mouse.row - 2));
