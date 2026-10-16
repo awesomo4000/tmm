@@ -27,8 +27,13 @@ run = [
   "python3 tests/keyscope.py --self-test",
   "python3 tests/key_release.py",
   "python3 tests/images.py",
-  "python3 tests/tmux_floor.py",
+]
+
+[tasks.floors]
+description = "Reference latency floors: the machine and tmux, measured alone"
+run = [
   "python3 tests/pty_floor.py",
+  "python3 tests/tmux_floor.py",
 ]
 
 [tasks.probe]

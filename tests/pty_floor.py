@@ -28,7 +28,7 @@ import termios
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from keylag import PROBE, arrivals, clock_ns  # noqa: E402
+from keylag import PROBE, arrivals, clock_ns, report_noise, floor_verdict  # noqa: E402
 
 # Lower case and digits only: the probe stops on `Q`, and an alphabet
 # containing its own stop byte ends the run halfway through.
@@ -90,6 +90,7 @@ def run(load, gap=0.05):
 def main():
     if not PROBE.exists():
         raise SystemExit('build first: zig build')
+    report_noise('pty floor')
     print('pty floor: write -> read, nothing in between')
     for load in (False, True):
         lat, n = run(load)
@@ -105,6 +106,7 @@ def main():
         slow = [(i, round(x, 3)) for x, i in sorted(lat) if x > 1.0]
         if slow:
             print('         over 1ms: %s' % slow)
+        floor_verdict(slow, len(lat))
 
 
 if __name__ == '__main__':
