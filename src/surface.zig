@@ -91,6 +91,29 @@ pub const Surface = struct {
     /// that arrives mid-parse genuinely precedes them, and encoding it
     /// against the modes in force before that chunk is what the child will
     /// expect. The lock gave the same answer, only slower.
+    /// Guards `render_state` alone, and is never held across a parse.
+    ///
+    /// `mutex` is held for a whole 16KB parse, and `std.Io.Mutex` is an
+    /// unfair futex, so anything that waits for it inherits the parser's
+    /// duty cycle: an acquisition measured about 10ms under continuous
+    /// output against 0.25ms of work behind it. Splitting the state in two
+    /// is what fixes that. The parser takes this one only for the update it
+    /// publishes, about 0.01ms, so a draw waiting on it waits that long and
+    /// not for the parse.
+    ///
+    /// Lock order is `mutex` then `render` and never the reverse. The draw
+    /// takes `render` alone, because it reads no terminal state.
+    render: std.Io.Mutex = .init,
+
+    /// Set when a published update carried a change, cleared by the draw
+    /// that consumes it.
+    ///
+    /// `RenderState.dirty` means "changed since the last update", which was
+    /// the same thing as "since the last draw" only while the draw was the
+    /// one calling update. Now the parser calls it, and two updates between
+    /// two draws would have reported the second as clean and lost the frame.
+    needs_draw: std.atomic.Value(bool),
+
     modes: std.atomic.Value(u32),
 
     /// Where to append a line per input event, or null. The slice is not
@@ -134,6 +157,7 @@ pub const Surface = struct {
             .cols = cols,
             .rows = rows,
             .modes = .init(0),
+            .needs_draw = .init(true),
         };
         errdefer self.graphemes.deinit();
 
@@ -156,6 +180,7 @@ pub const Surface = struct {
         // Seeded here so the first keypress reads the terminal's real
         // defaults rather than an all-zero word.
         self.publishModes();
+        self.publishRender();
     }
 
     pub fn deinit(self: *Surface) void {
@@ -186,6 +211,7 @@ pub const Surface = struct {
         // The bytes just parsed are what changes a mode, so this is the only
         // place that has to republish.
         self.publishModes();
+        self.publishRender();
     }
 
     // Two attempts at this lock were measured and reverted. Slicing the parse
@@ -210,6 +236,7 @@ pub const Surface = struct {
         try self.stream.handler.resize(.{ .cols = cols, .rows = rows });
         self.cols = cols;
         self.rows = rows;
+        self.publishRender();
     }
 
     /// Encode a key press and send it to the child.
@@ -295,6 +322,16 @@ pub const Surface = struct {
             };
         }
     };
+
+    /// Refresh the render state from the terminal. Called with `mutex` held,
+    /// by whoever just changed terminal state, so that a draw never has to
+    /// take `mutex` to get a current frame.
+    fn publishRender(self: *Surface) void {
+        self.render.lockUncancelable(self.io);
+        defer self.render.unlock(self.io);
+        self.render_state.update(self.alloc, &self.terminal) catch return;
+        if (self.render_state.dirty != .false) self.needs_draw.store(true, .release);
+    }
 
     /// Publish the modes the encoder needs. Called with the lock held, by
     /// whoever just changed terminal state.
@@ -467,22 +504,17 @@ pub const Surface = struct {
     /// Draw the region into `win`. `fa` is a per-frame allocator, used only
     /// for graphemes that are not single-byte ASCII.
     pub fn draw(self: *Surface, win: vaxis.Window) !void {
-        // The lock covers the update and nothing else. The update is the only
-        // part that reads terminal state, which the parser owns; everything
-        // after it reads `render_state`, which the parser never touches. The
-        // acquisition costs about 10ms under continuous output and the work
-        // costs 0.25ms, so what matters is how often this is taken, not how
-        // long it is held.
-        {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            try self.render_state.update(self.alloc, &self.terminal);
-        }
-        const state = &self.render_state;
         // libvaxis keeps the previous frame's cells, and only the sidebar is
         // cleared each frame, so an unchanged terminal needs no work at all.
         // Without this the whole region is rewritten on every sidebar refresh.
-        if (state.dirty == .false) return;
+        if (!self.needs_draw.swap(false, .acq_rel)) return;
+
+        // Only the render lock, which the parser holds for one update. The
+        // parse lock is never taken here, so how long this waits no longer
+        // depends on how much output the child is producing.
+        self.render.lockUncancelable(self.io);
+        defer self.render.unlock(self.io);
+        const state = &self.render_state;
 
         // Past this point every row is rewritten, so every grapheme libvaxis
         // still holds is about to be replaced and the old bytes are free.
@@ -541,11 +573,12 @@ pub const Surface = struct {
     }
 
     /// Where the child's cursor is within `win`, if it is visible.
-    /// No lock: `render_state` is written only by `draw`, and both are
-    /// called from the thread that owns the display. Taking it here cost a
-    /// second acquisition per frame, and an acquisition under continuous
-    /// output is 10ms of starvation, not a handful of nanoseconds.
+    /// The render lock, not the parse lock: the parser publishes
+    /// `render_state` now, so this is shared, but a hold here is one update
+    /// long rather than one parse long.
     pub fn cursor(self: *Surface) ?Position {
+        self.render.lockUncancelable(self.io);
+        defer self.render.unlock(self.io);
         const c = self.render_state.cursor;
         if (!c.visible) return null;
         const vp = c.viewport orelse return null;

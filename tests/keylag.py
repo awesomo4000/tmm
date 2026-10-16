@@ -39,9 +39,13 @@ import time
 BINARY = Path(__file__).resolve().parents[1] / 'zig-out/bin/tmm'
 ROWS, COLS, SPLIT = 40, 160, 30
 KEYS = 12
-# A keypress that takes longer than this to cross tmm is the bug this
-# measures: it is well beyond anything a person would call immediate.
-BUDGET_MS = 50.0
+# A keypress has a deadline and a frame does not, so the budget is on the
+# worst case and not only the middle: what a player or a typist notices is
+# the jitter. Both are set well above what is measured -- around 0.2ms
+# median and under 1ms worst, loaded or quiet -- so this catches a return of
+# the coupling (which cost 23ms median and 78ms worst) rather than noise.
+BUDGET_MS = 5.0
+WCET_MS = 10.0
 
 CHILD = r'''
 import os, select, sys, time
@@ -148,6 +152,15 @@ def report(label, samples):
     return statistics.median(samples), samples[-1]
 
 
+def check(failures, mode, median, worst):
+    if median > BUDGET_MS:
+        failures.append('%s loaded median %.1fms over the %.1fms budget'
+                        % (mode, median, BUDGET_MS))
+    if worst > WCET_MS:
+        failures.append('%s loaded worst case %.1fms over the %.1fms budget'
+                        % (mode, worst, WCET_MS))
+
+
 def shell_mode(root, load):
     marker = os.path.join(root, 'marker-shell-%d' % load)
     open(marker, 'wb').close()
@@ -238,17 +251,13 @@ def main():
         report('quiet', quiet)
         loaded = shell_mode(root, load=True)
         median, worst = report('under output load', loaded)
-        if median > BUDGET_MS:
-            failures.append('--shell loaded median %.1fms over the %.1fms budget'
-                            % (median, BUDGET_MS))
+        check(failures, '--shell', median, worst)
 
         print('--panes: key -> process in a tmux pane')
         report('quiet', panes_mode(root, load=False))
         panes_loaded = panes_mode(root, load=True)
         median, worst = report('under output load', panes_loaded)
-        if median > BUDGET_MS:
-            failures.append('--panes loaded median %.1fms over the %.1fms budget'
-                            % (median, BUDGET_MS))
+        check(failures, '--panes', median, worst)
     for f in failures:
         print('FAIL', f)
     print('PASS' if not failures else 'FAIL')
