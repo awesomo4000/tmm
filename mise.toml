@@ -24,6 +24,7 @@ run = [
   "python3 tests/follow.py",
   "python3 tests/split_shell.py",
   "python3 tests/compositor.py",
+  "python3 tests/pane_churn.py",
   "python3 tests/keylag.py",
   "python3 tests/keylag_native.py",
   "python3 tests/keyscope.py --self-test",
