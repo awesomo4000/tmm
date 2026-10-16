@@ -87,6 +87,13 @@ def main():
 
         try:
             tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'alpha', '-c', root)
+            # Printed before tmm attaches, so it can only reach the display
+            # through the seed: tmm asks tmux for the pane's existing screen
+            # with a one-shot `capture-pane`. That cannot go down the control
+            # stream, because a reply matched by arrival order races the
+            # keystrokes the display thread is writing to the same stdin.
+            tmux('send-keys', '-t', 'alpha', 'printf BEFORE-ATTACH\\n', 'Enter')
+            time.sleep(0.6)
 
             pid, fd = pty.fork()
             if pid == 0:
@@ -98,6 +105,8 @@ def main():
             fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', ROWS, COLS, 0, 0))
             children.append((pid, fd))
             ui_fd = fd
+            assert until(lambda: any('BEFORE-ATTACH' in line for line in region())), \
+                ('a pane that printed before tmm attached was not seeded', region()[-6:])
 
             # tmm tells tmux how much room it has with refresh-client -C and
             # tmux re-tiles to it, so the client reaching the region's exact

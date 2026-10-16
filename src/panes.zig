@@ -80,6 +80,11 @@ pub const Compositor = struct {
 
     input_log: ?[]const u8 = null,
 
+    /// How to reach this server, for the one-shot `capture-pane` that seeds a
+    /// pane. Kept because that command must not go down the control stream:
+    /// see `seed`.
+    opts: cmstream.Options,
+
     pub fn create(
         alloc: Allocator,
         io: std.Io,
@@ -93,6 +98,7 @@ pub const Compositor = struct {
             .alloc = alloc,
             .stream = try .open(alloc, io, opts),
             .input_log = input_log,
+            .opts = opts,
         };
         return self;
     }
@@ -207,16 +213,39 @@ pub const Compositor = struct {
         }
     }
 
+    /// Seed a pane from tmux's own screen, so one that existed before we
+    /// attached is not blank until it next writes.
+    ///
+    /// Through a one-shot `tmux capture-pane`, deliberately not through the
+    /// control stream. `Stream.request` writes a command and then reads the
+    /// reply that follows, matching by arrival order, and this runs on the
+    /// event worker while the display thread is writing keystrokes to the
+    /// same stdin. A `send-keys` landing between the two halves makes tmux
+    /// answer that first, so the request takes the wrong `%begin`/`%end`
+    /// block and the capture's own reply is left to be parsed as events.
+    /// Panes appear at human pace, so a fork and exec here costs nothing
+    /// that matters, and nothing on the keystroke path is shared.
     fn seed(self: *Compositor, pane: *Pane) !void {
-        const reply = try self.stream.requestArgv(self.alloc, &.{
-            "capture-pane", "-p", "-e", "-t", pane.id,
-        });
-        defer reply.deinit(self.alloc);
-        if (!reply.ok) return;
-        for (reply.lines, 0..) |line, n| {
-            if (n != 0) pane.surface.feed("\r\n");
-            pane.surface.feed(line);
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(self.alloc);
+        try argv.append(self.alloc, self.opts.tmux_bin);
+        if (self.opts.socket) |socket| {
+            try argv.append(self.alloc, "-S");
+            try argv.append(self.alloc, socket);
+        } else if (self.opts.label) |label| {
+            try argv.append(self.alloc, "-L");
+            try argv.append(self.alloc, label);
         }
+        try argv.appendSlice(self.alloc, &.{ "capture-pane", "-p", "-e", "-t", pane.id });
+
+        const result = std.process.run(self.alloc, self.io, .{
+            .argv = argv.items,
+            .stdout_limit = .limited(1 << 20),
+        }) catch return;
+        defer self.alloc.free(result.stdout);
+        defer self.alloc.free(result.stderr);
+        if (result.term != .exited or result.term.exited != 0) return;
+        pane.surface.feed(std.mem.trimEnd(u8, result.stdout, "\n"));
     }
 
     /// Consume one control-mode event. Returns true when something changed

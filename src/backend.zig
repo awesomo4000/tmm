@@ -80,6 +80,16 @@ pub const Shared = struct {
     /// full query rather than carrying on with a gap.
     events_dropped: bool = false,
 
+    /// Counts every notification ever queued, so the collector can tell
+    /// whether news arrived while it was querying.
+    ///
+    /// `State.isDirty` asks whether the model knows it is stale, which it
+    /// cannot when the event saying so is still in this queue. A pane
+    /// created during a collect is in the query and not in the model, and
+    /// the model is not dirty, so the self-check reported a divergence that
+    /// was only the two halves being read at different moments.
+    event_seq: std.atomic.Value(u64) = .init(0),
+
     /// Posted by controlWorker when tmux state changed; the collector waits on
     /// it instead of polling. Statically initializable, no deinit. The wait is
     /// cancellable, so task.cancel unblocks a collector parked here even if the
@@ -113,6 +123,7 @@ pub const Shared = struct {
     pub fn pushEvent(self: *Shared, io: std.Io, alloc: Allocator, line: []const u8) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
+        _ = self.event_seq.fetchAdd(1, .acq_rel);
         if (self.events.items.len >= max_queued_events) {
             self.events_dropped = true;
             return;
@@ -433,6 +444,11 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
         }
         if (lines.len > 0) alloc.free(lines);
 
+        // Noted after the drain and before the query: anything queued from
+        // here on is news the model has not been given yet, and comparing it
+        // against the query would be comparing two different moments.
+        const seq_before_query = shared.event_seq.load(.acquire);
+
         const emitted = shared.takeOutputPanes(io, alloc);
         for (emitted) |pane| {
             model.noteOutput(pane) catch {};
@@ -510,7 +526,8 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
             // This pass's capture decisions have consumed the output marks.
             agents.prune(s.panes);
             model.clearOutput();
-            if (!model.isDirty()) checkModel(io, alloc, &model, s, reconcile_log);
+            const quiet = shared.event_seq.load(.acquire) == seq_before_query;
+            if (!model.isDirty() and quiet) checkModel(io, alloc, &model, s, reconcile_log);
             model.adopt(s.sessions, s.panes) catch {
                 model.needs_full = true;
             };
