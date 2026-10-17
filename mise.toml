@@ -40,6 +40,7 @@ run = [
   "python3 tests/key_release.py",
   "python3 tests/images.py",
   "python3 tests/program_status.py",
+  "python3 tests/sidebar_status.py",
 ]
 
 [tasks.latency]
