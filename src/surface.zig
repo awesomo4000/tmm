@@ -333,11 +333,16 @@ pub const Surface = struct {
         // The handler borrows `&self.terminal`, which is why Surface is pinned.
         var handler: ghostty.TerminalStream.Handler = .init(&self.terminal);
         handler.effects = .readonly;
-        // Terminal responses -- device attributes, cursor position, the kitty
-        // graphics and OSC 7501 query replies -- are produced by the library
-        // and handed back here. We route them to the sink; we do not write
-        // them ourselves.
+        // Terminal responses -- cursor position, the device attributes and
+        // kitty graphics replies, OSC 7501 -- are produced by the library and
+        // handed back here. We route them to the sink; we do not write them
+        // ourselves. Each kind still has to be enabled by its own effect.
         handler.effects.write_pty = writeOut;
+        // `CSI c`. A program that asks what the terminal is and is not told
+        // waits out its own timeout before deciding: chafa stalls exactly 5
+        // seconds per image on a region that stays silent, which is most of
+        // what looked like tmm being slow to draw one.
+        handler.effects.device_attributes = onDeviceAttributes;
         // Setting this is also what makes the terminal answer the support
         // query, `OSC 7501 ; ?`, through `write_pty`. Left null, a program
         // that asks is told the protocol is unsupported, which is what tmm
@@ -637,6 +642,20 @@ pub const Surface = struct {
         if (record.app) |v| alloc.free(v);
         if (record.title) |v| alloc.free(v);
         if (record.msg) |v| alloc.free(v);
+    }
+
+    /// What the region claims to be, for `CSI c` and its `>`/`=` variants.
+    ///
+    /// The library's defaults: a VT220 that does ANSI colour. tmm claims no
+    /// feature it does not carry through to the outer terminal -- notably not
+    /// sixel, which it does not draw -- because a claim here is what a program
+    /// chooses its output from. Kitty graphics are not advertised through DA1
+    /// at all; a viewer asks for those with `APC G a=q`, which the library
+    /// answers from the storage it already has.
+    fn onDeviceAttributes(
+        _: *ghostty.TerminalStream.Handler,
+    ) ghostty.device_attributes.Attributes {
+        return .{};
     }
 
     /// How big the region is, for `CSI 14/16/18/19 t` and mode 2048.

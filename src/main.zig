@@ -185,7 +185,12 @@ pub fn main(init: std.process.Init) !void {
     else
         null;
     defer if (compositor) |c| {
-        c.stream.close();
+        // Shut the stream down rather than closing it: this has to end the
+        // child so the worker blocked in `next` returns, and `cancel` awaits
+        // that worker. Closing here would free the stream while the worker
+        // still held it, and `destroy` would then free it a second time --
+        // which it did, deterministically, on every `--panes` exit.
+        c.stream.shutdown();
         if (compositor_task) |*t| t.cancel(io);
         c.destroy();
     };
