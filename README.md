@@ -73,7 +73,11 @@ A pane that existed before tmm attached is seeded from tmux's own screen with a 
 
 tmux still owns the session, the windows, the processes, the scrollback and the persistence, and still delivers SIGWINCH itself. tmm never resizes a pane.
 
-Kitty graphics are parsed and stored per pane but not yet drawn, scrollback is not reachable, and only the session's current window is composited.
+The session's active window is what gets composited, and a switch is followed. Three things had to be measured rather than assumed. A `%layout-change` names only its own window's panes, so adopting one from another window replaced everything on screen: a split in a background window used to take the display. A window switch arrives as `%session-window-changed` with no layout, because tmux sends a layout when one changes and not when a client starts looking at a window. And attaching reports the session but never which window is active, while sending a layout for every window in it, so whichever arrived last was displayed, which could be a window nobody was looking at.
+
+So the active window is asked for at attach and after a switch, and a window's panes are learned with `list-panes -F '#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height}'`, which gives the geometry the layout string was being parsed for anyway. Two other routes were tried and rejected by measurement: `refresh-client -l` answers with a bare `%begin`/`%end` and resends nothing, and `#{window_visible_layout}` is JSON in this tmux while `%layout-change` carries the classic checksum form, so one parser cannot read both. Both queries are one-shot subprocesses rather than control-stream requests, for the reason seeding is, and both happen at human pace.
+
+Scrollback is not reachable.
 
 ## Navigation
 
