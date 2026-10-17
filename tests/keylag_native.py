@@ -118,7 +118,8 @@ def main():
                         data = b''
                     if b'\x1b[c' in data:
                         os.write(master, b'\x1b[?62;c')
-            os.write(master, b'\x1b[24~')     # F12: focus the region
+            # Split mode starts focused on the region; an F12 here would
+            # move the keyboard to the sidebar.
             time.sleep(0.4)
 
             # The sender owns the master from here: it writes the keys, takes

@@ -236,7 +236,8 @@ def shell_mode(root, load):
                     {'SHELL': runner(root, load, log)})
     try:
         pump(fd, 1.2)
-        os.write(fd, b'\x1b[24~')   # F12: move the keyboard to the region
+        # Split mode starts with the keyboard in the region, so there is no
+        # F12 here; pressing one would move it to the sidebar instead.
         pump(fd, 0.3)
         return measure(fd, log, load)
     finally:
