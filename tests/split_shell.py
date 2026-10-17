@@ -111,7 +111,9 @@ def main():
                                       '--shell', '--split', str(SPLIT)])
             assert until(lambda: screen(ui_fd).line(0).startswith('tmm : tmux micro manager')), \
                 'sidebar did not render'
-            assert until(lambda: 'F12 shell' in screen(ui_fd).line(ROWS - 1)), \
+            # The shell has the keyboard at startup in split mode, so the
+            # hint offers the way back rather than the way in.
+            assert until(lambda: 'F12 sidebar' in screen(ui_fd).line(ROWS - 1)), \
                 ('split-mode hint did not render', screen(ui_fd).line(ROWS - 1))
             # The divider is one column, drawn for the full height, and the
             # sidebar stops short of it rather than being clipped by it.
@@ -121,11 +123,17 @@ def main():
             assert all('│' not in line[:SPLIT] for line in screen(ui_fd).lines()), \
                 'sidebar drew into the divider'
 
-            # ---- keys reach the child -------------------------------------
-            os.write(ui_fd, b'\x1b[24~')  # F12: focus the region
+            # ---- F12 reaches the sidebar and comes back -------------------
+            os.write(ui_fd, b'\x1b[24~')  # F12: to the sidebar
+            pump(0.5)
+            assert 'F12 shell' in screen(ui_fd).line(ROWS - 1), \
+                ('focus did not move to the sidebar', screen(ui_fd).line(ROWS - 1))
+            os.write(ui_fd, b'\x1b[24~')  # F12: back to the region
             pump(0.5)
             assert 'F12 sidebar' in screen(ui_fd).line(ROWS - 1), \
-                ('focus did not move to the region', screen(ui_fd).line(ROWS - 1))
+                ('focus did not move back to the region', screen(ui_fd).line(ROWS - 1))
+
+            # ---- keys reach the child -------------------------------------
 
             os.write(ui_fd, f'tmux -S {socket} new-session -d -s from_region\r'.encode())
             assert until(lambda: 'from_region' in tmux('list-sessions', '-F',
@@ -258,6 +266,17 @@ def main():
 
             # Drawing is not enough: the innermost one has to be live. This
             # keystroke crosses terminal, tmm, tmm, tmm, shell, tmux.
+            #
+            # Move the outermost keyboard to its sidebar first. Every level
+            # starts focused on its own region now, so asserting three hints
+            # after a click would hold whether or not the click did anything;
+            # taking one away makes the count discriminate again. F12 reaches
+            # only the outermost, which is the point of the click below.
+            os.write(ui_fd, b'\x1b[24~')
+            pump(0.5)
+            assert screen(ui_fd).line(ROWS - 1).count('F12 sidebar') == 2, \
+                ('F12 did not move the outermost keyboard to its sidebar',
+                 repr(screen(ui_fd).line(ROWS - 1)))
             focus_deepest()
             assert screen(ui_fd).line(ROWS - 1).count('F12 sidebar') == 3, \
                 ('a click did not focus every level',

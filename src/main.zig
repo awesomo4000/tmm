@@ -60,7 +60,8 @@ const help =
     \\Click a server, display, session, or agent. b blinks the display. q exits.
     \\--dump prints a read-only JSON snapshot without opening the terminal UI.
     \\--shell splits the window: the sidebar on the left, a shell on the right.
-    \\       Drag the divider to resize. F12 moves focus between the two.
+    \\       The shell starts with the keyboard; F12 moves focus between the
+    \\       two, and q quits from the sidebar. Drag the divider to resize.
     \\       The shell is an ordinary one, so tmux attach works inside it.
     \\--split sets the starting sidebar width in columns; it implies --shell.
     \\--panes composites a session's panes on the right instead of a shell.
@@ -213,7 +214,12 @@ pub fn main(init: std.process.Init) !void {
     };
     var transmitter: ImageTransmitter = .{ .vx = &vx, .tty = &tty, .alloc = a };
     const images = transmitter.sink();
-    var focus: enum { sidebar, region } = .sidebar;
+    // The shell starts with the keyboard, because `--shell` is launched to
+    // work in: the sidebar is the thing you turn to, not the thing you begin
+    // at. F12 moves focus back, and so does the shell exiting, so `q` is
+    // still reachable without one. `--panes` is left on the sidebar, where a
+    // pane is chosen by clicking it.
+    var focus: enum { sidebar, region } = if (shell and !panes) .region else .sidebar;
     var dragging = false;
     var shared: backend.Shared = .{};
     var task = try io.concurrent(runWorker, .{ io, a, init.minimal.environ, opts, &shared, &loop });
