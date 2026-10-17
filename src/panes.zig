@@ -421,6 +421,22 @@ pub const Compositor = struct {
 
     /// Consume one control-mode event. Returns true when something changed
     /// that the UI should redraw for.
+    ///
+    /// Called only from `paneWorker`, on its own thread, and that matters for
+    /// the pane pointers below. They are looked up under the lock and used
+    /// after releasing it, which is the shape that `sendKey` was fixed for and
+    /// `tests/pane_use_after_free.py` catches. It is safe *here* and nowhere
+    /// else: panes are created and freed only by `applyRects`, which is
+    /// reached only from this function, so the one thread that could free the
+    /// pane is the thread already inside this call. Teardown is ordered to
+    /// agree -- `main` closes the stream, which ends the worker's blocking
+    /// `next`, then cancels the task, which awaits it, and only then calls
+    /// `destroy`. The lock is here to keep the UI thread's readers off a pane
+    /// this one is replacing; it was never protecting this thread from itself.
+    ///
+    /// Anything that moves pane creation or destruction onto another thread
+    /// invalidates that, and the feeds below have to take the lock for the
+    /// duration or copy what they need.
     pub fn apply(self: *Compositor, event: control.Event) !bool {
         switch (event) {
             .output => |o| {

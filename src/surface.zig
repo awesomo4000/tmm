@@ -115,6 +115,20 @@ pub const ImagePlacement = struct {
     source_y: u32,
     source_width: u32,
     source_height: u32,
+
+    /// The cell box to scale the source into, or zero for natural size.
+    ///
+    /// A virtual placement says how many cells it covers rather than how many
+    /// pixels, so the source rectangle has to be stretched to fill that box
+    /// instead of drawn at its own size. Zero keeps the old behaviour for an
+    /// ordinary placement, which is drawn unscaled and clipped.
+    cols: u16 = 0,
+    rows: u16 = 0,
+
+    /// Pixels into the top-left cell, for a placement that does not start on
+    /// a cell boundary. Always smaller than one cell.
+    offset_x: u16 = 0,
+    offset_y: u16 = 0,
 };
 
 /// Where a surface's output goes. `write` must tolerate being called from
@@ -204,6 +218,16 @@ pub const Surface = struct {
     /// Where the draw copies placements to, so it can let go of the lock
     /// before transmitting. Touched only by the thread that draws.
     placement_scratch: std.ArrayListUnmanaged(ImagePlacement) = .empty,
+
+    /// Where the grid scan for virtual placements puts its results, before
+    /// the render lock is taken to publish them. Touched only by the
+    /// publisher, under the parse lock.
+    ///
+    /// The scan is the expensive part of publishing -- 306us for a full
+    /// 40x20 placeholder grid against 22us to turn the runs into placements,
+    /// measured -- and the draw waits on the render lock, so the scan happens
+    /// before that lock is taken and only the copy happens inside it.
+    virtual_scratch: std.ArrayListUnmanaged(ImagePlacement) = .empty,
 
     /// Images already handed to the outer terminal, keyed by the id the child
     /// gave them. Transmitting sends every pixel down the real tty, so it
@@ -338,6 +362,7 @@ pub const Surface = struct {
         self.status.deinit(self.alloc);
         self.placements.deinit(self.alloc);
         self.placement_scratch.deinit(self.alloc);
+        self.virtual_scratch.deinit(self.alloc);
         self.transmitted.deinit(self.alloc);
         self.render_state.deinit(self.alloc);
         self.graphemes.deinit();
@@ -646,6 +671,12 @@ pub const Surface = struct {
         // A program that asked for in-band reports is owed one now, and
         // `handler.resize` is what emits it.
         self.stream.handler.resize(self.resizeOptions()) catch {};
+        // And republish, because a virtual placement cannot be resolved
+        // without a cell size and so was skipped until now. Output is the
+        // usual trigger for publishing, and a program that drew an image and
+        // then went quiet produces none: the placements would stay empty
+        // until something else happened to arrive.
+        self.publishRender();
     }
 
     /// The geometry to hand `handler.resize`, which needs the cell size to
@@ -827,6 +858,10 @@ pub const Surface = struct {
     /// by whoever just changed terminal state, so that a draw never has to
     /// take `mutex` to get a current frame.
     fn publishRender(self: *Surface) void {
+        // Before the render lock, not inside it: scanning the grid for
+        // placeholder cells is the costliest thing in publishing and the draw
+        // is what waits on that lock.
+        self.scanVirtual();
         self.render.lockUncancelable(self.io);
         defer self.render.unlock(self.io);
         self.render_state.update(self.alloc, &self.terminal) catch return;
@@ -837,10 +872,9 @@ pub const Surface = struct {
     /// Copy out where each image sits. Called with both locks held, by the
     /// publisher, so the draw can read positions without the parse lock.
     ///
-    /// Only placements pinned to the screen are published. A virtual
-    /// placement is drawn by the text layout through unicode placeholders and
-    /// has no position of its own, and a relative one is anchored to a parent
-    /// chain; neither is resolved here yet.
+    /// A pinned placement is read straight out of storage, a relative one is
+    /// resolved through its parent chain, and a virtual one was already found
+    /// in the grid by `scanVirtual` and is copied in from there.
     fn publishPlacements(self: *Surface) void {
         const storage = &self.terminal.screens.active.kitty_images;
         if (!storage.dirty and storage.generation == self.images_generation) return;
@@ -866,9 +900,9 @@ pub const Surface = struct {
                     col_offset = chain.horizontal_offset;
                     row_offset = chain.vertical_offset;
                 },
-                // Virtual placements are positioned by the unicode
-                // placeholder cells that refer to them, which means scanning
-                // the grid rather than reading a position. Not done yet.
+                // A virtual placement has no position in storage at all: it
+                // is positioned by the placeholder cells that refer to it,
+                // which the grid pass below finds.
                 .virtual => continue,
             }
             const pin = switch (origin.location) {
@@ -896,6 +930,7 @@ pub const Surface = struct {
                 .source_height = source.height,
             }) catch break;
         }
+        self.placements.appendSlice(self.alloc, self.virtual_scratch.items) catch {};
         // A changed generation means the pixels may have changed too, so
         // whatever the outer terminal holds for these ids is stale.
         if (storage.generation != self.images_generation) {
@@ -911,6 +946,94 @@ pub const Surface = struct {
         // waited for again by a draw that no longer had any reason to run.
         if (had_images or self.placements.items.len != 0) {
             self.needs_draw.store(true, .release);
+        }
+    }
+
+    /// Find the placements that the grid positions rather than storage.
+    ///
+    /// A virtual placement is transmitted with `U=1` and never says where it
+    /// goes; the program then writes U+10EEEE placeholder cells whose
+    /// diacritics carry the image id and which row and column of the image
+    /// each cell shows. This is the path every image viewer measured takes
+    /// once tmux is in it -- see `tools/image-emission.py` -- because
+    /// placeholder cells live in the multiplexer grid and survive being moved
+    /// and scrolled by it, which an absolute placement does not.
+    ///
+    /// A screen with no placeholders on it is nearly free: the terminal sets
+    /// a flag on any row it printed one into, so the common case costs one
+    /// flag read per row and no cell reads at all -- 2.4us for a 140x40
+    /// region of ordinary text, measured. A screen full of them is not free.
+    /// A 40x20 grid, which is what chafa draws by default, costs 306us, and
+    /// it is the cell and grapheme reads that cost it rather than the
+    /// arithmetic that follows: turning the runs into placements is another
+    /// 22us. That is why this runs before the render lock is taken and not
+    /// inside it, because the draw is what waits on that lock.
+    ///
+    /// The iterator yields one placement per row, so an image twenty cells
+    /// tall arrives as twenty single-row strips, each knowing which slice of
+    /// the source it shows. `renderPlacement` does that arithmetic, including
+    /// fitting the image to the cell box with its aspect ratio kept, which is
+    /// why this needs the cell size and why it is skipped without one: there
+    /// is no honest way to place a strip whose pixel height is unknown.
+    fn scanVirtual(self: *Surface) void {
+        const storage = &self.terminal.screens.active.kitty_images;
+        // The same gate `publishPlacements` uses, so the scan is skipped
+        // whenever the publish would have been. Both run under the parse lock
+        // in one call, so they cannot disagree.
+        if (!storage.dirty and storage.generation == self.images_generation) return;
+        self.virtual_scratch.clearRetainingCapacity();
+        if (self.cell_width == 0 or self.cell_height == 0) return;
+        const screen = self.terminal.screens.active;
+        const top = screen.pages.pin(.{ .viewport = .{ .x = 0, .y = 0 } }) orelse return;
+        const bottom = screen.pages.pin(.{
+            .viewport = .{ .x = 0, .y = self.rows -| 1 },
+        });
+
+        var it = ghostty.kitty.graphics.unicode.placementIterator(top, bottom);
+        while (it.next()) |virtual| {
+            const image = storage.imageById(virtual.image_id) orelse continue;
+            const render = virtual.renderPlacement(
+                storage,
+                &image,
+                self.cell_width,
+                self.cell_height,
+            ) catch continue;
+            const point = screen.pages.pointFromPin(.viewport, render.top_left) orelse continue;
+            // The cell box comes from the placeholder run, not from dividing
+            // the destination pixels. `renderPlacement` fits the image into
+            // the box with its aspect ratio kept, so a strip's destination
+            // can be a fraction of a cell -- a 4x4 image in a 2x2 cell box of
+            // 20x40 pixels is letterboxed to 20x20, and each of its two row
+            // strips is 10 pixels, half a cell. Dividing that by the cell
+            // height gives zero and the placement was dropped entirely.
+            //
+            // The box is what tmm can actually express: vaxis sizes a
+            // placement in whole cells, by `r=` and `c=`, so the source
+            // rectangle is stretched to fill its row of cells rather than
+            // letterboxed inside it. The two agree exactly when the image
+            // was sized to its cell box, which is what a viewer that chose
+            // the box does -- chafa transmits 400x400 for 40x20 cells at
+            // 10x20 each. They differ for an image of some other shape,
+            // which is then stretched where kitty would centre it.
+            const cols = std.math.cast(u16, virtual.width) orelse continue;
+            const rows = std.math.cast(u16, virtual.height) orelse continue;
+            if (cols == 0 or rows == 0) continue;
+            self.virtual_scratch.append(self.alloc, .{
+                .image_id = virtual.image_id,
+                .col = @intCast(point.viewport.x),
+                .row = @intCast(point.viewport.y),
+                // A virtual placement carries no z of its own here; the
+                // placeholder cells are ordinary text and sit with it.
+                .z = 0,
+                .source_x = render.source_x,
+                .source_y = render.source_y,
+                .source_width = render.source_width,
+                .source_height = render.source_height,
+                .cols = cols,
+                .rows = rows,
+                // No offsets: the source fills the box, so there is no
+                // leftover room inside the cells to centre it in.
+            }) catch return;
         }
     }
 
@@ -1205,15 +1328,34 @@ pub const Surface = struct {
         for (self.placement_scratch.items) |placement| {
             if (placement.col >= win.width or placement.row >= win.height) continue;
             const image = self.transmit(placement.image_id, sink) orelse continue;
+            // A placement with a cell box gets a window exactly that size and
+            // is stretched into it; one without keeps its natural size and is
+            // clipped by a window running to the edge. `.fill` is right rather
+            // than `.fit` because the fitting is already done: the box and the
+            // source rectangle both come out of `renderPlacement`, which
+            // preserved the aspect ratio when it chose them, and asking vaxis
+            // to preserve it a second time would letterbox a strip that is
+            // already correct.
+            const sized = placement.cols != 0 and placement.rows != 0;
             const child = win.child(.{
                 .x_off = placement.col,
                 .y_off = placement.row,
-                .width = win.width - placement.col,
-                .height = win.height - placement.row,
+                .width = if (sized)
+                    @min(placement.cols, win.width - placement.col)
+                else
+                    win.width - placement.col,
+                .height = if (sized)
+                    @min(placement.rows, win.height - placement.row)
+                else
+                    win.height - placement.row,
             });
             image.draw(child, .{
-                .scale = .none,
+                .scale = if (sized) .fill else .none,
                 .z_index = placement.z,
+                .pixel_offset = if (placement.offset_x == 0 and placement.offset_y == 0)
+                    null
+                else
+                    .{ .x = placement.offset_x, .y = placement.offset_y },
                 .clip_region = .{
                     .x = @intCast(@min(placement.source_x, std.math.maxInt(u16))),
                     .y = @intCast(@min(placement.source_y, std.math.maxInt(u16))),
@@ -1286,6 +1428,14 @@ pub const Surface = struct {
     fn grapheme(ga: Allocator, raw: ghostty.Cell, cps: []const u21) ![]const u8 {
         if (!raw.hasText()) return " ";
         const cp = raw.codepoint();
+        // A virtual placement's placeholder cells are not text to be shown.
+        // They are an addressing scheme: the cell says which part of which
+        // image belongs here, and `scanVirtual` has already
+        // turned that into a placement of its own. Passing the codepoint
+        // through would put U+10EEEE on the real terminal, which draws it as
+        // a missing glyph or, if it also speaks the protocol, reads it as a
+        // placeholder for an image it was never sent.
+        if (cp == ghostty.kitty.graphics.unicode.placeholder) return " ";
         if (raw.content_tag != .codepoint_grapheme) {
             if (cp < 0x80) return &ascii[cp];
             var buf: [4]u8 = undefined;
@@ -1930,3 +2080,47 @@ test "a modifier pressed alone reaches only a child that asked for every key" {
         try std.testing.expect(Surface.forwards(key, .{}));
     }
 }
+
+test "a virtual placement is positioned by the placeholder cells that refer to it" {
+    const a = std.testing.allocator;
+    var t: std.Io.Threaded = .init(a, .{});
+    defer t.deinit();
+    const io = t.io();
+
+    const self = try a.create(Surface);
+    defer a.destroy(self);
+    try self.init(io, a, 20, 5, .none, null);
+    defer self.deinit();
+
+    // A cell size has to be known first: a virtual placement says how many
+    // cells it covers, and turning that into a source rectangle needs pixels.
+    self.setCellSize(10, 20);
+
+    // 4x4 red, transmitted virtual (U=1) with a 2x2 cell extent.
+    const payload = "/wAA" ** 16;
+    self.feed("\x1b_Ga=T,U=1,i=42,f=24,s=4,v=4,c=2,r=2;" ++ payload ++ "\x1b\\");
+
+    // Four placeholder cells, each naming its row and column with the first
+    // two entries of the protocol's diacritic table, and carrying the image
+    // id in the foreground colour.
+    self.feed("\x1b[2;3H\x1b[38;5;42m" ++
+        "\u{10EEEE}\u{0305}\u{0305}\u{10EEEE}\u{0305}\u{030D}" ++
+        "\x1b[3;3H" ++
+        "\u{10EEEE}\u{030D}\u{0305}\u{10EEEE}\u{030D}\u{030D}" ++
+        "\x1b[39m");
+
+    // One placement per row of the image, each two cells wide and one tall.
+    try std.testing.expectEqual(@as(usize, 2), self.placements.items.len);
+    for (self.placements.items) |p| {
+        try std.testing.expectEqual(@as(u32, 42), p.image_id);
+        try std.testing.expectEqual(@as(u16, 2), p.cols);
+        try std.testing.expectEqual(@as(u16, 1), p.rows);
+        try std.testing.expectEqual(@as(u16, 2), p.col);
+    }
+    // The two rows sit one under the other and show different slices of the
+    // source; equal offsets would draw the same strip twice.
+    try std.testing.expect(self.placements.items[0].row != self.placements.items[1].row);
+    try std.testing.expect(self.placements.items[0].source_y != self.placements.items[1].source_y);
+}
+
+
