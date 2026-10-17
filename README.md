@@ -45,7 +45,11 @@ Images a program draws are shown. A kitty transmission is parsed and stored by t
 
 The pixels are base64 encoded on the way out. The protocol carries the payload inside an APC, so a pixel that happens to be 0x1b would end the sequence in the middle of the image; `transmitPreEncodedImage` writes what it is given, and the encoding is the caller's job.
 
-Placements pinned to the screen are drawn. A virtual placement, which a program positions with unicode placeholders, and a relative one, which is anchored to a parent placement, are not resolved yet. Nor are formats other than RGB and RGBA, which are left undrawn rather than guessed at. Without `--shell` nothing changes: no pty is opened and no terminal is created.
+Placements pinned to the screen are drawn, and so are relative ones. A relative placement (`P=`/`Q=` with `H=`/`V=`) has no position of its own: it hangs off a parent, and the chain resolves to the root's pin plus the cell offsets of every link, which is also what makes it follow the parent through a scroll since a pin moves with the content. A chain rooted at a virtual placement has no resolvable position and is skipped, as is an offset that would take a placement off the top or left.
+
+A virtual placement is not drawn. It has no position at all: it is positioned by the U+10EEEE placeholder cells that refer to it, with diacritics encoding the row, the column and the image id, so drawing one means scanning every cell each frame, decoding those diacritics, grouping contiguous runs into rectangles and asking the storage which image each refers to. That lands in the blit, which is 0.25ms and worth keeping there. Whether it is worth the cost is a measurement nobody has taken: placeholders exist to survive multiplexers, so a program that finds `$TMUX` may choose them over an ordinary placement even though tmm does not need the workaround and reads the raw sequence. The thing to find out first is what tools like `kitty icat`, `timg` and `chafa` actually emit inside a tmm pane.
+
+Formats other than RGB and RGBA are left undrawn rather than guessed at. Without `--shell` nothing changes: no pty is opened and no terminal is created.
 
 The region owns the backing bytes for the characters it draws, because libvaxis keeps a cell's grapheme slice rather than copying it and re-renders unchanged cells from the screen it retains. Anything shorter-lived decays as soon as a frame repaints only the sidebar.
 
