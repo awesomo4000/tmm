@@ -14,7 +14,7 @@
         },
         .ghostty_vt = .{
             .url = "vendor/libghostty-vt-source.tar.gz",
-            .hash = "ghostty-1.3.2-dev-5UdBC3oAMgEC2YhE1WPs-ZcBRPoHu5PClMX1ucGenYFL",
+            .hash = "ghostty-1.3.2-dev-5UdBC7HSMwHbw-f09Zh-LAvAH-H-Wmt9wIlix37EQB3b",
         },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src", "vendor", "LICENSE", "README.md", "THIRD_PARTY_NOTICES.md", "licenses" },
