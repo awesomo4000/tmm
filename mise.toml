@@ -71,6 +71,10 @@ run = [
   "python3 tests/tmux_floor.py",
 ]
 
+[tasks.image-emission]
+description = "What image viewers emit bare, inside tmux, and inside a tmm region"
+run = ["python3 tools/image-emission.py"]
+
 [tasks.probe]
 description = "Control-mode probe: mise run probe -- -S <socket> -t <session>"
 run = "zig build cmprobe --"
