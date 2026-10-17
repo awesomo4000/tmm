@@ -783,17 +783,45 @@ pub const Surface = struct {
         var it = storage.placements.iterator();
         while (it.next()) |entry| {
             const placement = entry.value_ptr;
-            const pin = switch (placement.location) {
+            // A relative placement has no position of its own: it hangs off a
+            // parent, and the chain resolves to a root pin plus the cell
+            // offsets of every link. Resolving it here is what makes it
+            // follow the parent through a scroll, because the root is a pin
+            // and a pin moves with the content.
+            var origin = placement.*;
+            var col_offset: i32 = 0;
+            var row_offset: i32 = 0;
+            switch (placement.location) {
+                .pin => {},
+                .relative => |rel| {
+                    const chain = storage.resolveChain(rel) orelse continue;
+                    origin = chain.root;
+                    col_offset = chain.horizontal_offset;
+                    row_offset = chain.vertical_offset;
+                },
+                // Virtual placements are positioned by the unicode
+                // placeholder cells that refer to them, which means scanning
+                // the grid rather than reading a position. Not done yet.
+                .virtual => continue,
+            }
+            const pin = switch (origin.location) {
                 .pin => |pin| pin,
+                // A chain rooted at a virtual placement has no resolvable
+                // position either.
                 else => continue,
             };
             const image = storage.imageById(entry.key_ptr.image_id) orelse continue;
             const point = self.terminal.screens.active.pages.pointFromPin(.viewport, pin.*) orelse continue;
+            const col = @as(i32, @intCast(point.viewport.x)) + col_offset;
+            const row = @as(i32, @intCast(point.viewport.y)) + row_offset;
+            // An offset can take a placement off the top or left, where there
+            // is no cell to put it in.
+            if (col < 0 or row < 0) continue;
             const source = placement.sourceRect(image);
             self.placements.append(self.alloc, .{
                 .image_id = entry.key_ptr.image_id,
-                .col = @intCast(point.viewport.x),
-                .row = @intCast(point.viewport.y),
+                .col = @intCast(col),
+                .row = @intCast(row),
                 .z = placement.z,
                 .source_x = source.x,
                 .source_y = source.y,
