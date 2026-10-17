@@ -589,7 +589,7 @@ pub fn main(init: std.process.Init) !void {
         };
         _ = layout_arena.reset(.retain_capacity);
         const fa = layout_arena.allocator();
-        rows = try sidebar.rows(fa, servers.items, current_server, snapshot, target, label, init.environ_map.get("HOME"));
+        rows = try sidebar.rows(fa, servers.items, current_server, snapshot, target, label, init.environ_map.get("HOME"), if (compositor) |c| c.statusLookup() else .none);
         if (editor) |edit| if (edit.create) {
             for (rows, 0..) |row, i| if (row.action != null and row.action.? == .new_session and i + 1 < rows.len) {
                 rows[i + 1].key = edit.key;

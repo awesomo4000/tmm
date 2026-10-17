@@ -8,6 +8,44 @@ const backend = @import("backend.zig");
 const tmux = @import("libtmux");
 pub const Server = struct { name: []const u8, options: tmux.ServerOptions };
 pub const Action = union(enum) { server: usize, display: usize, session: usize, pane: usize, new_session, blink };
+
+/// What a program in a pane said about itself (OSC 7501), as opposed to what
+/// reading its screen suggested.
+///
+/// Carries no strings on purpose: the records live behind the owning
+/// surface's lock, and a slice handed out here would outlive the lookup. The
+/// label beside the indicator still comes from the pane's command.
+pub const Reported = struct {
+    state: enum { idle, working, done, blocked, @"error" },
+    kind: ?enum { permission, question, auth } = null,
+    progress: ?u8 = null,
+
+    /// The symbol and colour for a reported state, in the vocabulary the
+    /// inferred states already use, plus a mark for `error`, which screen
+    /// detection has no way to recognise.
+    pub fn indicator(self: Reported) m.Indicator {
+        return switch (self.state) {
+            .working => .{ .symbol = "●", .color = 6 },
+            .blocked => .{ .symbol = "!", .color = 3 },
+            .done => .{ .symbol = "✓", .color = 2 },
+            .idle => .{ .symbol = "○", .color = 8 },
+            .@"error" => .{ .symbol = "✗", .color = 1 },
+        };
+    }
+};
+
+/// How the sidebar asks what a pane reported. Null for a mode with no
+/// terminal of its own, where nothing can be observed in band.
+pub const Status = struct {
+    ctx: ?*anyopaque,
+    get: *const fn (ctx: ?*anyopaque, pane_id: []const u8) ?Reported,
+
+    fn nothing(_: ?*anyopaque, _: []const u8) ?Reported {
+        return null;
+    }
+
+    pub const none: Status = .{ .ctx = null, .get = nothing };
+};
 pub const Row = struct {
     text: []const u8,
     key: []const u8 = "",
@@ -17,7 +55,7 @@ pub const Row = struct {
     heading: bool = false,
     continuation: bool = false,
 };
-pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snapshot: ?*backend.Snapshot, target: ?backend.Request, label: ?[]const u8, home: ?[]const u8) ![]Row {
+pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snapshot: ?*backend.Snapshot, target: ?backend.Request, label: ?[]const u8, home: ?[]const u8, reported: Status) ![]Row {
     var list: std.ArrayList(Row) = .empty;
     try list.append(a, .{ .text = "servers", .heading = true });
     try list.append(a, .{ .text = "" });
@@ -68,11 +106,33 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
                 if (!std.mem.eql(u8, pane.session, session.id)) continue;
                 if (!has_panes) try list.append(a, .{ .text = "" });
                 has_panes = true;
-                const state = m.agentIndicator(pane.state);
-                const is_agent = pane.agent.len > 0;
+                // What the program said beats what its screen suggested.
+                // The detector says as much about itself: quiet output is
+                // never a completion, a transition between polls is missed,
+                // and an unrecognised screen stays unknown. A report has none
+                // of those failure modes.
+                const said = reported.get(reported.ctx, pane.id);
+                const state = if (said) |r| r.indicator() else m.agentIndicator(pane.state);
+                const is_agent = pane.agent.len > 0 or said != null;
                 const pane_active = active and std.mem.eql(u8, pane.id, s.focused_pane);
                 const marker = if (pane_active) "▸" else " ";
-                const text = if (is_agent)
+                // A reported record is current by construction, so the
+                // unread mark, which exists because an inferred completion
+                // may be stale, is not added to one.
+                const name = if (pane.agent.len > 0) pane.agent else if (pane.command.len > 0) pane.command else "shell";
+                const text = if (said) |r| blk: {
+                    if (r.progress) |percent| break :blk try std.fmt.allocPrint(
+                        a,
+                        "{s}   {s} {s} {d}%",
+                        .{ marker, state.symbol, name, percent },
+                    );
+                    if (r.kind) |kind| break :blk try std.fmt.allocPrint(
+                        a,
+                        "{s}   {s} {s} ({s})",
+                        .{ marker, state.symbol, name, @tagName(kind) },
+                    );
+                    break :blk try std.fmt.allocPrint(a, "{s}   {s} {s}", .{ marker, state.symbol, name });
+                } else if (is_agent)
                     try std.fmt.allocPrint(a, "{s} {s}{s} {s}", .{ marker, if (pane.unread and !std.mem.eql(u8, pane.state, "done")) "✓ " else "", state.symbol, pane.agent })
                 else
                     try std.fmt.allocPrint(a, "{s}   {s}", .{ marker, if (pane.command.len > 0) pane.command else "shell" });

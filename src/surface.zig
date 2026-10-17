@@ -537,6 +537,46 @@ pub const Surface = struct {
         return out;
     }
 
+    /// The one record worth putting on a single line, or null when a
+    /// program has said nothing.
+    ///
+    /// The specification leaves aggregation to the terminal, so this is a
+    /// choice rather than a rule: the most urgent state wins, because the
+    /// reason to show this at all is to notice a pane that needs attention.
+    /// Blocked outranks error, which outranks working, done and idle. Among
+    /// equals the most recently updated wins, so a running task's progress
+    /// is the one that moves.
+    pub fn statusSummary(self: *Surface) ?struct {
+        state: Status.State,
+        kind: ?Status.Kind,
+        progress: ?u8,
+    } {
+        self.status_lock.lockUncancelable(self.io);
+        defer self.status_lock.unlock(self.io);
+        var best: ?Status = null;
+        for (self.status.values()) |record| {
+            const current = best orelse {
+                best = record;
+                continue;
+            };
+            const rank = urgency(record.state);
+            const have = urgency(current.state);
+            if (rank > have or (rank == have and record.seq > current.seq)) best = record;
+        }
+        const record = best orelse return null;
+        return .{ .state = record.state, .kind = record.kind, .progress = record.progress };
+    }
+
+    fn urgency(state: Status.State) u8 {
+        return switch (state) {
+            .blocked => 4,
+            .@"error" => 3,
+            .working => 2,
+            .done => 1,
+            .idle => 0,
+        };
+    }
+
     pub fn freeStatus(alloc: Allocator, record: Status) void {
         alloc.free(record.id);
         if (record.app) |v| alloc.free(v);

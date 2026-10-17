@@ -30,6 +30,7 @@ const control = @import("control.zig");
 const cmstream = @import("cmstream.zig");
 const layout = @import("layout.zig");
 const surface = @import("surface.zig");
+const sidebar = @import("sidebar.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -467,6 +468,42 @@ pub const Compositor = struct {
             .char = .{ .grapheme = &bytes, .width = 1 },
             .style = .{ .fg = .{ .index = if (active) 2 else 8 } },
         };
+    }
+
+    /// What the program in a pane reported about itself, for the sidebar.
+    ///
+    /// The lock is held across the read, as every other reader of a pane
+    /// does: the event worker frees a pane that leaves the layout.
+    pub fn reportedStatus(self: *Compositor, pane_id: []const u8) ?sidebar.Reported {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const pane = self.panes.get(pane_id) orelse return null;
+        const summary = pane.surface.statusSummary() orelse return null;
+        return .{
+            .state = switch (summary.state) {
+                .idle => .idle,
+                .working => .working,
+                .done => .done,
+                .blocked => .blocked,
+                .@"error" => .@"error",
+            },
+            .kind = if (summary.kind) |k| switch (k) {
+                .permission => .permission,
+                .question => .question,
+                .auth => .auth,
+            } else null,
+            .progress = summary.progress,
+        };
+    }
+
+    /// The sidebar's view of this compositor's reports.
+    pub fn statusLookup(self: *Compositor) sidebar.Status {
+        return .{ .ctx = self, .get = lookupStatus };
+    }
+
+    fn lookupStatus(ctx: ?*anyopaque, pane_id: []const u8) ?sidebar.Reported {
+        const self: *Compositor = @ptrCast(@alignCast(ctx.?));
+        return self.reportedStatus(pane_id);
     }
 
     /// The focused pane's cursor, in compositor coordinates.
