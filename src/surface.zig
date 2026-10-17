@@ -293,6 +293,9 @@ pub const Surface = struct {
         // that asks is told the protocol is unsupported, which is what tmm
         // used to say.
         handler.effects.program_status = onProgramStatus;
+        // The specification ties a record's lifetime to the shell prompt, so
+        // the prompt has to be observed for the records to be correct.
+        handler.effects.semantic_prompt = onSemanticPrompt;
         self.stream = .init(.{ .handler = handler, .allocator = alloc });
         // Seeded here so the first keypress reads the terminal's real
         // defaults rather than an all-zero word.
@@ -397,6 +400,47 @@ pub const Surface = struct {
             return;
         };
         self.evictStatus();
+    }
+
+    /// The shell reported a step of a command (OSC 133).
+    ///
+    /// A new prompt ends whatever the last command was doing, so the records
+    /// it left behind for work in progress go: the specification drops
+    /// `idle`, `working` and `blocked` at a prompt or at process exit, and
+    /// keeps `done` and `error`, which are the two a user has not looked at
+    /// yet. Without this a program that exits mid-task leaves a `working`
+    /// record claiming it still runs.
+    fn onSemanticPrompt(
+        handler: *ghostty.TerminalStream.Handler,
+        prompt: ghostty.TerminalStream.Handler.SemanticPrompt,
+    ) void {
+        if (prompt.kind != .prompt_start) return;
+        const self = fromHandler(handler);
+        self.dropUnfinishedStatus();
+    }
+
+    /// Drop every record for work in progress, keeping the finished ones.
+    fn dropUnfinishedStatus(self: *Surface) void {
+        self.status_lock.lockUncancelable(self.io);
+        defer self.status_lock.unlock(self.io);
+        var i: usize = 0;
+        var dropped: usize = 0;
+        while (i < self.status.count()) {
+            const record = self.status.values()[i];
+            switch (record.state) {
+                .done, .@"error" => {
+                    i += 1;
+                    continue;
+                },
+                .idle, .working, .blocked => {},
+            }
+            self.freeStatusText(record);
+            self.alloc.free(record.id);
+            _ = self.status.orderedRemoveAt(i);
+            dropped += 1;
+        }
+        if (dropped > 0 and self.input_log != null)
+            self.logLine("status prompt dropped={d} unfinished record(s)", .{dropped});
     }
 
     /// Base64-decode one text field into owned memory, or null when the
@@ -1596,6 +1640,29 @@ test "program status records follow the OSC 7501 rules" {
                 break;
             }
         } else return error.RecordMissing;
+    }
+
+    // A prompt (OSC 133 A) ends the last command, so what it left in
+    // progress goes and what it finished stays: the specification keeps
+    // `done` and `error`, which are the states a user has not seen yet.
+    self.feed("\x1b]7501;state=working:id=task\x1b\\");
+    self.feed("\x1b]7501;state=blocked:id=ask:kind=question\x1b\\");
+    self.feed("\x1b]7501;state=done:id=finished\x1b\\");
+    self.feed("\x1b]133;A\x1b\\");
+    {
+        const records = try self.statusRecords(a);
+        defer {
+            for (records) |r| Surface.freeStatus(a, r);
+            a.free(records);
+        }
+        for (records) |r| {
+            try std.testing.expect(r.state == .done or r.state == .@"error");
+        }
+        var found = false;
+        for (records) |r| if (std.mem.eql(u8, r.id, "finished")) {
+            found = true;
+        };
+        try std.testing.expect(found);
     }
 
     // `clear` without an id removes everything.
