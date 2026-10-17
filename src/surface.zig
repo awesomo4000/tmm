@@ -246,6 +246,10 @@ pub const Surface = struct {
     /// parsing even though this cut does not draw them yet.
     const kitty_storage_limit: usize = 16 * 1024 * 1024;
 
+    /// Scrollback per surface. Bounded because a compositor holds one of
+    /// these per pane and an unbounded history is a leak with a nicer name.
+    const scrollback_limit: usize = 4 * 1024 * 1024;
+
     /// Initialise in place. `self` must already live where it will stay.
     pub fn init(
         self: *Surface,
@@ -277,6 +281,13 @@ pub const Surface = struct {
             .cols = cols,
             .rows = rows,
             .kitty_image_storage_limit = kitty_storage_limit,
+            // The default is 10KB, which is a screen or two. tmm receives
+            // every byte a pane ever wrote, including the lines that have
+            // already scrolled out of tmux's own view, so keeping a useful
+            // history costs only memory and is the whole reason scrollback
+            // can be shown at full fidelity rather than as text recovered
+            // from tmux's grid.
+            .max_scrollback_bytes = scrollback_limit,
         });
         errdefer self.terminal.deinit(alloc);
 
@@ -625,6 +636,42 @@ pub const Surface = struct {
         self.publishRender();
     }
 
+    /// Whether the program inside asked for mouse reporting.
+    fn wantsMouse(self: *Surface) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.terminal.flags.mouse_event != .none;
+    }
+
+    /// Move the viewport through the scrollback.
+    ///
+    /// Negative scrolls back through history, positive forward. This is tmm's
+    /// own scrollback, not tmux's: the bytes arrived here in full, so what
+    /// comes back carries everything the pane wrote, where tmux's grid holds
+    /// only what tmux understood of it.
+    pub fn scroll(self: *Surface, delta: isize) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.terminal.scrollViewport(.{ .delta = delta });
+        // The viewport moved, so the frame is stale even though no byte
+        // arrived. publishRender is what the draw reads.
+        self.publishRender();
+    }
+
+    /// Whether the viewport is away from the live bottom, which is what tells
+    /// the display to say so.
+    ///
+    /// `PageList.viewport` is a tagged union whose `.active` case means
+    /// pinned to the live area, which is cheaper than tracking an offset and
+    /// is exactly the question being asked. `RenderState` carries the rows,
+    /// not where they came from, so this reads the terminal and takes the
+    /// parse lock for it.
+    pub fn scrolledBack(self: *Surface) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.terminal.screens.active.pages.viewport != .active;
+    }
+
     /// Encode a key press and send it to the child.
     pub fn sendKey(self: *Surface, key: vaxis.Key, action: Action) void {
         var buf: [128]u8 = undefined;
@@ -886,6 +933,22 @@ pub const Surface = struct {
     /// Nothing is written unless the child turned reporting on, so a plain
     /// shell is unaffected while a tmux inside the region gets its clicks.
     pub fn sendMouse(self: *Surface, mouse: vaxis.Mouse, col: i16, row: i16) void {
+        // A wheel the program did not ask for scrolls our own scrollback
+        // instead of being dropped. A program that turned mouse reporting on
+        // gets it, because a pager or an editor scrolls its own content and a
+        // terminal that intercepted the wheel would break it. This is what
+        // the encoder would decide anyway: with reporting off it encodes
+        // nothing, so the event had nowhere to go.
+        if (isWheel(mouse.button) and mouse.type == .press and !self.wantsMouse()) {
+            const lines: isize = 3;
+            switch (mouse.button) {
+                .wheel_up => self.scroll(-lines),
+                .wheel_down => self.scroll(lines),
+                // Horizontal wheel has no scrollback meaning.
+                else => {},
+            }
+            return;
+        }
 
         // A wheel click arrives as a press with no release to match, so it
         // must not leave a button held behind it forever.
@@ -1594,6 +1657,33 @@ test "the support query is answered through the sink" {
     const reply = Recorder.buf[0..Recorder.len];
     try std.testing.expect(std.mem.indexOf(u8, reply, "7501") != null);
     try std.testing.expect(std.mem.indexOf(u8, reply, "states=") != null);
+}
+
+test "scrolling the viewport moves through tmm's own scrollback" {
+    const a = std.testing.allocator;
+    var t: std.Io.Threaded = .init(a, .{});
+    defer t.deinit();
+    const io = t.io();
+
+    const self = try a.create(Surface);
+    defer a.destroy(self);
+    try self.init(io, a, 20, 3, .none, null);
+    defer self.deinit();
+
+    // More lines than fit, so the early ones are only in scrollback. tmm has
+    // every byte the pane wrote, which is why this works at all.
+    for (1..10) |i| {
+        var buf: [32]u8 = undefined;
+        self.feed(std.fmt.bufPrint(&buf, "LINE-{d}\r\n", .{i}) catch unreachable);
+    }
+    try std.testing.expect(!self.scrolledBack());
+
+    self.scroll(-5);
+    try std.testing.expect(self.scrolledBack());
+
+    // Back to the live bottom, which is where new output must land.
+    self.scroll(100);
+    try std.testing.expect(!self.scrolledBack());
 }
 
 test "program status records follow the OSC 7501 rules" {

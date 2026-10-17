@@ -77,7 +77,9 @@ The session's active window is what gets composited, and a switch is followed. T
 
 So the active window is asked for at attach and after a switch, and a window's panes are learned with `list-panes -F '#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height}'`, which gives the geometry the layout string was being parsed for anyway. Two other routes were tried and rejected by measurement: `refresh-client -l` answers with a bare `%begin`/`%end` and resends nothing, and `#{window_visible_layout}` is JSON in this tmux while `%layout-change` carries the classic checksum form, so one parser cannot read both. Both queries are one-shot subprocesses rather than control-stream requests, for the reason seeding is, and both happen at human pace.
 
-Scrollback is not reachable.
+Scrollback is tmm's own, and the wheel reaches it. `%output` carries every byte a pane writes, including the lines that have already scrolled out of tmux's view -- a line gone from tmux's visible grid still arrived here -- so the history shown is this terminal's rather than text recovered from tmux's, and it carries everything the pane wrote instead of only what tmux understood of it. The limit is 4MB per surface, raised from libghostty-vt's 10KB default, which is a screen or two; bounded because the compositor holds one surface per pane and an unbounded history is a leak with a nicer name.
+
+The wheel scrolls it only when the program inside did not ask for mouse reporting. A pager or an editor scrolls its own content, so a terminal that intercepted the wheel would break it, and that is what the encoder decides anyway: with reporting off it encodes nothing and the event had nowhere to go. `tests/scrollback.py` checks all three: a line that left the screen comes back, scrolling forward returns to the live output, and with reporting on the viewport stays put while the program gets the event.
 
 ## Navigation
 
