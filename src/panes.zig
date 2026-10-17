@@ -67,6 +67,16 @@ pub const Compositor = struct {
     /// because a `Surface` must not move.
     panes: std.StringArrayHashMapUnmanaged(*Pane) = .empty,
 
+    /// The window the session has active, with its `@` sigil, or empty until
+    /// tmux says. Only this window's layout is composited.
+    ///
+    /// Without it any `%layout-change` was adopted, so a split in another
+    /// window switched what tmm was showing and destroyed the panes it had,
+    /// because a layout names only its own window's panes. tmux reports the
+    /// active window with `%session-window-changed`, so the two are now
+    /// distinguished: which window is current, and which window changed.
+    active_window: []const u8 = "",
+
     /// The window we are showing, with its `@` sigil, or empty before the
     /// first layout.
     window: []const u8 = "",
@@ -125,6 +135,7 @@ pub const Compositor = struct {
         }
         self.panes.deinit(alloc);
         if (self.window.len != 0) alloc.free(self.window);
+        if (self.active_window.len != 0) alloc.free(self.active_window);
         if (self.focused.len != 0) alloc.free(self.focused);
         self.stream.close();
         alloc.destroy(self);
@@ -157,12 +168,121 @@ pub const Compositor = struct {
         self.stream.send(cmd) catch {};
     }
 
+    /// Whether this is the window we should be showing. True for any window
+    /// until tmux has named the active one, so a display comes up at attach
+    /// rather than waiting for a window switch.
+    fn isActiveWindow(self: *Compositor, window: []const u8) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.active_window.len == 0) return true;
+        return std.mem.eql(u8, self.active_window, window);
+    }
+
+    /// Ask which window the session has active, then show it.
+    ///
+    /// A one-shot for the same reason as `seed` and `adoptWindow`: a reply
+    /// matched by arrival order on the control stream races the keystrokes
+    /// the display thread writes to it.
+    fn adoptActiveWindow(self: *Compositor, session: []const u8) void {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(self.alloc);
+        argv.append(self.alloc, self.opts.tmux_bin) catch return;
+        if (self.opts.socket) |socket| {
+            argv.appendSlice(self.alloc, &.{ "-S", socket }) catch return;
+        } else if (self.opts.label) |label| {
+            argv.appendSlice(self.alloc, &.{ "-L", label }) catch return;
+        }
+        argv.appendSlice(self.alloc, &.{
+            "display-message", "-p", "-t", session, "#{window_id}",
+        }) catch return;
+
+        const result = std.process.run(self.alloc, self.io, .{
+            .argv = argv.items,
+            .stdout_limit = .limited(64),
+        }) catch return;
+        defer self.alloc.free(result.stdout);
+        defer self.alloc.free(result.stderr);
+        if (result.term != .exited or result.term.exited != 0) return;
+        const window = std.mem.trim(u8, result.stdout, " \t\r\n");
+        if (window.len < 2 or window[0] != '@') return;
+
+        self.mutex.lockUncancelable(self.io);
+        if (self.active_window.len != 0) self.alloc.free(self.active_window);
+        self.active_window = self.alloc.dupe(u8, window) catch "";
+        const adopted = self.active_window;
+        self.mutex.unlock(self.io);
+        if (adopted.len != 0) self.adoptWindow(adopted) catch {};
+    }
+
+    /// Learn a window's panes by asking tmux where they are.
+    ///
+    /// tmux sends a layout when one changes, not when a client starts looking
+    /// at a window, and a window switch reports only
+    /// `%session-window-changed`. Two things were measured and rejected
+    /// before this: `refresh-client -l` answers with a bare `%begin`/`%end`
+    /// and resends nothing, and `#{window_visible_layout}` is JSON in this
+    /// tmux while `%layout-change` carries the classic checksum form, so the
+    /// two cannot share a parser.
+    ///
+    /// `list-panes` gives the geometry directly, which is what the layout
+    /// string was being parsed for anyway. A one-shot subprocess rather than
+    /// a request on the control stream, for the reason `seed` is: a reply
+    /// matched by arrival order races the keystrokes the display thread
+    /// writes to the same stdin. Window switches are human-paced.
+    fn adoptWindow(self: *Compositor, window: []const u8) !void {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(self.alloc);
+        try argv.append(self.alloc, self.opts.tmux_bin);
+        if (self.opts.socket) |socket| {
+            try argv.appendSlice(self.alloc, &.{ "-S", socket });
+        } else if (self.opts.label) |label| {
+            try argv.appendSlice(self.alloc, &.{ "-L", label });
+        }
+        try argv.appendSlice(self.alloc, &.{
+            "list-panes", "-t", window, "-F",
+            "#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height}",
+        });
+
+        const result = std.process.run(self.alloc, self.io, .{
+            .argv = argv.items,
+            .stdout_limit = .limited(64 * 1024),
+        }) catch return;
+        defer self.alloc.free(result.stdout);
+        defer self.alloc.free(result.stderr);
+        if (result.term != .exited or result.term.exited != 0) return;
+
+        var rects: std.ArrayList(layout.PaneRect) = .empty;
+        defer rects.deinit(self.alloc);
+        var lines = std.mem.tokenizeAny(u8, result.stdout, "\n");
+        while (lines.next()) |line| {
+            var fields = std.mem.tokenizeAny(u8, line, " ");
+            const id_text = fields.next() orelse continue;
+            if (id_text.len < 2 or id_text[0] != '%') continue;
+            const id = std.fmt.parseInt(u32, id_text[1..], 10) catch continue;
+            const x = std.fmt.parseInt(u32, fields.next() orelse continue, 10) catch continue;
+            const y = std.fmt.parseInt(u32, fields.next() orelse continue, 10) catch continue;
+            const w = std.fmt.parseInt(u32, fields.next() orelse continue, 10) catch continue;
+            const h = std.fmt.parseInt(u32, fields.next() orelse continue, 10) catch continue;
+            try rects.append(self.alloc, .{ .id = id, .x = x, .y = y, .w = w, .h = h });
+        }
+        if (rects.items.len == 0) return;
+        try self.applyRects(window, rects.items);
+    }
+
     /// Apply a layout string: add panes that appeared, drop those that went,
     /// and resize the rest. Pane terminals are sized from the layout, never
     /// guessed, so they agree with what tmux told the process.
     fn applyLayout(self: *Compositor, window: []const u8, spec: []const u8) !void {
         const rects = try layout.parse(self.alloc, spec);
         defer self.alloc.free(rects);
+        return self.applyRects(window, rects);
+    }
+
+    /// Bring the pane set in line with `rects`: add what appeared, drop what
+    /// went, resize the rest. Shared by the layout string tmux pushes and the
+    /// geometry asked for after a window switch, so a pane is created and
+    /// destroyed in exactly one place.
+    fn applyRects(self: *Compositor, window: []const u8, rects: []const layout.PaneRect) !void {
 
         self.mutex.lockUncancelable(self.io);
         var locked = true;
@@ -308,10 +428,40 @@ pub const Compositor = struct {
                 return false;
             },
             .layout_change => |l| {
+                // A layout names only its own window's panes, so applying one
+                // from a window we are not showing would destroy every pane
+                // we have. Before tmux has said which window is active the
+                // first layout to arrive is taken, which is what gets a
+                // display up at attach.
+                if (!self.isActiveWindow(l.window)) return false;
                 // The visible layout is what this client sees, which is what
                 // we are drawing; `layout` is the window's own.
                 const spec = if (l.visible.len != 0) l.visible else l.layout;
                 try self.applyLayout(l.window, spec);
+                return true;
+            },
+            .session_changed => |session| {
+                // Attaching reports the session but not which window it has
+                // active, and tmux sends `%session-window-changed` only on a
+                // change. Meanwhile it sends a layout for every window in the
+                // session, so without asking, whichever arrived last was the
+                // one displayed -- which could be a window the user is not
+                // looking at.
+                self.adoptActiveWindow(session.session);
+                return true;
+            },
+            .session_window_changed => |w| {
+                self.mutex.lockUncancelable(self.io);
+                const same = std.mem.eql(u8, self.active_window, w.window);
+                if (!same) {
+                    if (self.active_window.len != 0) self.alloc.free(self.active_window);
+                    self.active_window = self.alloc.dupe(u8, w.window) catch "";
+                }
+                self.mutex.unlock(self.io);
+                if (same) return false;
+                // tmux does not resend a layout for a window that has not
+                // changed, so the new window's panes have to be asked for.
+                self.adoptWindow(w.window) catch {};
                 return true;
             },
             .window_pane_changed => |w| {

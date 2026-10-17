@@ -35,6 +35,7 @@ run = [
   "python3 tests/follow.py",
   "python3 tests/split_shell.py",
   "python3 tests/compositor.py",
+  "python3 tests/compositor_windows.py",
   "python3 tests/pane_churn.py",
   "python3 tests/pane_use_after_free.py",
   "python3 tests/key_release.py",
