@@ -46,6 +46,11 @@ pub const Stream = struct {
     parser: control.Parser = .{},
     /// Set once the child has reported `%exit` or closed its stdout.
     ended: bool = false,
+    /// Set by `shutdown`, so the kill happens once however often it is asked
+    /// for. Shutdown and free are separate because unblocking the reader has
+    /// to happen before the worker that owns it is joined, and freeing has to
+    /// happen after.
+    killed: bool = false,
     /// The line backing the most recently returned event, for deferring it.
     last_line: []const u8 = "",
     /// Notification lines seen while a command reply was outstanding.
@@ -117,9 +122,21 @@ pub const Stream = struct {
         return self;
     }
 
-    pub fn close(self: *Stream) void {
+    /// End the child so a reader blocked in `next` returns. Safe to call more
+    /// than once, and safe to call while that reader is still running: it frees
+    /// nothing. The owner calls `close` afterwards, once the reader is joined.
+    pub fn shutdown(self: *Stream) void {
+        if (self.killed) return;
+        self.killed = true;
         // kill() reaps and clears child.id; never call wait() after it.
         self.child.kill(self.io);
+    }
+
+    /// Free the stream. The caller must not use it afterwards, and no reader
+    /// may still be in `next`: `shutdown` ends one, and joining it is the
+    /// caller's job.
+    pub fn close(self: *Stream) void {
+        self.shutdown();
         for (self.pending.items) |l| self.alloc.free(l);
         self.pending.deinit(self.alloc);
         self.alloc.free(self.held);

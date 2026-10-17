@@ -39,6 +39,7 @@ run = [
   "python3 tests/scrollback.py",
   "python3 tests/pane_churn.py",
   "python3 tests/pane_use_after_free.py",
+  "python3 tests/panes_exit.py",
   "python3 tests/key_release.py",
   "python3 tests/images.py",
   "python3 tests/images_relative.py",
