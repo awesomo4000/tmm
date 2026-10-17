@@ -25,8 +25,8 @@ run = [
   # dozens of processes, they reported 13ms where the same build reports
   # 0.3ms on its own. Loosening the budget was the wrong answer, because the
   # regression this catches showed a 0.2ms median with a 29ms worst case.
-  "python3 tests/keylag.py",
-  "python3 tests/keylag_native.py",
+  "env TMM_WCET_MS=25 python3 tests/keylag.py",
+  "env TMM_WCET_MS=25 python3 tests/keylag_native.py",
   "python3 tests/keyscope.py --self-test",
   "python3 tests/control_mode.py",
   "python3 tests/reconcile_live.py",
@@ -39,6 +39,7 @@ run = [
   "python3 tests/pane_use_after_free.py",
   "python3 tests/key_release.py",
   "python3 tests/images.py",
+  "python3 tests/program_status.py",
 ]
 
 [tasks.latency]

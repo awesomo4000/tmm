@@ -48,6 +48,33 @@ pub const Position = struct { col: u16, row: u16 };
 /// nothing for a program that wants presses only.
 pub const Action = enum { press, release };
 
+/// One program status record (OSC 7501), as the program last reported it.
+///
+/// A report replaces its record completely, so a field that is null means
+/// the program stopped sending it, not that an older value still stands.
+/// Text is owned here: the parser's buffers are only valid for the length of
+/// the callback.
+pub const Status = struct {
+    /// The record's path. Empty for the root record. Segments are joined by
+    /// `/`, so `build/test` is a child of `build`.
+    id: []const u8,
+    state: State,
+    kind: ?Kind = null,
+    progress: ?u8 = null,
+    app: ?[]const u8 = null,
+    title: ?[]const u8 = null,
+    msg: ?[]const u8 = null,
+    /// Bumped on every report, for evicting the least recently updated.
+    seq: u64 = 0,
+
+    pub const State = enum { idle, working, done, blocked, @"error" };
+    pub const Kind = enum { permission, question, auth };
+};
+
+/// The specification requires a terminal to keep at least this many records
+/// and to drop the least recently updated past that.
+const max_status_records = 256;
+
 /// How an image reaches the outer terminal.
 ///
 /// The surface cannot do this itself: transmitting means writing the pixels
@@ -158,6 +185,13 @@ pub const Surface = struct {
     /// the same lock.
     placements: std.ArrayListUnmanaged(ImagePlacement) = .empty,
 
+    /// Program status records (OSC 7501), keyed by id. Owned, including the
+    /// text, and guarded by `status_lock` rather than the parse lock so a
+    /// reader never waits on the parser.
+    status: std.StringArrayHashMapUnmanaged(Status) = .empty,
+    status_lock: std.Io.Mutex = .init,
+    status_seq: u64 = 0,
+
     /// How many placements are published, readable without the lock.
     ///
     /// Most frames have no images at all, and the render lock is unfair: a
@@ -254,6 +288,11 @@ pub const Surface = struct {
         // and handed back here. We route them to the sink; we do not write
         // them ourselves.
         handler.effects.write_pty = writeOut;
+        // Setting this is also what makes the terminal answer the support
+        // query, `OSC 7501 ; ?`, through `write_pty`. Left null, a program
+        // that asks is told the protocol is unsupported, which is what tmm
+        // used to say.
+        handler.effects.program_status = onProgramStatus;
         self.stream = .init(.{ .handler = handler, .allocator = alloc });
         // Seeded here so the first keypress reads the terminal's real
         // defaults rather than an all-zero word.
@@ -262,6 +301,8 @@ pub const Surface = struct {
     }
 
     pub fn deinit(self: *Surface) void {
+        self.clearStatus(null);
+        self.status.deinit(self.alloc);
         self.placements.deinit(self.alloc);
         self.placement_scratch.deinit(self.alloc);
         self.transmitted.deinit(self.alloc);
@@ -277,6 +318,186 @@ pub const Surface = struct {
     fn fromHandler(handler: *ghostty.TerminalStream.Handler) *Surface {
         const stream: *ghostty.TerminalStream = @fieldParentPtr("handler", handler);
         return @fieldParentPtr("stream", stream);
+    }
+
+    /// A program reported what it is doing (OSC 7501).
+    ///
+    /// Called from inside a feed, so the parse lock is already held. The
+    /// records have their own lock because the display reads them and must
+    /// not wait on the parser.
+    fn onProgramStatus(
+        handler: *ghostty.TerminalStream.Handler,
+        report: ghostty.osc.Command.ProgramStatus.Report,
+    ) void {
+        const self = fromHandler(handler);
+        const id = report.readOption(.id) orelse "";
+
+        // `clear` is not a state a record can hold: it removes the addressed
+        // record and everything beneath it, or every record when no id is
+        // given.
+        if (report.state == .clear) {
+            if (self.input_log != null) self.logLine("status clear id=\"{s}\"", .{id});
+            self.clearStatus(if (id.len == 0) null else id);
+            return;
+        }
+
+        const state: Status.State = switch (report.state) {
+            .idle => .idle,
+            .working => .working,
+            .done => .done,
+            .blocked => .blocked,
+            .@"error" => .@"error",
+            // Handled above; the parser admits no other values.
+            .clear => return,
+        };
+
+        var text_buf: [ghostty.osc.program_status.max_msg_bytes]u8 = undefined;
+        self.status_lock.lockUncancelable(self.io);
+        defer self.status_lock.unlock(self.io);
+
+        self.status_seq += 1;
+        var record: Status = .{ .id = "", .state = state, .seq = self.status_seq };
+        record.kind = if (report.readOption(.kind)) |k| switch (k) {
+            .permission => .permission,
+            .question => .question,
+            .auth => .auth,
+        } else null;
+        record.progress = report.readOption(.progress);
+        record.app = self.dupeOrNull(report.readOption(.app));
+        record.title = self.decodeText(report, .title, &text_buf);
+        record.msg = self.decodeText(report, .msg, &text_buf);
+
+        if (self.input_log != null) self.logLine(
+            "status id=\"{s}\" state={s} kind={?s} progress={?d} app={?s}",
+            .{
+                id,
+                @tagName(state),
+                if (record.kind) |k| @tagName(k) else null,
+                record.progress,
+                record.app,
+            },
+        );
+
+        // A report replaces its record completely, so the old one goes
+        // entirely rather than being merged into.
+        if (self.status.getPtr(id)) |old| {
+            const key = old.id;
+            self.freeStatusText(old.*);
+            old.* = record;
+            old.id = key;
+            return;
+        }
+        record.id = self.alloc.dupe(u8, id) catch {
+            self.freeStatusText(record);
+            return;
+        };
+        self.status.put(self.alloc, record.id, record) catch {
+            self.alloc.free(record.id);
+            self.freeStatusText(record);
+            return;
+        };
+        self.evictStatus();
+    }
+
+    /// Base64-decode one text field into owned memory, or null when the
+    /// program did not send it or it does not decode.
+    fn decodeText(
+        self: *Surface,
+        report: ghostty.osc.Command.ProgramStatus.Report,
+        comptime option: ghostty.osc.program_status.Option,
+        buf: []u8,
+    ) ?[]const u8 {
+        var writer: std.Io.Writer = .fixed(buf);
+        report.writeText(option, &writer) catch return null;
+        const text = writer.buffered();
+        if (text.len == 0) return null;
+        return self.alloc.dupe(u8, text) catch null;
+    }
+
+    fn dupeOrNull(self: *Surface, value: ?[]const u8) ?[]const u8 {
+        const v = value orelse return null;
+        return self.alloc.dupe(u8, v) catch null;
+    }
+
+    fn freeStatusText(self: *Surface, record: Status) void {
+        if (record.app) |v| self.alloc.free(v);
+        if (record.title) |v| self.alloc.free(v);
+        if (record.msg) |v| self.alloc.free(v);
+    }
+
+    /// Remove a record and its descendants, or every record when `id` is
+    /// null. A descendant is anything whose id starts with `id` followed by a
+    /// slash, which is what makes the path a hierarchy.
+    fn clearStatus(self: *Surface, id: ?[]const u8) void {
+        self.status_lock.lockUncancelable(self.io);
+        defer self.status_lock.unlock(self.io);
+        var i: usize = 0;
+        while (i < self.status.count()) {
+            const record = self.status.values()[i];
+            const drop = if (id) |prefix|
+                std.mem.eql(u8, record.id, prefix) or
+                    (record.id.len > prefix.len and
+                        std.mem.startsWith(u8, record.id, prefix) and
+                        record.id[prefix.len] == '/')
+            else
+                true;
+            if (!drop) {
+                i += 1;
+                continue;
+            }
+            self.freeStatusText(record);
+            self.alloc.free(record.id);
+            _ = self.status.orderedRemoveAt(i);
+        }
+    }
+
+    /// Past the record cap the least recently updated goes, as the
+    /// specification requires. Called with the status lock held.
+    fn evictStatus(self: *Surface) void {
+        while (self.status.count() > max_status_records) {
+            var oldest: usize = 0;
+            for (self.status.values(), 0..) |record, i| {
+                if (record.seq < self.status.values()[oldest].seq) oldest = i;
+            }
+            const record = self.status.values()[oldest];
+            self.freeStatusText(record);
+            self.alloc.free(record.id);
+            _ = self.status.orderedRemoveAt(oldest);
+        }
+    }
+
+    /// Copy out every status record. The caller owns the slice and the text
+    /// in it; `freeStatus` releases both.
+    pub fn statusRecords(self: *Surface, alloc: Allocator) ![]Status {
+        self.status_lock.lockUncancelable(self.io);
+        defer self.status_lock.unlock(self.io);
+        const out = try alloc.alloc(Status, self.status.count());
+        var n: usize = 0;
+        errdefer {
+            for (out[0..n]) |record| freeStatus(alloc, record);
+            alloc.free(out);
+        }
+        for (self.status.values()) |record| {
+            out[n] = .{
+                .id = try alloc.dupe(u8, record.id),
+                .state = record.state,
+                .kind = record.kind,
+                .progress = record.progress,
+                .seq = record.seq,
+            };
+            if (record.app) |v| out[n].app = try alloc.dupe(u8, v);
+            if (record.title) |v| out[n].title = try alloc.dupe(u8, v);
+            if (record.msg) |v| out[n].msg = try alloc.dupe(u8, v);
+            n += 1;
+        }
+        return out;
+    }
+
+    pub fn freeStatus(alloc: Allocator, record: Status) void {
+        alloc.free(record.id);
+        if (record.app) |v| alloc.free(v);
+        if (record.title) |v| alloc.free(v);
+        if (record.msg) |v| alloc.free(v);
     }
 
     fn writeOut(handler: *ghostty.TerminalStream.Handler, bytes: []const u8) void {
@@ -1259,6 +1480,131 @@ test "a release is encoded only for a program that asked for event types" {
 
     // A legacy program, no kitty flags at all: a release is never encoded.
     try std.testing.expectEqualStrings("", try encode(&buf, .{ .codepoint = 'a', .text = "a" }, .release, .{}));
+}
+
+test "the support query is answered through the sink" {
+    const a = std.testing.allocator;
+    var t: std.Io.Threaded = .init(a, .{});
+    defer t.deinit();
+    const io = t.io();
+
+    // A sink that keeps what the terminal hands back, which is where a reply
+    // to a query goes.
+    const Recorder = struct {
+        var buf: [512]u8 = undefined;
+        var len: usize = 0;
+        fn write(_: ?*anyopaque, bytes: []const u8) void {
+            const n = @min(bytes.len, buf.len - len);
+            @memcpy(buf[len..][0..n], bytes[0..n]);
+            len += n;
+        }
+    };
+    Recorder.len = 0;
+
+    const self = try a.create(Surface);
+    defer a.destroy(self);
+    try self.init(io, a, 20, 5, .{ .ctx = null, .write = Recorder.write }, null);
+    defer self.deinit();
+
+    self.feed("\x1b]7501;?\x1b\\");
+    const reply = Recorder.buf[0..Recorder.len];
+    try std.testing.expect(std.mem.indexOf(u8, reply, "7501") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reply, "states=") != null);
+}
+
+test "program status records follow the OSC 7501 rules" {
+    const a = std.testing.allocator;
+    var t: std.Io.Threaded = .init(a, .{});
+    defer t.deinit();
+    const io = t.io();
+
+    const self = try a.create(Surface);
+    defer a.destroy(self);
+    try self.init(io, a, 20, 5, .none, null);
+    defer self.deinit();
+
+    // A report with no id addresses the root record.
+    self.feed("\x1b]7501;state=working:progress=40:app=cargo\x1b\\");
+    {
+        const records = try self.statusRecords(a);
+        defer {
+            for (records) |r| Surface.freeStatus(a, r);
+            a.free(records);
+        }
+        try std.testing.expectEqual(@as(usize, 1), records.len);
+        try std.testing.expectEqualStrings("", records[0].id);
+        try std.testing.expectEqual(Status.State.working, records[0].state);
+        try std.testing.expectEqual(@as(?u8, 40), records[0].progress);
+        try std.testing.expectEqualStrings("cargo", records[0].app.?);
+    }
+
+    // A report replaces its record completely: progress and app are gone
+    // because this report does not carry them, not kept from the last one.
+    self.feed("\x1b]7501;state=blocked:kind=permission\x1b\\");
+    {
+        const records = try self.statusRecords(a);
+        defer {
+            for (records) |r| Surface.freeStatus(a, r);
+            a.free(records);
+        }
+        try std.testing.expectEqual(@as(usize, 1), records.len);
+        try std.testing.expectEqual(Status.State.blocked, records[0].state);
+        try std.testing.expectEqual(Status.Kind.permission, records[0].kind.?);
+        try std.testing.expect(records[0].progress == null);
+        try std.testing.expect(records[0].app == null);
+    }
+
+    // Children live alongside the root, and a root can be blocked while a
+    // child works.
+    self.feed("\x1b]7501;state=working:id=deploy\x1b\\");
+    self.feed("\x1b]7501;state=working:id=deploy/us-east:progress=40\x1b\\");
+    self.feed("\x1b]7501;state=blocked:id=deploy/eu-west:kind=auth\x1b\\");
+    {
+        const records = try self.statusRecords(a);
+        defer {
+            for (records) |r| Surface.freeStatus(a, r);
+            a.free(records);
+        }
+        try std.testing.expectEqual(@as(usize, 4), records.len);
+    }
+
+    // `clear` with an id removes that record and its descendants, and
+    // nothing else.
+    self.feed("\x1b]7501;state=clear:id=deploy\x1b\\");
+    {
+        const records = try self.statusRecords(a);
+        defer {
+            for (records) |r| Surface.freeStatus(a, r);
+            a.free(records);
+        }
+        try std.testing.expectEqual(@as(usize, 1), records.len);
+        try std.testing.expectEqualStrings("", records[0].id);
+    }
+
+    // Base64 text decodes, and is owned here rather than borrowed from the
+    // parser, whose buffer is only valid during the callback.
+    self.feed("\x1b]7501;state=done:id=build:msg=aGVsbG8gdGhlcmU=\x1b\\");
+    {
+        const records = try self.statusRecords(a);
+        defer {
+            for (records) |r| Surface.freeStatus(a, r);
+            a.free(records);
+        }
+        for (records) |r| {
+            if (std.mem.eql(u8, r.id, "build")) {
+                try std.testing.expectEqualStrings("hello there", r.msg.?);
+                break;
+            }
+        } else return error.RecordMissing;
+    }
+
+    // `clear` without an id removes everything.
+    self.feed("\x1b]7501;state=clear\x1b\\");
+    {
+        const records = try self.statusRecords(a);
+        defer a.free(records);
+        try std.testing.expectEqual(@as(usize, 0), records.len);
+    }
 }
 
 test "a modifier pressed alone reaches only a child that asked for every key" {

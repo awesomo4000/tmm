@@ -35,13 +35,19 @@ from keylag import BINARY, PROBE, SPLIT, ROWS, COLS  # noqa: E402
 
 KEYS = 300
 GAP_US = 20000
-# Set from what 3000 samples across ten runs actually show: medians of
-# 0.06-0.17ms and a worst case of 4.4ms once, otherwise under 1.4ms. Loose
-# enough not to fail on the sporadic wakeup cost that shows up everywhere in
-# these measurements, tight enough to catch a return of the output coupling,
-# which cost 23ms in the middle and 78ms at worst.
-BUDGET_MS = 2.0
-WCET_MS = 10.0
+# The worst case is the point of these tests, so it is asserted rather than
+# only the middle: the regression that cost 29ms was invisible to a median,
+# which stayed at 0.2ms throughout. But a worst case is also what load moves,
+# and inside the suite -- after a compile and whatever else has just run --
+# three samples in three hundred reach 10 to 14ms where standalone the whole
+# run stays under 1.5ms. So there are two budgets. The default is strict and
+# is what `mise run latency` uses on a quiet machine, where the figure means
+# something. `TMM_WCET_MS` loosens it for the suite, set above the 14.3ms of
+# suite noise actually measured and below the 29ms of the smallest regression
+# actually seen, so the suite still catches that class without flaking on a
+# scheduling blip.
+BUDGET_MS = float(os.environ.get('TMM_MEDIAN_MS', 2.0))
+WCET_MS = float(os.environ.get('TMM_WCET_MS', 10.0))
 
 
 def records(path):

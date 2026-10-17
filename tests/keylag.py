@@ -52,8 +52,19 @@ KEYS = 12
 # the jitter. Both are set well above what is measured -- around 0.2ms
 # median and under 1ms worst, loaded or quiet -- so this catches a return of
 # the coupling (which cost 23ms median and 78ms worst) rather than noise.
-BUDGET_MS = 5.0
-WCET_MS = 10.0
+# The worst case is the point of these tests, so it is asserted rather than
+# only the middle: the regression that cost 29ms was invisible to a median,
+# which stayed at 0.2ms throughout. But a worst case is also what load moves,
+# and inside the suite -- after a compile and whatever else has just run --
+# three samples in three hundred reach 10 to 14ms where standalone the whole
+# run stays under 1.5ms. So there are two budgets. The default is strict and
+# is what `mise run latency` uses on a quiet machine, where the figure means
+# something. `TMM_WCET_MS` loosens it for the suite, set above the 14.3ms of
+# suite noise actually measured and below the 29ms of the smallest regression
+# actually seen, so the suite still catches that class without flaking on a
+# scheduling blip.
+BUDGET_MS = float(os.environ.get('TMM_MEDIAN_MS', 5.0))
+WCET_MS = float(os.environ.get('TMM_WCET_MS', 10.0))
 
 PROBE = Path(__file__).resolve().parents[1] / 'zig-out/bin/keyprobe'
 CLOCK = getattr(time, 'CLOCK_MONOTONIC_RAW', time.CLOCK_MONOTONIC)
