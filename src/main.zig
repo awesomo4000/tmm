@@ -901,6 +901,16 @@ fn ptyWorker(io: std.Io, region: *region_mod.Region, loop: *vaxis.Loop(Event)) v
     region.exited.store(true, .release);
     _ = loop.tryPostEvent(.pty) catch {};
 }
+/// Drop everything `Shared` owns. Both callers cancel the collector and the
+/// control worker first, so nothing is queued behind this and the mutex is
+/// not needed; it is also why the queues can be freed rather than handed on.
+///
+/// The two queues are the point. `controlWorker` fills them from the moment
+/// it attaches, and only the collector's next pass empties them, so quitting
+/// before that pass leaked every queued line and pane id along with the list
+/// that held them -- which `tmm` then `q` does reliably on a server with any
+/// output in it. A server switch takes the same path, and there it leaked
+/// once per switch rather than once per run.
 fn clearShared(a: std.mem.Allocator, shared: *backend.Shared) void {
     if (shared.request) |r| r.deinit(a);
     if (shared.blink) |r| r.deinit(a);
@@ -908,6 +918,13 @@ fn clearShared(a: std.mem.Allocator, shared: *backend.Shared) void {
     shared.request = null;
     shared.blink = null;
     shared.rename = null;
+    for (shared.events.items) |line| a.free(line);
+    shared.events.deinit(a);
+    shared.events = .empty;
+    shared.events_dropped = false;
+    for (shared.output_panes.items) |pane| a.free(pane);
+    shared.output_panes.deinit(a);
+    shared.output_panes = .empty;
 }
 fn drain(a: std.mem.Allocator, loop: *vaxis.Loop(Event)) void {
     while (loop.tryEvent() catch null) |event| switch (event) {
