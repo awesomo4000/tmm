@@ -95,6 +95,12 @@ pub const Compositor = struct {
     /// Raised when the control stream ends.
     ended: std.atomic.Value(bool) = .init(false),
 
+    /// The outer terminal's cell size in pixels, or zero before it is known.
+    /// Kept here as well as on each surface so a pane created later gets it,
+    /// since panes come and go and the cell size is a property of the display.
+    cell_width: u32 = 0,
+    cell_height: u32 = 0,
+
     input_log: ?[]const u8 = null,
 
     /// How to reach this server, for the one-shot `capture-pane` that seeds a
@@ -151,6 +157,18 @@ pub const Compositor = struct {
         const cmd = control.Command.refreshSize(self.alloc, cols, rows) catch return;
         defer self.alloc.free(cmd);
         self.stream.send(cmd) catch {};
+    }
+
+    /// Pass the display's cell size down, so a program in a pane can find out
+    /// how big a cell is and decide it can draw an image. Panes have no pixel
+    /// geometry of their own: see `Surface.cell_width`.
+    pub fn setCellSize(self: *Compositor, width: u32, height: u32) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.cell_width == width and self.cell_height == height) return;
+        self.cell_width = width;
+        self.cell_height = height;
+        for (self.panes.values()) |pane| pane.surface.setCellSize(width, height);
     }
 
     fn sendKeys(self: *Compositor, pane: []const u8, bytes: []const u8) void {
@@ -328,6 +346,8 @@ pub const Compositor = struct {
                 .ctx = pane,
                 .write = Pane.write,
             }, self.input_log);
+            if (self.cell_width != 0 and self.cell_height != 0)
+                pane.surface.setCellSize(self.cell_width, self.cell_height);
             try self.panes.put(self.alloc, pane.id, pane);
             try live.put(self.alloc, pane.id, {});
             if (self.focused.len == 0) self.focused = try self.alloc.dupe(u8, pane.id);

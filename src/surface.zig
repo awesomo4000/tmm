@@ -242,6 +242,21 @@ pub const Surface = struct {
     cols: u16,
     rows: u16,
 
+    /// The outer terminal's cell size in pixels, or zero when it does not
+    /// report one. Written only under `mutex`, and read by the `size` effect,
+    /// which the parser calls with that lock already held.
+    ///
+    /// Programs decide whether a terminal can show an image by asking how
+    /// big a cell is, and a pane has no pixel geometry of its own to answer
+    /// with: tmux propagates the pixel size of a tty client and tmm attaches
+    /// as a control client, so `TIOCGWINSZ` inside a pane reports 0x0. Every
+    /// image viewer measured by `tools/image-emission.py` reads that, or the
+    /// absent reply to `CSI 14 t`, and falls back to text. The real
+    /// terminal's size does come in on the outer `winsize`, so that is what
+    /// is handed down and reported here.
+    cell_width: u32 = 0,
+    cell_height: u32 = 0,
+
     /// Image storage per surface. Non-zero so kitty placements survive
     /// parsing even though this cut does not draw them yet.
     const kitty_storage_limit: usize = 16 * 1024 * 1024;
@@ -307,6 +322,10 @@ pub const Surface = struct {
         // The specification ties a record's lifetime to the shell prompt, so
         // the prompt has to be observed for the records to be correct.
         handler.effects.semantic_prompt = onSemanticPrompt;
+        // Answers the XTWINOPS size queries and the mode 2048 in-band report.
+        // The library encodes the reply and writes it through `write_pty`; all
+        // that is wanted here is the geometry, or null to stay silent.
+        handler.effects.size = onSize;
         self.stream = .init(.{ .handler = handler, .allocator = alloc });
         // Seeded here so the first keypress reads the terminal's real
         // defaults rather than an all-zero word.
@@ -595,6 +614,53 @@ pub const Surface = struct {
         if (record.msg) |v| alloc.free(v);
     }
 
+    /// How big the region is, for `CSI 14/16/18/19 t` and mode 2048.
+    ///
+    /// Called from inside a feed, so the parse lock is already held and the
+    /// cell size cannot change underneath. Returning null suppresses the
+    /// reply, which is the honest answer when the outer terminal never told
+    /// us how big a cell is: a program that gets no answer falls back to
+    /// text, where one that gets a made-up answer draws a misshapen image.
+    fn onSize(handler: *ghostty.TerminalStream.Handler) ?ghostty.size_report.Size {
+        const self = fromHandler(handler);
+        if (self.cell_width == 0 or self.cell_height == 0) return null;
+        return .{
+            .rows = self.rows,
+            .columns = self.cols,
+            .cell_width = self.cell_width,
+            .cell_height = self.cell_height,
+        };
+    }
+
+    /// Tell the region how big a cell is in the terminal it is displayed in.
+    ///
+    /// Separate from `resize` because the two change independently: a cell
+    /// keeps its size when the window is reshaped, and changes size without
+    /// one when the font does.
+    pub fn setCellSize(self: *Surface, width: u32, height: u32) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.cell_width == width and self.cell_height == height) return;
+        self.cell_width = width;
+        self.cell_height = height;
+        // A program that asked for in-band reports is owed one now, and
+        // `handler.resize` is what emits it.
+        self.stream.handler.resize(self.resizeOptions()) catch {};
+    }
+
+    /// The geometry to hand `handler.resize`, which needs the cell size to
+    /// emit a mode 2048 report and silently skips it when that is absent.
+    fn resizeOptions(self: *Surface) ghostty.Terminal.Resize {
+        return .{
+            .cols = @intCast(self.cols),
+            .rows = @intCast(self.rows),
+            .cell_size_px = if (self.cell_width == 0 or self.cell_height == 0)
+                null
+            else
+                .{ .width = self.cell_width, .height = self.cell_height },
+        };
+    }
+
     fn writeOut(handler: *ghostty.TerminalStream.Handler, bytes: []const u8) void {
         const self = fromHandler(handler);
         // Called from inside a feed, which already holds the mutex.
@@ -628,11 +694,12 @@ pub const Surface = struct {
         if (cols == self.cols and rows == self.rows) return;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        // Through the handler, not the terminal: the handler also emits the
-        // in-band size report when the child asked for one (mode 2048).
-        try self.stream.handler.resize(.{ .cols = cols, .rows = rows });
         self.cols = cols;
         self.rows = rows;
+        // Through the handler, not the terminal: the handler also emits the
+        // in-band size report when the child asked for one (mode 2048), which
+        // needs the cell size as well as the new cell counts.
+        try self.stream.handler.resize(self.resizeOptions());
         self.publishRender();
     }
 

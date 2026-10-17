@@ -37,6 +37,11 @@ pub const Region = struct {
     /// `destroy` must not close a second time.
     pty_open: bool = true,
 
+    /// The display's cell size in pixels, zero until the outer terminal
+    /// reports one. Kept so a resize can recompute the pty pixel size.
+    cell_width: u32 = 0,
+    cell_height: u32 = 0,
+
     pub fn create(
         alloc: Allocator,
         io: std.Io,
@@ -94,7 +99,30 @@ pub const Region = struct {
         if (cols == 0 or rows == 0 or !self.pty_open) return;
         if (cols == self.surface.cols and rows == self.surface.rows) return;
         try self.surface.resize(cols, rows);
-        try self.pty.setSize(.{ .cols = cols, .rows = rows });
+        try self.pty.setSize(self.ptySize(cols, rows));
+    }
+
+    /// Tell the region how big a cell is in the terminal it is shown in, which
+    /// is the only way it can know: a cell size is a property of the display,
+    /// not of the pty. Both routes a program might take are then answered --
+    /// the ioctl, through the pty window size, and the `CSI 14/16/18 t`
+    /// queries, through the surface -- because viewers disagree about which to
+    /// use and `kitty icat` only consults the ioctl.
+    pub fn setCellSize(self: *Region, width: u32, height: u32) void {
+        self.surface.setCellSize(width, height);
+        self.cell_width = width;
+        self.cell_height = height;
+        if (!self.pty_open) return;
+        self.pty.setSize(self.ptySize(self.surface.cols, self.surface.rows)) catch {};
+    }
+
+    /// The pty window size, carrying pixels only when a cell size is known.
+    /// Multiplied in u32 and clamped, because `struct winsize` counts pixels
+    /// in a u16 and a wide enough region at a large enough font overflows it.
+    fn ptySize(self: *const Region, cols: u16, rows: u16) Pty.Size {
+        const w = std.math.cast(u16, @as(u32, cols) * self.cell_width) orelse 0;
+        const h = std.math.cast(u16, @as(u32, rows) * self.cell_height) orelse 0;
+        return .{ .cols = cols, .rows = rows, .xpixel = w, .ypixel = h };
     }
 
     pub fn sendKey(self: *Region, key: vaxis.Key, action: surface.Action) void {

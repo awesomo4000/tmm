@@ -313,6 +313,19 @@ pub fn main(init: std.process.Init) !void {
             .pty => {},
             .winsize => |ws| {
                 try vx.resize(a, tty.writer(), ws);
+                // The outer terminal reports its own pixel size here, and
+                // dividing gives the cell size, which is the only thing a
+                // program inside a pane or the region can use to decide it
+                // may draw an image. A terminal that reports no pixels
+                // leaves this zero and nothing is claimed on its behalf.
+                if (ws.x_pixel != 0 and ws.y_pixel != 0 and
+                    ws.cols != 0 and ws.rows != 0)
+                {
+                    const cw = ws.x_pixel / ws.cols;
+                    const ch = ws.y_pixel / ws.rows;
+                    if (region) |r| r.setCellSize(cw, ch);
+                    if (compositor) |c| c.setCellSize(cw, ch);
+                }
                 if (pressed) |p| a.free(p);
                 pressed = null;
             },
