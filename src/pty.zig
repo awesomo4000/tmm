@@ -66,7 +66,19 @@ pub const Pty = struct {
     pid: std.c.pid_t,
     reaped: bool = false,
 
-    pub const Size = struct { cols: u16, rows: u16 };
+    /// Cell counts, and the pixel size of the whole area when it is known.
+    ///
+    /// The pixel fields are not decoration: a program asks the pty how many
+    /// pixels it has to decide whether it can draw an image, and `kitty icat`
+    /// refuses outright on a zero rather than falling back or asking again by
+    /// escape sequence. Zero stays the default, which is what a terminal that
+    /// never reported a cell size leaves it as.
+    pub const Size = struct {
+        cols: u16,
+        rows: u16,
+        xpixel: u16 = 0,
+        ypixel: u16 = 0,
+    };
 
     /// Open a pair and start `argv` on it, sized to `size`. The allocator is
     /// used only to build the NUL-terminated argv, before the fork, and is
@@ -87,8 +99,8 @@ pub const Pty = struct {
         const ws = posix.winsize{
             .row = size.rows,
             .col = size.cols,
-            .xpixel = 0,
-            .ypixel = 0,
+            .xpixel = size.xpixel,
+            .ypixel = size.ypixel,
         };
         if (openpty(&master_fd, &slave_fd, null, null, &ws) != 0)
             return error.OpenPtyFailed;
@@ -141,8 +153,8 @@ pub const Pty = struct {
         const ws = posix.winsize{
             .row = size.rows,
             .col = size.cols,
-            .xpixel = 0,
-            .ypixel = 0,
+            .xpixel = size.xpixel,
+            .ypixel = size.ypixel,
         };
         if (ioctl(self.master.handle, TIOCSWINSZ, &ws) != 0)
             return error.SetSizeFailed;
