@@ -122,7 +122,25 @@ Pane navigation validates the pane's membership in the requested session and win
 ./zig-out/bin/tmm -L work --dump
 zig build test
 python3 tests/integration.py
+mise run test          # the suite
+mise run latency       # latency on a quiet machine, with the floors under it
+mise run deps-check    # how far behind the vendored libghostty-vt is
+mise run clean-tests   # remove what a killed test run left in /tmp
 ```
+
+The suite cleans up before it starts and runs the latency tests early. Both
+matter. The suites create sockets and directories under `/tmp` with
+`tempfile.TemporaryDirectory`, which cleans up when a test exits normally and
+not when one is killed by a timeout, so iterating on a failing test
+accumulates tmux servers and nested tmm processes; 47 directories had built up
+across sessions before this was noticed. That distorts what follows: a run
+started on a dirty machine reported a 52ms worst-case keystroke where the same
+build on a clean one reports 0.4ms, which looked exactly like a regression
+from a dependency bump and was not. For the same reason the latency tests run
+before the suites that spawn dozens of processes, where they once reported
+13ms against 0.3ms standalone. Loosening the budget would have been the wrong
+answer: the regression those budgets exist to catch showed a 0.2ms median with
+a 29ms worst case, so only the worst case catches it.
 
 `--dump` emits a read-only JSON snapshot without opening the UI. Build before running integration tests. Tests use unique sockets and disposable files under `/tmp`, never the default server. They cover shell and agent pane navigation, client isolation, sidebar mouse input, blink, unusual names and paths, resizing, disconnection, switching servers, failures, and exit. tmm runs inside its own region, which is the shortest statement of how complete the region is: `tests/split_shell.py` nests it three deep and checks that a keystroke typed at the bottom reaches the tmux server. Focus descends by clicking, which rebases the column at each level; F12 does not descend, because every level matches it before forwarding.
 
