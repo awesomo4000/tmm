@@ -4,3 +4,8 @@ zig-pkg/
 __pycache__/
 .DS_Store
 x/
+# Editor swap and backup files: a vim swap file was committed once, and it
+# carries the user name and host name of whoever was editing.
+.*.sw[a-p]
+.swp
+*~

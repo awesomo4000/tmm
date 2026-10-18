@@ -1,6 +1,6 @@
 # README illustration
 
-Generated with the built-in imagegen tool using the supplied screenshot as a UI reference. The reference itself is not included in the repository.
+Generated with the built-in imagegen tool using the supplied screenshot as a UI reference. The reference itself is not included in the repository, and the prompt below is recorded with the reference's own project and user names removed rather than repeated here.
 
 ## Generation prompt
 
@@ -19,7 +19,7 @@ The panel should be large and nearly front-facing so its few text labels remain 
 "  ~/lab/haunted-toaster"
 "  bash"
 "  ~/lab/haunted-toaster"
-Use a subtle turquoise selection rectangle and left-edge triangle on the selected pane, gray other labels. Tiny footer "j/k move   q quit". Do not reproduce ANY real project names or paths from the reference: no project-one, project-two, user, or ~/src/tmm. Keep text clean, aligned, and uncluttered. Transparent background, crisp silhouette, no floating scraps or surrounding backdrop.
+Use a subtle turquoise selection rectangle and left-edge triangle on the selected pane, gray other labels. Tiny footer "j/k move   q quit". Do not reproduce any real project name, user name, host name, or path visible in the reference; invent all of them. Keep text clean, aligned, and uncluttered. Transparent background, crisp silhouette, no floating scraps or surrounding backdrop.
 
 ## Background edit
 
