@@ -1,5 +1,72 @@
 # Changelog
 
+## 10/18/2026
+
+- Made the focus key a runtime choice, defaulting to ctrl+backtick instead of F12: `--focus-key` names it, `TMM_FOCUS_KEY` sets it once in a profile, and the status line shows whichever key is bound. A key that types something is refused without a modifier, and a spelling tmm cannot use is reported before the terminal is opened.
+- Removed a tracked vim swap file, which carried a user name and a host name, and taught every test harness to find the tmm binary and tmux rather than naming an absolute path to one machine.
+- Rewrote the published history to drop that swap file and the personal paths and names it and three harnesses carried. Every commit hash changed, so an existing clone has to be reset rather than merged.
+- Backfilled the entries below from git history: this file had stopped at 09/10/2026 while the region, the compositor, images and the latency work landed, so those dates are reconstructed from the commits rather than written as the work happened.
+
+## 10/17/2026
+
+- Added program status reporting: a program in a pane says what it is doing over OSC 7501 and the sidebar shows that reported state instead of an inferred one, with progress, a blocked kind, and errors.
+- Gave the compositor its own scrollback, reachable with the wheel, and yielded the wheel to a program that asked for mouse reporting.
+- Followed the window a session has active, including switches, instead of compositing whichever one was first seen.
+- Drew relative and virtual image placements, and answered a program asking how big a cell is both ways it can ask.
+- Fixed a double free that crashed every `--panes` exit, and stopped leaking what the control worker had queued when tmm quits.
+- Answered `CSI c` in the region, which is what made image viewers stall five seconds per image.
+- Gave the shell the keyboard when split mode starts, since split mode is launched to work in.
+
+## 10/16/2026
+
+- Cut keystroke latency in the region: output wakeups are collapsed, queued keys are drained in one pass rather than one per frame, the render state has its own lock, and sending a keystroke takes no lock at all.
+- Added native latency probes with the machine and tmux floors measured separately, so a reading can be told from the noise under it.
+- Showed the images a program draws in the region, transmitted once per image and placed every frame.
+- Delivered key releases to the program inside, which needed asking the outer terminal for the event-types flag.
+- Fixed a pane use-after-free, a false divergence report, and a stolen command reply, and updated the vendored libghostty-vt.
+
+## 10/15/2026
+
+- Added the compositor behind `--panes`: one terminal per tmux pane, with tmm as the terminal while tmux keeps the session, the processes and the scrollback.
+- Forwarded mouse events into the region, stopped forwarding a modifier pressed on its own, and sent keys the terminal reported without text.
+- Extracted `Surface` from `Region` so panes share one terminal implementation, and made tmm nested three deep the region fidelity test.
+
+## 10/14/2026
+
+- Followed the selected display with `list-clients` rather than `display-message`.
+- Watched agents in every session instead of only the one the control stream attached.
+
+## 10/13/2026
+
+- Added split-shell mode behind `--shell`: the sidebar on the left, an ordinary shell on the right, with `--split` setting the starting width and the divider draggable.
+
+## 10/09/2026
+
+- Added a pseudoterminal for the terminal region.
+
+## 10/08/2026
+
+- Added an incremental state model maintained from the control-mode event stream, with a dirty set and a reconciliation oracle that checks it against a full collect.
+- Served read-only tmux queries from the control client, and skipped agent capture for panes that emitted no output.
+- Vendored libghostty-vt instead of depending on the ghostty repository.
+
+## 10/07/2026
+
+- Moved tmux queries onto the control client instead of a subprocess per query, and drove the collector from control-mode events.
+- Extracted the control-mode transport into `cmstream`, validated the parser against live tmux, and pinned the toolchain with mise.
+
+## 10/02/2026
+
+- Wired libghostty-vt as the terminal library for the control-mode compositor.
+
+## 10/01/2026
+
+- Added the control-mode protocol and layout parsers.
+
+## 09/17/2026
+
+- Fixed Linux portability and documented which platforms are tested.
+
 ## 09/10/2026
 
 - Replaced the local libtmux path dependency with its pinned public GitHub repository.
