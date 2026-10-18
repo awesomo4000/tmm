@@ -38,6 +38,9 @@ import tempfile
 import termios
 import time
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import keys  # noqa: E402
+
 ROWS, COLS, SPLIT = 40, 160, 30
 BINARY = Path(__file__).resolve().parents[1] / 'zig-out/bin/tmm'
 TMUX = shutil.which('tmux') or 'tmux'
@@ -87,7 +90,7 @@ def main():
                         os.write(fd, b'\x1b[0n')
 
         pump(2.0)
-        os.write(fd, b'\x1b[24~')      # F12: focus the region
+        os.write(fd, keys.FOCUS)       # focus the region
         pump(0.4)
 
         try:

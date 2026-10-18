@@ -34,6 +34,7 @@ run = [
   "python3 tests/measure_queries.py",
   "python3 tests/follow.py",
   "python3 tests/split_shell.py",
+  "python3 tests/focus_key.py",
   "python3 tests/compositor.py",
   "python3 tests/compositor_windows.py",
   "python3 tests/scrollback.py",

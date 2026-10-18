@@ -28,10 +28,14 @@ import re
 import select
 import struct
 import subprocess
+import sys
 import tempfile
 import termios
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import keys  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'zig-out/bin/tmm'
@@ -110,9 +114,10 @@ def run(root, extra, delay):
         # so a late quit finds the queues already empty and proves nothing.
         if not asked and time.monotonic() - start > delay:
             # With a region the shell holds the keyboard at startup, so q
-            # would go to the shell: F12 first, then quit from the sidebar.
+            # would go to the shell: the focus key first, then quit from
+            # the sidebar.
             if extra:
-                os.write(fd, b'\x1b[24~')
+                os.write(fd, keys.FOCUS)
                 time.sleep(0.3)
             os.write(fd, b'q')
             asked = True

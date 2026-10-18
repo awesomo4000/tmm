@@ -26,6 +26,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from screen import Screen  # noqa: E402
+import keys  # noqa: E402
 
 BINARY = Path(__file__).resolve().parents[1] / 'zig-out/bin/tmm'
 ROWS, COLS, SPLIT = 40, 120, 30
@@ -113,7 +114,8 @@ def main():
                 'sidebar did not render'
             # The shell has the keyboard at startup in split mode, so the
             # hint offers the way back rather than the way in.
-            assert until(lambda: 'F12 sidebar' in screen(ui_fd).line(ROWS - 1)), \
+            assert until(lambda: f'{keys.FOCUS_LABEL} sidebar'
+                         in screen(ui_fd).line(ROWS - 1)), \
                 ('split-mode hint did not render', screen(ui_fd).line(ROWS - 1))
             # The divider is one column, drawn for the full height, and the
             # sidebar stops short of it rather than being clipped by it.
@@ -123,15 +125,20 @@ def main():
             assert all('│' not in line[:SPLIT] for line in screen(ui_fd).lines()), \
                 'sidebar drew into the divider'
 
-            # ---- F12 reaches the sidebar and comes back -------------------
-            os.write(ui_fd, b'\x1b[24~')  # F12: to the sidebar
+            # ---- the focus key reaches the sidebar and comes back ---------
+            os.write(ui_fd, keys.FOCUS)
             pump(0.5)
-            assert 'F12 shell' in screen(ui_fd).line(ROWS - 1), \
+            assert f'{keys.FOCUS_LABEL} shell' in screen(ui_fd).line(ROWS - 1), \
                 ('focus did not move to the sidebar', screen(ui_fd).line(ROWS - 1))
-            os.write(ui_fd, b'\x1b[24~')  # F12: back to the region
+            # The same physical key from a terminal with no kitty keyboard
+            # protocol: one C0 byte, which is a different key as far as the
+            # parser can tell, and tmm has to accept it too or the default is
+            # unreachable wherever the protocol is missing.
+            os.write(ui_fd, keys.FOCUS_LEGACY)
             pump(0.5)
-            assert 'F12 sidebar' in screen(ui_fd).line(ROWS - 1), \
-                ('focus did not move back to the region', screen(ui_fd).line(ROWS - 1))
+            assert f'{keys.FOCUS_LABEL} sidebar' in screen(ui_fd).line(ROWS - 1), \
+                ('the legacy encoding of the focus key did not move focus back',
+                 screen(ui_fd).line(ROWS - 1))
 
             # ---- keys reach the child -------------------------------------
 
@@ -242,8 +249,9 @@ def main():
             def focus_deepest():
                 # One click focuses every level: each tmm sees a column inside
                 # its own region, focuses it, and forwards the click down with
-                # the column rebased. F12 cannot do this -- every tmm matches
-                # it before forwarding, so it never reaches the one below.
+                # the column rebased. The focus key cannot do this -- every
+                # tmm here was given the same one and matches it before
+                # forwarding, so it never reaches the one below.
                 deep = COLS - 4
                 os.write(ui_fd, f'\x1b[<0;{deep + 1};11M'.encode())
                 os.write(ui_fd, f'\x1b[<0;{deep + 1};11m'.encode())
@@ -270,15 +278,17 @@ def main():
             # Move the outermost keyboard to its sidebar first. Every level
             # starts focused on its own region now, so asserting three hints
             # after a click would hold whether or not the click did anything;
-            # taking one away makes the count discriminate again. F12 reaches
-            # only the outermost, which is the point of the click below.
-            os.write(ui_fd, b'\x1b[24~')
+            # taking one away makes the count discriminate again. The focus
+            # key reaches only the outermost, which is the point of the click.
+            os.write(ui_fd, keys.FOCUS)
             pump(0.5)
-            assert screen(ui_fd).line(ROWS - 1).count('F12 sidebar') == 2, \
-                ('F12 did not move the outermost keyboard to its sidebar',
-                 repr(screen(ui_fd).line(ROWS - 1)))
+            assert screen(ui_fd).line(ROWS - 1).count(
+                f'{keys.FOCUS_LABEL} sidebar') == 2, \
+                ('the focus key did not move the outermost keyboard to its '
+                 'sidebar', repr(screen(ui_fd).line(ROWS - 1)))
             focus_deepest()
-            assert screen(ui_fd).line(ROWS - 1).count('F12 sidebar') == 3, \
+            assert screen(ui_fd).line(ROWS - 1).count(
+                f'{keys.FOCUS_LABEL} sidebar') == 3, \
                 ('a click did not focus every level',
                  repr(screen(ui_fd).line(ROWS - 1)))
             os.write(ui_fd, f'tmux -S {socket} new-session -d -s depth3\r'.encode())
@@ -369,9 +379,9 @@ def main():
                  repr(screen(ui_fd).column(new_split)))
 
             # ---- the sidebar still works after all that ------------------
-            os.write(ui_fd, b'\x1b[24~')  # F12: back to the sidebar
+            os.write(ui_fd, keys.FOCUS)  # back to the sidebar
             pump(0.5)
-            assert 'F12 shell' in screen(ui_fd).line(ROWS - 1), \
+            assert f'{keys.FOCUS_LABEL} shell' in screen(ui_fd).line(ROWS - 1), \
                 ('focus did not return to the sidebar', screen(ui_fd).line(ROWS - 1))
 
             os.write(ui_fd, b'q')

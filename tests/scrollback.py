@@ -33,6 +33,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from screen import Screen  # noqa: E402
+import keys  # noqa: E402
 
 ROWS, COLS, SPLIT = 20, 120, 30
 BINARY = Path(__file__).resolve().parents[1] / 'zig-out/bin/tmm'
@@ -101,7 +102,7 @@ def main():
 
         try:
             pump(3.0)
-            os.write(fd, b'\x1b[24~')          # F12: focus the region
+            os.write(fd, keys.FOCUS)           # focus the region
             pump(0.4)
             pane = tmux('display-message', '-p', '-t', 'alpha', '#{pane_id}')
 

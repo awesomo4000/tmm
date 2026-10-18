@@ -27,6 +27,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from screen import Screen  # noqa: E402
+import keys  # noqa: E402
 
 BINARY = Path(__file__).resolve().parents[1] / 'zig-out/bin/tmm'
 ROWS, COLS, SPLIT = 40, 160, 30
@@ -156,7 +157,7 @@ def main():
             tmux('send-keys', '-t', second, f'cd {root}/two', 'Enter')
             pump(0.8)
 
-            os.write(ui_fd, b'\x1b[24~')      # F12: focus the pane region
+            os.write(ui_fd, keys.FOCUS)       # focus the pane region
             pump(0.5)
             # Click the left pane, type, and the file must land in its
             # directory and not the other one.

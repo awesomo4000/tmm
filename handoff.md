@@ -685,8 +685,8 @@ avoids an unpack step. Either is fine.
 `src/region.zig` is the recipe above, realised. `--shell` splits the window
 into the sidebar, a one-column divider, and one `Region`; without it tmm is
 byte-for-byte what it was, which is the point of the flag. `--split cols` sets
-the starting width. F12 moves focus; dragging the divider resizes both sides.
-Covered by `tests/split_shell.py`.
+the starting width. The focus key moves focus; dragging the divider resizes
+both sides. Covered by `tests/split_shell.py`.
 
 Departures from the recipe, each for a reason:
 
@@ -890,17 +890,22 @@ been caught instantly by it, since every sidebar is box drawing and symbols.
 Verified by A/B: reverting mouse forwarding stops it at two levels exactly,
 because the click can no longer descend.
 
-**F12 does not nest, and cannot.** Every tmm matches it before forwarding, so
-the outermost one swallows it and there is no keystroke that addresses level
-3. Clicking does nest, and correctly: each level sees a column inside its own
-region, focuses it, and forwards the click down with the column rebased by
-`divider + 1`, so one click focuses the entire chain. An off-by-one in that
-rebasing would compound per level, which makes nesting a good check on it too.
+**One focus key does not nest, and cannot.** Every tmm matches it before
+forwarding, so the outermost one swallows it and there is no keystroke that
+addresses level 3. Clicking does nest, and correctly: each level sees a column
+inside its own region, focuses it, and forwards the click down with the column
+rebased by `divider + 1`, so one click focuses the entire chain. An off-by-one
+in that rebasing would compound per level, which makes nesting a good check on
+it too.
 
-Making a hotkey nest would mean a tmm knowing it is running inside another
-tmm. That is a real design discussion, deferred 10/15/2026: mouse focus is
-enough for now, and Phase 3 multiplies focus targets rather than nesting them,
-so it needs its own answer regardless.
+Since 10/18/2026 the key is a runtime choice (`src/focuskey.zig`,
+`--focus-key`, `TMM_FOCUS_KEY`), which answers the nesting case without a tmm
+having to know it is inside another one: give the inner tmm a different key and
+it is addressable, because the outer one no longer matches. That is a
+convention rather than a mechanism, and the mechanism -- a tmm detecting its
+own nesting and deciding what to swallow -- stays deferred from 10/15/2026,
+with the same reasons: mouse focus is enough, and Phase 3 multiplies focus
+targets rather than nesting them.
 
 ### `TMM_INPUT_LOG`
 
@@ -922,9 +927,13 @@ keys, which is where libvaxis takes its constants from, so a codepoint in
 there is a key and never text however printable it looks to a UTF-8 encoder.
 
 Rendering assertions need a screen model, not a search of the captured bytes:
-libvaxis emits only the cells that changed, each after a cursor move, so a line
-reading `F12 sidebar` arrives as `F12`, `sid`, `bar`. `tests/screen.py` replays
-the cursor and is what every display assertion goes through.
+libvaxis emits only the cells that changed, each after a cursor move, so a
+status line reading ``ctrl+` sidebar`` arrives in pieces with the unchanged cells
+missing. `tests/screen.py` replays the cursor and is what every display
+assertion goes through. The focus key those assertions type and look for comes
+from `tests/keys.py`, for the same reason it has one home in the source: it was
+a literal in seven harnesses, and the default moving would otherwise mean
+finding all seven.
 
 ### Not yet, in the region
 

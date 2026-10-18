@@ -31,6 +31,7 @@ import termios
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import keys  # noqa: E402
 from keylag import BINARY, PROBE, SPLIT, ROWS, COLS  # noqa: E402
 
 KEYS = 300
@@ -118,7 +119,7 @@ def main():
                         data = b''
                     if b'\x1b[c' in data:
                         os.write(master, b'\x1b[?62;c')
-            # Split mode starts focused on the region; an F12 here would
+            # Split mode starts focused on the region; the focus key would
             # move the keyboard to the sidebar.
             time.sleep(0.4)
 

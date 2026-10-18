@@ -30,6 +30,9 @@ import tempfile
 import termios
 import time
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import keys  # noqa: E402
+
 ROWS, COLS, SPLIT = 40, 170, 30
 BINARY = Path(__file__).resolve().parents[1] / 'zig-out/bin/tmm'
 SCOPE = Path(__file__).resolve().parent / 'keyscope.py'
@@ -95,8 +98,8 @@ def main():
             # presses only, whatever the program inside asks for.
             assert asked & 2, ('tmm did not ask for key releases', asked)
 
-            # Split mode starts focused on the region, so no F12 is needed
-            # and one would take the keyboard away.
+            # Split mode starts focused on the region, so no focus key is
+            # needed here, and pressing it would take the keyboard away.
             pump(0.5)
             for seq in (b'\x1b[97;1u', b'\x1b[97;1:3u',
                         b'\x1b[57441;1u', b'\x1b[57441;1:3u'):

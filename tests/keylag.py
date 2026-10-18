@@ -44,6 +44,9 @@ import tempfile
 import termios
 import time
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import keys  # noqa: E402
+
 BINARY = Path(__file__).resolve().parents[1] / 'zig-out/bin/tmm'
 ROWS, COLS, SPLIT = 40, 160, 30
 KEYS = 12
@@ -236,8 +239,9 @@ def shell_mode(root, load):
                     {'SHELL': runner(root, load, log)})
     try:
         pump(fd, 1.2)
-        # Split mode starts with the keyboard in the region, so there is no
-        # F12 here; pressing one would move it to the sidebar instead.
+        # Split mode starts with the keyboard in the region, so the focus
+        # key is not pressed here; pressing it would move the keyboard to
+        # the sidebar instead.
         pump(fd, 0.3)
         return measure(fd, log, load)
     finally:
@@ -272,7 +276,7 @@ def panes_mode(root, load):
                      '--split', str(SPLIT)], {})
     try:
         pump(fd, 2.0)
-        os.write(fd, b'\x1b[24~')   # F12: move the keyboard to the region
+        os.write(fd, keys.FOCUS)    # move the keyboard to the region
         pump(fd, 0.5)
         return measure(fd, log, load)
     finally:

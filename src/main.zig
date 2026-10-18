@@ -11,6 +11,7 @@ const backend = @import("backend.zig");
 const region_mod = @import("region.zig");
 const panes_mod = @import("panes.zig");
 const surface = @import("surface.zig");
+const focuskey = @import("focuskey.zig");
 pub const panic = std.debug.FullPanic(struct {
     fn call(message: []const u8, address: ?usize) noreturn {
         vaxis.recover();
@@ -60,14 +61,26 @@ const help =
     \\Click a server, display, session, or agent. b blinks the display. q exits.
     \\--dump prints a read-only JSON snapshot without opening the terminal UI.
     \\--shell splits the window: the sidebar on the left, a shell on the right.
-    \\       The shell starts with the keyboard; F12 moves focus between the
-    \\       two, and q quits from the sidebar. Drag the divider to resize.
-    \\       The shell is an ordinary one, so tmux attach works inside it.
+    \\       The shell starts with the keyboard; the focus key moves focus
+    \\       between the two, and q quits from the sidebar. Drag the divider
+    \\       to resize. The shell is an ordinary one: tmux attach works in it.
+    \\--focus-key names that key, default ctrl+`, or set TMM_FOCUS_KEY.
+    \\       Spell it as f1-f20, insert, delete, home, end, page-up/down, an
+    \\       arrow, or ctrl/alt/super/shift plus any of those or a character:
+    \\       --focus-key ctrl+g. A key that types something needs a modifier.
+    \\       tmm keeps the key, so nothing inside the region ever sees it; a
+    \\       nested tmm given a different key stays reachable through it.
     \\--split sets the starting sidebar width in columns; it implies --shell.
     \\--panes composites a session's panes on the right instead of a shell.
     \\       tmm is the terminal for each pane; tmux still owns the session,
     \\       the processes and the scrollback. Implies the split layout.
     \\--session picks which session --panes shows; the newest by default.
+    \\
+;
+/// Printed under a rejected `--focus-key`, so the fix does not need --help.
+const focus_key_hint =
+    \\Spell it f1-f20, insert, delete, home, end, page-up, page-down, an arrow,
+    \\or ctrl/alt/super/shift plus one of those or a character: ctrl+g.
     \\
 ;
 pub fn main(init: std.process.Init) !void {
@@ -83,6 +96,7 @@ pub fn main(init: std.process.Init) !void {
     var panes = false;
     var panes_session: ?[]const u8 = null;
     var split_request: ?u16 = null;
+    var focus_key_text: ?[]const u8 = null;
     var config_arena = std.heap.ArenaAllocator.init(a);
     defer config_arena.deinit();
     const ca = config_arena.allocator();
@@ -118,11 +132,40 @@ pub fn main(init: std.process.Init) !void {
             const text = args.next() orelse return error.MissingSplitWidth;
             split_request = std.fmt.parseInt(u16, text, 10) catch return error.InvalidSplitWidth;
             shell = true;
+        } else if (std.mem.eql(u8, arg, "--focus-key")) {
+            focus_key_text = args.next() orelse return error.MissingFocusKey;
         } else if (std.mem.eql(u8, arg, "--label")) {
             label = args.next() orelse return error.MissingLabel;
         } else return error.UnknownArgument;
     }
     if (opts.socket_name != null and opts.socket_path != null) return error.ConflictingSocketSelectors;
+    // Resolved before anything is opened, because a key nobody can press is
+    // a usage error and not a runtime one: failing here still leaves the
+    // terminal as the user had it, and says what was wrong with the spelling
+    // rather than unwinding a stack at them.
+    const focus_key_spelling = focus_key_text orelse
+        init.environ_map.get(focuskey.env_var) orelse focuskey.default_text;
+    const focus_key = focuskey.parse(focus_key_spelling) catch |err| {
+        var buf: [512]u8 = undefined;
+        var out = std.Io.File.stderr().writer(io, &buf);
+        try out.interface.print("tmm: {s}: {s}\n{s}", .{
+            focus_key_spelling,
+            switch (err) {
+                error.EmptyFocusKey => "no key named",
+                error.UnknownFocusKey => "not a key tmm knows",
+                error.UnknownFocusModifier => "not a modifier tmm knows",
+                error.FocusKeyNeedsModifier => "types something, so it needs ctrl, alt or super with it",
+                error.FocusKeyTooLong => "too long to be a key",
+            },
+            focus_key_hint,
+        });
+        try out.interface.flush();
+        // Exit rather than returning the error: this is a typo in an
+        // argument, and an error return trace under it reads as a crash
+        // in tmm. Nothing is open yet, which is the reason the key is
+        // resolved this early.
+        std.process.exit(1);
+    };
     if (dump) {
         var snapshot: backend.Snapshot = .{ .arena = .init(a) };
         defer snapshot.arena.deinit();
@@ -220,6 +263,10 @@ pub fn main(init: std.process.Init) !void {
     // still reachable without one. `--panes` is left on the sidebar, where a
     // pane is chosen by clicking it.
     var focus: enum { sidebar, region } = if (shell and !panes) .region else .sidebar;
+    // Built once, because the label is only known at runtime now and the
+    // status line is drawn every frame.
+    const hint_region = try std.fmt.allocPrint(ca, "{s} sidebar", .{focus_key.label()});
+    const hint_sidebar = try std.fmt.allocPrint(ca, "j/k move  {s} shell  q quit", .{focus_key.label()});
     var dragging = false;
     var shared: backend.Shared = .{};
     var task = try io.concurrent(runWorker, .{ io, a, init.minimal.environ, opts, &shared, &loop });
@@ -427,7 +474,7 @@ pub fn main(init: std.process.Init) !void {
             // cursor twice for a single keystroke.
             .key_release => |key| {
                 if (focus == .region and (region != null or compositor != null)) {
-                    if (!key.matches(vaxis.Key.f12, .{}))
+                    if (!focus_key.matches(key))
                         forwardKey(region, compositor, key, .release);
                 }
             },
@@ -436,10 +483,11 @@ pub fn main(init: std.process.Init) !void {
                 if (pressed) |p| a.free(p);
                 pressed = null;
                 if (region != null or compositor != null) {
-                    // One key moves focus, and it is deliberately not a
-                    // plausible shell or tmux binding: ctrl+b belongs to the
-                    // tmux that may be running inside the region.
-                    if (key.matches(vaxis.Key.f12, .{})) {
+                    // One key moves focus, named by --focus-key and
+                    // defaulting to ctrl+` -- deliberately not a plausible
+                    // shell or tmux binding, because ctrl+b belongs to the
+                    // tmux that may be running inside. See focuskey.zig.
+                    if (focus_key.matches(key)) {
                         focus = if (focus == .region) .sidebar else .region;
                         break :key_event;
                     }
@@ -465,7 +513,7 @@ pub fn main(init: std.process.Init) !void {
                             // follows belongs to the side that now has the
                             // keyboard, and is dropped rather than delivered
                             // to a program that never saw the press.
-                            if (queued.matches(vaxis.Key.f12, .{})) {
+                            if (focus_key.matches(queued)) {
                                 if (kind == .press) focus = .sidebar;
                                 break;
                             }
@@ -711,9 +759,9 @@ pub fn main(init: std.process.Init) !void {
         else if (region == null and compositor == null)
             "j/k move  q quit"
         else if (focus == .region)
-            "F12 sidebar"
+            hint_region
         else
-            "j/k move  F12 shell  q quit", .{ .fg = .{ .index = 8 } });
+            hint_sidebar, .{ .fg = .{ .index = 8 } });
         if (frames) |*f| stamp = f.mark(0, stamp);
         if (region != null or compositor != null) {
             const divider = win.width;
