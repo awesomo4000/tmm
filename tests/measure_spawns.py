@@ -1,7 +1,10 @@
-import fcntl, os, pty, select, struct, subprocess, tempfile, termios, time, signal, sys
-ROOT = '/Users/user/src/tmm'
+import fcntl, os, pty, select, shutil, struct, subprocess, tempfile, termios, time, signal, sys
+# Found rather than spelled out: a path to one checkout runs nowhere else.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(ROOT, 'zig-out', 'bin', 'tmm')
-REAL = '/opt/homebrew/bin/tmux'
+# Resolved now, and absolutely: a wrapper named tmux goes on PATH below,
+# so anything resolved later would be that wrapper calling itself.
+REAL = shutil.which('tmux') or 'tmux'
 with tempfile.TemporaryDirectory(prefix='spawnm-') as root:
     sock = os.path.join(root, 'socket')
     log = os.path.join(root, 'spawns.log')

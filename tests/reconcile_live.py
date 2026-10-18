@@ -12,8 +12,10 @@ full query about which sessions and panes exist or where they live.
 This is the oracle described in reconcile.zig: full queries are cheap now that
 they ride a control client, so one per collect is affordable as a check.
 """
-import fcntl, os, pty, select, signal, struct, subprocess, tempfile, termios, time
-ROOT='/Users/user/src/tmm'; BIN=os.path.join(ROOT,'zig-out','bin','tmm'); TMUX='/opt/homebrew/bin/tmux'
+import fcntl, os, pty, select, shutil, signal, struct, subprocess, tempfile, termios, time
+# Found rather than spelled out: a path to one checkout runs nowhere else,
+# and a path to one tmux runs on nobody else's machine.
+ROOT=os.path.dirname(os.path.dirname(os.path.abspath(__file__))); BIN=os.path.join(ROOT,'zig-out','bin','tmm'); TMUX=shutil.which('tmux') or 'tmux'
 with tempfile.TemporaryDirectory(prefix='recon-') as root:
     sock=os.path.join(root,'socket'); log=os.path.join(root,'diverge.log')
     def tmux(*a): return subprocess.check_output([TMUX,'-S',sock,*a],stderr=subprocess.PIPE,timeout=5).decode()

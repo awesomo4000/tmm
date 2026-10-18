@@ -12,8 +12,11 @@ changing how much each pass asks tmux.
 Expect a few passes at the full count while panes settle (the sample budget in
 backend.zig), then a floor of the structural queries alone.
 """
-import fcntl, os, pty, select, signal, struct, subprocess, sys, tempfile, termios, time
-BIN='/Users/user/src/tmm/zig-out/bin/tmm'; TMUX='/opt/homebrew/bin/tmux'
+import fcntl, os, pty, select, shutil, signal, struct, subprocess, sys, tempfile, termios, time
+from pathlib import Path
+# Found rather than spelled out: a path to one checkout runs nowhere else,
+# and a path to one tmux runs on nobody else's machine.
+BIN=str(Path(__file__).resolve().parents[1] / 'zig-out' / 'bin' / 'tmm'); TMUX=shutil.which('tmux') or 'tmux'
 with tempfile.TemporaryDirectory(prefix='qm-') as root:
     sock=os.path.join(root,'socket'); qlog=os.path.join(root,'q.log')
     def tmux(*a): return subprocess.check_output([TMUX,'-S',sock,*a],stderr=subprocess.PIPE,timeout=5).decode()
