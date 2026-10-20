@@ -1,5 +1,12 @@
 # Changelog
 
+## 10/20/2026
+
+- Decoded the PNG that `kitty icat` and timg transmit, which was being dropped: libghostty-vt leaves its decoder hook null in a library build, so every `f=100` transmission failed to load while chafa worked because it sends raw RGBA.
+- Let an agent report what it is doing over OSC 7501 rather than having its screen read, with a transport and a Claude Code hook mapping in `contrib/agent-status`. A hook has no controlling terminal, so the report goes to the pane tty found through tmux.
+- Showed a reported title in the sidebar, which was parsed and stored but never drawn.
+- Taught the test cleanup to find a tmux server whose temporary directory is already gone. One left over from a previous day inflated a worst-case keystroke measurement from 0.5ms to 77ms.
+
 ## 10/18/2026
 
 - Made the focus key a runtime choice, defaulting to ctrl+backtick instead of F12: `--focus-key` names it, `TMM_FOCUS_KEY` sets it once in a profile, and the status line shows whichever key is bound. A key that types something is refused without a modifier, and a spelling tmm cannot use is reported before the terminal is opened.
