@@ -39,6 +39,32 @@ for pattern in $globs; do
     done
 done
 
+# Then the same sweep by command line, which catches the two cases the walk
+# above cannot see at all:
+#
+#   - a server whose socket is not named `socket`, `sock` or `*.sock`. The
+#     enumeration above is the very thing the comment on `globs` warns about,
+#     one level down, and an older latency harness used `outer`.
+#   - a server whose directory is already gone. TemporaryDirectory removes the
+#     directory when the harness exits, but a tmux server started inside it
+#     keeps running on the now-unlinked socket path, so there is no directory
+#     left to find it through.
+#
+# The second one is not hypothetical: an orphan from the previous day was
+# still running and turned a worst-case keystroke of 0.5ms into 77ms, which
+# reads exactly like a latency regression and is not one.
+#
+# A test socket path on the command line is what keeps a person's own tmux out
+# of this, the same rule the tmm sweep below uses.
+for pid in $(pgrep -f "tmux -S /tmp/tmm-" 2>/dev/null); do
+    kill -TERM "$pid" 2>/dev/null && killed=$((killed + 1))
+done
+for pattern in recon uaf seq nfloor pty-floor tmux-floor freq warm img rel; do
+    for pid in $(pgrep -f "tmux -S /tmp/$pattern-" 2>/dev/null); do
+        kill -TERM "$pid" 2>/dev/null && killed=$((killed + 1))
+    done
+done
+
 # A nested tmm from the nesting test holds a test socket on its command line.
 # Matching on that is what keeps a person's own tmm out of this: a tmm started
 # by hand has no /tmp test socket in its arguments.

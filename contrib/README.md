@@ -1,5 +1,15 @@
 # contrib/
 
+## agent-status/
+
+Make an agent report what it is doing over OSC 7501, so the tmm sidebar shows
+a state the agent knows rather than one read off its screen. A generic emitter
+plus a Claude Code hook mapping. See
+[agent-status/README.md](agent-status/README.md), which also records why the
+two obvious transports do not work.
+
+Nothing is installed by default and nothing edits your agent settings.
+
 ## tmux-pin/
 
 A generic tmux utility: keep a pane pinned to a display, present no matter

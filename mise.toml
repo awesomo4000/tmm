@@ -50,6 +50,7 @@ run = [
   "python3 tests/size_report.py",
   "python3 tests/program_status.py",
   "python3 tests/sidebar_status.py",
+  "python3 tests/agent_hooks.py",
 ]
 
 [tasks.latency]

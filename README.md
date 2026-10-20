@@ -250,7 +250,7 @@ Reads span several commands, and client revalidation is separate from mutations,
 
 ## TODO
 
-- [ ] Report status from agent hooks, now that the terminal half is done. OSC 7501 is parsed, kept and shown in the sidebar, so what is left is emitting one sequence from the lifecycle callbacks of each agent -- Claude, Codex, omp, pi -- tied to the pane and the run identity. `tests/sidebar_status.py` is the reference for the wire format. Handle stale events and restarts, preserve existing user hooks, and keep completion acknowledgement separate from reported status.
+- [ ] Report status from the agents other than Claude Code -- Codex, omp, pi. `contrib/agent-status/` has the transport and the Claude Code mapping, and nothing in the emitter is agent specific, so each of the others needs its own mapping from its own lifecycle events. Check two things first for any of them, because both were measured false for the obvious route: whether its hook has a controlling terminal, and whether it passes the pane environment through. See that directory's README.
 
 ## License
 

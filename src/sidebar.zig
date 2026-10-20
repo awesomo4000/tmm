@@ -12,13 +12,22 @@ pub const Action = union(enum) { server: usize, display: usize, session: usize, 
 /// What a program in a pane said about itself (OSC 7501), as opposed to what
 /// reading its screen suggested.
 ///
-/// Carries no strings on purpose: the records live behind the owning
+/// Carries no slices on purpose: the records live behind the owning
 /// surface's lock, and a slice handed out here would outlive the lookup. The
-/// label beside the indicator still comes from the pane's command.
+/// title is copied into the struct for that reason rather than referenced.
+/// The label beside the indicator still comes from the pane's command.
 pub const Reported = struct {
     state: enum { idle, working, done, blocked, @"error" },
     kind: ?enum { permission, question, auth } = null,
     progress: ?u8 = null,
+    /// What the program said it is working on, copied in. Empty when it said
+    /// nothing, which is the common case.
+    title_buf: [24]u8 = @splat(0),
+    title_len: u8 = 0,
+
+    pub fn title(self: *const Reported) []const u8 {
+        return self.title_buf[0..self.title_len];
+    }
 
     /// The symbol and colour for a reported state, in the vocabulary the
     /// inferred states already use, plus a mark for `error`, which screen
@@ -130,6 +139,16 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
                         a,
                         "{s}   {s} {s} ({s})",
                         .{ marker, state.symbol, name, @tagName(kind) },
+                    );
+                    // Below progress and the blocked kind, because both of
+                    // those are more urgent than what it happens to be doing.
+                    // This is what a program can say during long work when it
+                    // has no fraction to report -- an agent hook knows the
+                    // tool that is running but never how many will run.
+                    if (r.title().len > 0) break :blk try std.fmt.allocPrint(
+                        a,
+                        "{s}   {s} {s} {s}",
+                        .{ marker, state.symbol, name, r.title() },
                     );
                     break :blk try std.fmt.allocPrint(a, "{s}   {s} {s}", .{ marker, state.symbol, name });
                 } else if (is_agent)

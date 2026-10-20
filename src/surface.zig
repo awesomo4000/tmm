@@ -606,11 +606,7 @@ pub const Surface = struct {
     /// Blocked outranks error, which outranks working, done and idle. Among
     /// equals the most recently updated wins, so a running task's progress
     /// is the one that moves.
-    pub fn statusSummary(self: *Surface) ?struct {
-        state: Status.State,
-        kind: ?Status.Kind,
-        progress: ?u8,
-    } {
+    pub fn statusSummary(self: *Surface) ?Summary {
         self.status_lock.lockUncancelable(self.io);
         defer self.status_lock.unlock(self.io);
         var best: ?Status = null;
@@ -624,7 +620,67 @@ pub const Surface = struct {
             if (rank > have or (rank == have and record.seq > current.seq)) best = record;
         }
         const record = best orelse return null;
-        return .{ .state = record.state, .kind = record.kind, .progress = record.progress };
+        var out: Summary = .{
+            .state = record.state,
+            .kind = record.kind,
+            .progress = record.progress,
+        };
+        // Copied, not borrowed: the record behind this title is replaced by
+        // the next report, and the caller reads the summary after the lock
+        // is gone. A longer title is cut rather than refused, since this
+        // ends up on one sidebar row either way.
+        if (record.title) |t| {
+            const n = utf8Fit(t, out.title_buf.len);
+            @memcpy(out.title_buf[0..n], t[0..n]);
+            out.title_len = @intCast(n);
+        }
+        return out;
+    }
+
+    /// The single line's worth of state a sidebar draws, with no slice in it.
+    ///
+    /// Everything here is by value for one reason: `statusSummary` reads
+    /// records under the surface's lock and the caller uses the result after
+    /// releasing it, so a slice into a record would dangle the moment the
+    /// program reported again.
+    pub const Summary = struct {
+        state: Status.State,
+        kind: ?Status.Kind,
+        progress: ?u8,
+        /// What the program says it is working on. Short on purpose: it
+        /// shares a row with the pane name and the indicator.
+        title_buf: [24]u8 = @splat(0),
+        title_len: u8 = 0,
+
+        pub fn title(self: *const Summary) []const u8 {
+            return self.title_buf[0..self.title_len];
+        }
+    };
+
+    /// How much of `text` fits in `limit` bytes without splitting a
+    /// character.
+    ///
+    /// The parser already checked the title is valid UTF-8, and cutting one
+    /// mid-sequence would hand the sidebar bytes that are not, which draws as
+    /// a replacement glyph or worse. Tool names are ASCII and never reach
+    /// this, but a title is whatever the program chose to send.
+    fn utf8Fit(text: []const u8, limit: usize) usize {
+        if (text.len <= limit) return text.len;
+        var n = limit;
+        // A continuation byte is 0b10xxxxxx, so walk back off any that a cut
+        // at `limit` landed in the middle of.
+        while (n > 0 and text[n] & 0xc0 == 0x80) n -= 1;
+        return n;
+    }
+
+    test utf8Fit {
+        try std.testing.expectEqual(@as(usize, 3), utf8Fit("abc", 8));
+        try std.testing.expectEqual(@as(usize, 3), utf8Fit("abcdef", 3));
+        // Three two-byte characters: a cut at 5 has to fall back to 4.
+        try std.testing.expectEqual(@as(usize, 4), utf8Fit("\u{e9}\u{e9}\u{e9}", 5));
+        try std.testing.expectEqual(@as(usize, 6), utf8Fit("\u{e9}\u{e9}\u{e9}", 6));
+        // A four-byte character that does not fit at all is dropped whole.
+        try std.testing.expectEqual(@as(usize, 0), utf8Fit("\u{1f600}", 3));
     }
 
     fn urgency(state: Status.State) u8 {

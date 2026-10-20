@@ -665,7 +665,7 @@ pub const Compositor = struct {
         defer self.mutex.unlock(self.io);
         const pane = self.panes.get(pane_id) orelse return null;
         const summary = pane.surface.statusSummary() orelse return null;
-        return .{
+        var out: sidebar.Reported = .{
             .state = switch (summary.state) {
                 .idle => .idle,
                 .working => .working,
@@ -680,6 +680,15 @@ pub const Compositor = struct {
             } else null,
             .progress = summary.progress,
         };
+        // Both sides hold the title by value, so this is a copy of a copy
+        // rather than a slice that outlives the lock above. Clamped rather
+        // than assumed equal: the two buffers are the same size today and
+        // nothing here should break if one of them grows.
+        const t = summary.title();
+        const n = @min(t.len, out.title_buf.len);
+        @memcpy(out.title_buf[0..n], t[0..n]);
+        out.title_len = @intCast(n);
+        return out;
     }
 
     /// The sidebar's view of this compositor's reports.
