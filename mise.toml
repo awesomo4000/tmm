@@ -51,6 +51,7 @@ run = [
   "python3 tests/program_status.py",
   "python3 tests/sidebar_status.py",
   "python3 tests/agent_hooks.py",
+  "python3 tests/agent_hooks_sidebar.py",
 ]
 
 [tasks.latency]

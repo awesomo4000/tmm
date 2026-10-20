@@ -56,7 +56,10 @@ pub const Client = struct {
     }
 };
 pub const Session = struct { id: []const u8, name: []const u8, path: []const u8 };
-pub const Pane = struct { session: []const u8, window: []const u8, id: []const u8, cwd: []const u8, command: []const u8, agent: []const u8, state: []const u8, status: []const u8, activity: []const u8 = "", agent_source: []const u8 = "none", status_source: []const u8 = "unknown", status_rule: []const u8 = "", run_identity: []const u8 = "", completion: u64 = 0, unread: bool = false, interrupted: bool = false };
+/// `reported` is the OSC 7501 record a reporter wrote to the `@tmm_status`
+/// pane option, still as the payload text; see src/reported.zig for why that
+/// channel exists beside the in-band one.
+pub const Pane = struct { session: []const u8, window: []const u8, id: []const u8, cwd: []const u8, command: []const u8, agent: []const u8, state: []const u8, status: []const u8, activity: []const u8 = "", reported: []const u8 = "", agent_source: []const u8 = "none", status_source: []const u8 = "unknown", status_rule: []const u8 = "", run_identity: []const u8 = "", completion: u64 = 0, unread: bool = false, interrupted: bool = false };
 
 /// Strip terminal controls from display text without changing internal IDs.
 pub fn display(alloc: Allocator, value: []const u8) ![]const u8 {
@@ -210,6 +213,7 @@ test "terminal owner follows login and shell, stops at SSH" {
 test {
     _ = @import("focuskey.zig");
     _ = @import("png.zig");
+    _ = @import("reported.zig");
     _ = @import("status.zig");
     _ = @import("control.zig");
     _ = @import("layout.zig");

@@ -1,7 +1,16 @@
 # agent-status/
 
-Make an agent report what it is doing, so the tmm sidebar shows the state the
-agent knows instead of one inferred from its screen.
+Make an agent report what it is doing, so the tmm sidebar can show a state the
+agent knows rather than one worked out from its screen.
+
+This does not replace the screen detector, and is not meant to. That detector
+works with no cooperation from anything -- no hooks, no config, no agent
+support, nothing installed -- which is why it stays the default and keeps
+running for every pane. What it cannot do is be certain: quiet output is never
+a completion, a transition between two polls is missed, an unrecognised screen
+stays unknown, and `error` has no screen it can be recognised from at all. A
+report has none of those failure modes, so where one exists it is believed
+first. Where none exists, nothing changes.
 
 tmm already reads OSC 7501 out of a pane and draws it (`src/surface.zig`,
 `src/sidebar.zig`). What was missing was anything that emits it. These are the
@@ -39,26 +48,45 @@ unless you run the installer or edit the file yourself.
 
 ## What this needs to be running
 
-**tmm has to be in compositor mode, `--panes`, and the agent has to be in a
-tmux pane on the server tmm is watching.** Outside that, the report is written
-and nothing reads it.
+The agent has to be in a tmux pane on the server tmm is watching. That is the
+only requirement, and it is the normal way to use tmm, which is a view over
+tmux rather than over one shell.
 
-That is structural rather than a missing wire. Only the compositor gives tmm a
-terminal per pane; in sidebar-only and `--shell` mode tmm talks to tmux over
-control mode and never sees pane output at all, so there is nothing to parse a
-sequence out of. `src/main.zig` passes `sidebar.Status.none` in those modes and
-the lookup returns null for every pane.
+It works in every tmm mode -- `--panes`, `--shell` and plain sidebar -- but by
+two different routes, because neither one alone covers them all:
 
-An agent running in tmm's own `--shell` region cannot report either, and could
-not even if the sidebar had a row for it: the region is tmm's pty rather than a
-tmux pane, so a hook there has no `$TMUX_PANE` to resolve and no controlling
-terminal to fall back on.
+- **In band**, the OSC 7501 written to the pane tty. Only the compositor reads
+  this: it is the only mode where tmm runs a terminal per pane and sees the
+  pane's bytes. It needs no query, so it is the fresher of the two.
+- **Out of band**, the same record written to the `@tmm_status` pane option.
+  tmm reads this for every pane on the server in the `list-panes -a` query it
+  already makes, so sidebar and `--shell` mode get it too, for every session.
 
-None of this is a failure mode, just a no-op. The emitter exits 0 and silently
-when there is no tmux, when the pane id is stale, and when nothing is reading
-the pane. Forty reports into a pane running a full-screen TUI leave its display
-byte for byte unchanged, so leaving the hooks installed costs nothing when tmm
-is not up.
+The second route is not belt and braces, it is necessary. In sidebar-only and
+`--shell` mode tmm talks to tmux over control mode and never sees pane output
+at all. And even a tmm that decoded the control stream would be told about
+output in the one session its client is attached to and no other -- measured,
+not assumed: a control client attached to session A hears nothing about output
+in session B.
+
+An agent running inside tmm's own `--shell` region, rather than in a tmux pane,
+cannot report at all: that region is tmm's pty, so a hook there has no
+`$TMUX_PANE` to resolve and no controlling terminal to fall back on. There is
+also no sidebar row for it, since it is not a tmux pane.
+
+Nothing here is a failure mode when tmm is not up. The emitter exits 0 and
+silently with no tmux, with a stale pane id, and with nothing reading the pane.
+Forty reports into a pane running a full-screen TUI leave its display byte for
+byte unchanged, so leaving the hooks installed costs nothing.
+
+### Why the record is not scraped instead
+
+A reasonable idea, since tmm already captures pane text for the detector: have
+the capture look for OSC 7501 too. It cannot work. tmux parses the pane's
+output into a grid and an OSC it does not implement is consumed there, so the
+sequence never reaches the screen `capture-pane` renders -- with `-e` or
+without it, measured both ways. The pane option is what gives the capture path
+a reliable signal instead, and it rides the same query.
 
 ## Install
 

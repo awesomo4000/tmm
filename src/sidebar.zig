@@ -5,6 +5,7 @@
 const std = @import("std");
 const m = @import("model.zig");
 const backend = @import("backend.zig");
+const reported_opt = @import("reported.zig");
 const tmux = @import("libtmux");
 pub const Server = struct { name: []const u8, options: tmux.ServerOptions };
 pub const Action = union(enum) { server: usize, display: usize, session: usize, pane: usize, new_session, blink };
@@ -17,12 +18,15 @@ pub const Action = union(enum) { server: usize, display: usize, session: usize, 
 /// title is copied into the struct for that reason rather than referenced.
 /// The label beside the indicator still comes from the pane's command.
 pub const Reported = struct {
+    /// Longest title a row has space for beside the name and the indicator.
+    pub const title_max = 24;
+
     state: enum { idle, working, done, blocked, @"error" },
     kind: ?enum { permission, question, auth } = null,
     progress: ?u8 = null,
     /// What the program said it is working on, copied in. Empty when it said
     /// nothing, which is the common case.
-    title_buf: [24]u8 = @splat(0),
+    title_buf: [title_max]u8 = @splat(0),
     title_len: u8 = 0,
 
     pub fn title(self: *const Reported) []const u8 {
@@ -120,7 +124,13 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
                 // never a completion, a transition between polls is missed,
                 // and an unrecognised screen stays unknown. A report has none
                 // of those failure modes.
-                const said = reported.get(reported.ctx, pane.id);
+                // In band first, then the pane option. The compositor's copy
+                // is the fresher of the two when both exist -- it was parsed
+                // out of the pane's own bytes as they arrived, where the
+                // option is only as new as the last query -- and outside the
+                // compositor the in-band route sees nothing at all.
+                const said = reported.get(reported.ctx, pane.id) orelse
+                    reported_opt.parse(pane.reported);
                 const state = if (said) |r| r.indicator() else m.agentIndicator(pane.state);
                 const is_agent = pane.agent.len > 0 or said != null;
                 const pane_active = active and std.mem.eql(u8, pane.id, s.focused_pane);

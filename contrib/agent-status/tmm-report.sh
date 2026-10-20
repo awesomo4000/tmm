@@ -10,10 +10,15 @@
 # sidebar row for that pane shows the reported state. A terminal that does not
 # know OSC 7501 ignores it, so this is safe to leave installed anywhere.
 #
-# tmm only reads pane output in compositor mode, so a report lands nowhere
-# unless tmm is running `--panes` on this server. That is a no-op, not an
-# error: this exits 0 and silently with no tmux, with a stale pane id, and
-# with nothing reading the pane.
+# Sent twice, by two routes, because neither reaches every tmm mode: in band to
+# the pane tty, which only the compositor reads, and out of band as the
+# `@tmm_status` pane option, which tmm reads for every pane in every mode. See
+# the README beside this file.
+#
+# A report is an addition to tmm screen detector, never a replacement: that
+# detector needs no cooperation from anything and keeps running for every pane
+# that reports nothing. This exits 0 and silently with no tmux, with a stale
+# pane id, and with nothing reading the pane.
 #
 # Usage:
 #   tmm-report.sh state=working app=cargo progress=40
@@ -82,6 +87,29 @@ for opt in "$@"; do
     if [ -z "$payload" ]; then payload=$opt; else payload="$payload:$opt"; fi
 done
 
-# One write, so the sequence cannot be torn in half by another process writing
-# to the same pane between the introducer and the terminator.
-printf '\033]7501;%s\033\\' "$payload" > "$tty" 2>/dev/null || exit 0
+# Two transports for the one record, because neither reaches every mode.
+#
+# In band, to the pane tty: this is the protocol, and it is what the compositor
+# reads -- parsed out of the pane's own bytes as they arrive, with no query in
+# between. One write, so the sequence cannot be torn in half by another process
+# writing to the same pane between the introducer and the terminator.
+printf '\033]7501;%s\033\\' "$payload" > "$tty" 2>/dev/null || true
+
+# Out of band, as a pane option: the in-band route only reaches tmm under
+# `--panes`, and even a tmm that decoded the control stream would be told about
+# output in the session its client is attached to and no other. The option is
+# read for every pane on the server in the query tmm already makes, so sidebar
+# and `--shell` mode see the record too. The payload is the same text either
+# way, parsed by src/reported.zig.
+#
+# `state=clear` removes the record rather than setting one, so the option is
+# unset instead of being left holding a state nothing stands behind.
+case "$payload" in
+    state=clear|state=clear:*|*:state=clear|*:state=clear:*)
+        "$tmux_bin" -S "$socket" set -pu -t "$TMUX_PANE" @tmm_status 2>/dev/null || true
+        ;;
+    *)
+        "$tmux_bin" -S "$socket" set -p -t "$TMUX_PANE" @tmm_status "$payload" 2>/dev/null || true
+        ;;
+esac
+exit 0

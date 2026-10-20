@@ -8,6 +8,7 @@ const m = @import("model.zig");
 const status = @import("status.zig");
 const cmstream = @import("cmstream.zig");
 const control = @import("control.zig");
+const reported_mod = @import("reported.zig");
 const istate = @import("state.zig");
 const reconcile = @import("reconcile.zig");
 const Allocator = std.mem.Allocator;
@@ -311,10 +312,10 @@ pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Reque
     const session_rows = try m.records(3, a, session_data);
     snapshot.sessions = try a.alloc(m.Session, session_rows.len);
     for (session_rows, snapshot.sessions) |r, *s| s.* = .{ .id = r[0], .name = r[1], .path = r[2] };
-    const pane_data = try queryRead(server, &.{ "list-panes", "-a", "-F", m.format(&.{ "session_id", "window_id", "pane_id", "pane_current_path", "pane_current_command", "@agent_hint", "@agent_state", "@agent_status_text", "pane_pid", "@agent_session_id", "window_activity" }) });
-    const pane_rows = try m.records(11, a, pane_data);
+    const pane_data = try queryRead(server, &.{ "list-panes", "-a", "-F", m.format(&.{ "session_id", "window_id", "pane_id", "pane_current_path", "pane_current_command", "@agent_hint", "@agent_state", "@agent_status_text", "pane_pid", "@agent_session_id", "window_activity", reported_mod.option }) });
+    const pane_rows = try m.records(12, a, pane_data);
     snapshot.panes = try a.alloc(m.Pane, pane_rows.len);
-    for (pane_rows, snapshot.panes) |r, *p| p.* = .{ .session = r[0], .window = r[1], .id = r[2], .cwd = r[3], .command = r[4], .agent = r[5], .state = r[6], .status = r[7], .activity = r[10] };
+    for (pane_rows, snapshot.panes) |r, *p| p.* = .{ .session = r[0], .window = r[1], .id = r[2], .cwd = r[3], .command = r[4], .agent = r[5], .state = r[6], .status = r[7], .activity = r[10], .reported = r[11] };
     // One process table per refresh, never a shell command or pane-output scrape.
     const process_result = std.process.run(a, server.server.io, .{
         .argv = &.{ "ps", "-axo", "pid=,ppid=,comm=" },
