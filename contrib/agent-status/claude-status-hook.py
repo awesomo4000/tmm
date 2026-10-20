@@ -9,6 +9,11 @@ Installed once for every event in settings-snippet.json; the event name
 arrives in the JSON on stdin, so one script covers all of them and there is
 one place where the mapping lives.
 
+This has an effect only when tmm is running `--panes` and the agent sits in a
+tmux pane on the server tmm watches. In every other arrangement the report is
+written and nothing reads it, which is a no-op rather than a failure. See the
+README beside this file for why that is structural.
+
 The transport is tmm-report.sh beside this file, which writes to the pane tty.
 A hook cannot write to the terminal itself: it runs in its own session with no
 controlling terminal, and its stdout goes to the agent rather than the screen.

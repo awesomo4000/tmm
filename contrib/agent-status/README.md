@@ -37,6 +37,29 @@ unless you run the installer or edit the file yourself.
   settings files have other hooks in them and clobbering those would be worse
   than a manual step.
 
+## What this needs to be running
+
+**tmm has to be in compositor mode, `--panes`, and the agent has to be in a
+tmux pane on the server tmm is watching.** Outside that, the report is written
+and nothing reads it.
+
+That is structural rather than a missing wire. Only the compositor gives tmm a
+terminal per pane; in sidebar-only and `--shell` mode tmm talks to tmux over
+control mode and never sees pane output at all, so there is nothing to parse a
+sequence out of. `src/main.zig` passes `sidebar.Status.none` in those modes and
+the lookup returns null for every pane.
+
+An agent running in tmm's own `--shell` region cannot report either, and could
+not even if the sidebar had a row for it: the region is tmm's pty rather than a
+tmux pane, so a hook there has no `$TMUX_PANE` to resolve and no controlling
+terminal to fall back on.
+
+None of this is a failure mode, just a no-op. The emitter exits 0 and silently
+when there is no tmux, when the pane id is stale, and when nothing is reading
+the pane. Forty reports into a pane running a full-screen TUI leave its display
+byte for byte unchanged, so leaving the hooks installed costs nothing when tmm
+is not up.
+
 ## Install
 
     contrib/agent-status/install.sh

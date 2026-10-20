@@ -10,6 +10,11 @@
 # sidebar row for that pane shows the reported state. A terminal that does not
 # know OSC 7501 ignores it, so this is safe to leave installed anywhere.
 #
+# tmm only reads pane output in compositor mode, so a report lands nowhere
+# unless tmm is running `--panes` on this server. That is a no-op, not an
+# error: this exits 0 and silently with no tmux, with a stale pane id, and
+# with nothing reading the pane.
+#
 # Usage:
 #   tmm-report.sh state=working app=cargo progress=40
 #   tmm-report.sh state=blocked kind=permission

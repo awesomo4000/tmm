@@ -250,6 +250,7 @@ Reads span several commands, and client revalidation is separate from mutations,
 
 ## TODO
 
+- [ ] Observe reported status outside compositor mode. OSC 7501 only reaches the sidebar under `--panes`, because that is the only mode where tmm has a terminal per pane; in sidebar-only and `--shell` mode it talks to tmux over control mode and never sees pane output, so an agent hook reports into nothing. Tapping pane output without standing up a whole compositor is the open question.
 - [ ] Report status from the agents other than Claude Code -- Codex, omp, pi. `contrib/agent-status/` has the transport and the Claude Code mapping, and nothing in the emitter is agent specific, so each of the others needs its own mapping from its own lifecycle events. Check two things first for any of them, because both were measured false for the obvious route: whether its hook has a controlling terminal, and whether it passes the pane environment through. See that directory's README.
 
 ## License
