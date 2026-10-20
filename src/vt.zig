@@ -12,9 +12,9 @@
 //!   - Image storage is still off at runtime until `kitty_image_storage_limit`
 //!     is non-zero, which is why `Options.kitty_image_storage_limit` is set.
 //!   - Decoding PNG payloads additionally requires a decoder installed through
-//!     ghostty's `sys` hook; libghostty-vt ships none. `zigimg` is already in
-//!     the dependency graph (via vaxis) and can serve. Not wired yet — only
-//!     needed once the Phase 4 image bridge lands.
+//!     ghostty's `sys` hook; libghostty-vt ships none, because a library build
+//!     leaves the pointer null rather than take on an image dependency. That
+//!     is `src/png.zig`, backed by `zigimg` and installed once in `main`.
 
 const std = @import("std");
 const ghostty = @import("ghostty-vt");

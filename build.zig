@@ -23,6 +23,11 @@ pub fn build(b: *std.Build) void {
         .simd = false,
     }).module("ghostty-vt");
     mod.addImport("ghostty-vt", ghostty_vt);
+    // zigimg backs the PNG decoder in src/png.zig, which libghostty-vt calls
+    // through its `sys.decode_png` hook; see that file for why the hook is
+    // null without it.
+    const zigimg = b.dependency("zigimg", .{ .target = target, .optimize = optimize }).module("zigimg");
+    mod.addImport("zigimg", zigimg);
     // openpty for the terminal region; see src/pty.zig.
     mod.link_libc = true;
     if (target.result.os.tag == .linux) mod.linkSystemLibrary("util", .{});
@@ -49,6 +54,7 @@ pub fn build(b: *std.Build) void {
     b.step("run", "Run tmm").dependOn(&run.step);
     const test_mod = b.createModule(.{ .root_source_file = b.path("src/model.zig"), .target = target, .optimize = optimize });
     test_mod.addImport("ghostty-vt", ghostty_vt);
+    test_mod.addImport("zigimg", zigimg);
     test_mod.addImport("vaxis", b.dependency("vaxis", .{ .target = target, .optimize = optimize }).module("vaxis"));
     // region.zig reaches pty.zig, which needs openpty; see src/pty.zig.
     test_mod.link_libc = true;

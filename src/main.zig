@@ -12,6 +12,7 @@ const region_mod = @import("region.zig");
 const panes_mod = @import("panes.zig");
 const surface = @import("surface.zig");
 const focuskey = @import("focuskey.zig");
+const png = @import("png.zig");
 pub const panic = std.debug.FullPanic(struct {
     fn call(message: []const u8, address: ?usize) noreturn {
         vaxis.recover();
@@ -86,6 +87,9 @@ const focus_key_hint =
 pub fn main(init: std.process.Init) !void {
     const a = init.gpa;
     const io = init.io;
+    // Before any terminal exists: the hook is read on every PNG transmission
+    // and a terminal built without it drops them.
+    png.install();
     var args = init.minimal.args.iterate();
     _ = args.next();
     var opts: tmux.ServerOptions = .{};

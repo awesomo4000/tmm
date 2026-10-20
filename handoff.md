@@ -869,9 +869,9 @@ Two lifetime notes for whoever extends this:
 - `Pane` pointers are heap-allocated and stable because a `Surface` must not
   move; the map stores pointers for that reason.
 
-Not yet: kitty graphics are parsed and stored per pane but not drawn (Phase
-4), scrollback is not reachable, and only the session's current window is
-composited.
+Since 10/17/2026 the compositor draws the kitty graphics it stores, has its
+own scrollback reachable with the wheel, and follows whichever window the
+session has active rather than the first one it saw.
 
 ### tmm inside tmm is the region's fidelity test
 
@@ -937,10 +937,16 @@ finding all seven.
 
 ### Not yet, in the region
 
-- Kitty graphics are parsed and stored (the storage limit is set) but not drawn.
-  That is the Phase 4 bridge.
-- Scrollback is not reachable; the region shows the viewport only.
 - One region only. Per-pane regions and compositing are Phase 3.
+
+Kitty graphics and scrollback were both listed here and are both done: images
+are drawn (`surface.zig` transmits each stored image once and places it per
+frame, including relative and virtual placements), and `Surface` owns a 4MB
+scrollback the wheel moves through, yielded to a program that asked for mouse
+reporting. PNG transmissions needed one more thing than the drawing --
+`src/png.zig`, since libghostty-vt leaves its decoder hook null in a library
+build -- which is why `tests/images.py` passed for a while without `kitty
+icat` or timg working at all.
 
 ---
 
