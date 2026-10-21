@@ -682,13 +682,25 @@ pub fn main(init: std.process.Init) !void {
                     editor = try Editor.init(a, s.sessions[i]);
                     if (error_text) |e| a.free(e);
                     error_text = null;
+                } else if (compositor) |c| {
+                    // tmm is the client here, so the sidebar navigates it.
+                    c.goTo(s.sessions[i].id, "", "");
+                    if (error_text) |e| a.free(e);
+                    error_text = null;
                 } else if (target) |t| shared.send(io, a, try backend.Request.copy(a, t.client, s.sessions[i].id)) else {
                     if (error_text) |e| a.free(e);
                     error_text = try a.dupe(u8, "Select a display first");
                 }
             },
             .pane => |i| if (snapshot) |s| {
-                if (target) |t| {
+                if (compositor) |c| {
+                    // Same here: send this client to the pane rather than
+                    // asking for a display that does not exist in this mode.
+                    c.goTo(s.panes[i].session, s.panes[i].window, s.panes[i].id);
+                    focus = .region;
+                    if (error_text) |e| a.free(e);
+                    error_text = null;
+                } else if (target) |t| {
                     var request = try backend.Request.copy(a, t.client, s.panes[i].session);
                     errdefer request.deinit(a);
                     request.pane = try a.dupe(u8, s.panes[i].id);

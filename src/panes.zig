@@ -760,6 +760,40 @@ pub const Compositor = struct {
         }
     }
 
+    /// Point this client at a session, a window and a pane, so the sidebar
+    /// can navigate the compositor itself.
+    ///
+    /// In `--panes` mode tmm *is* the client, so there is no separate display
+    /// for the sidebar to drive: clicking a pane used to report "Select a
+    /// display first" and do nothing, because every navigation path assumed
+    /// an ordinary tmux client to send somewhere. These are the same commands
+    /// a tmux binding would run, so tmux answers with `%session-changed`,
+    /// `%session-window-changed` and `%window-pane-changed`, all of which the
+    /// compositor already follows. Nothing here changes tmm's own state
+    /// directly; tmux remains the one deciding, and tmm finds out.
+    ///
+    /// Ids rather than names, which is why no quoting is needed: `$N`, `@N`
+    /// and `%N` cannot contain anything tmux's command parser reacts to.
+    /// Empty parts are skipped, so this serves a session-only navigation too.
+    pub fn goTo(self: *Compositor, session: []const u8, window: []const u8, pane: []const u8) void {
+        var buf: [96]u8 = undefined;
+        if (session.len != 0) {
+            if (control.Command.switchClientBuf(&buf, session)) |cmd| {
+                self.stream.send(cmd) catch {};
+            } else |_| {}
+        }
+        if (window.len != 0) {
+            if (control.Command.selectWindowBuf(&buf, window)) |cmd| {
+                self.stream.send(cmd) catch {};
+            } else |_| {}
+        }
+        if (pane.len != 0) {
+            if (control.Command.selectPaneBuf(&buf, pane)) |cmd| {
+                self.stream.send(cmd) catch {};
+            } else |_| {}
+        }
+    }
+
     pub fn focus(self: *Compositor, pane: []const u8) !void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);

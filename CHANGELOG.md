@@ -2,6 +2,8 @@
 
 ## 10/21/2026
 
+- Let the sidebar navigate tmm itself in `--panes` mode. Clicking a pane reported "Select a display first" and did nothing, because every navigation path assumed a separate tmux client to drive, and in this mode tmm is the client.
+- Named a shifted punctuation key by the character it produces. `prefix )` quietly ran `select-window -t :=9` instead of switching sessions, because a terminal reporting alternate keys sends shift+9 with `9` as the codepoint.
 - Made tmm and tmux agree on which pane has the keyboard. tmm focused whichever pane was created first rather than the one tmux had active, and clicking a pane moved only tmm, so a binding like `prefix z` acted on a pane you were not typing in. Both only became visible once bindings worked at all.
 - Refused `--panes` on the session tmm is running in, which silently collapsed instead. Sizing that session re-tiles the window holding tmm, so tmm shrank itself from 200 columns to 4 and drew no region at all. It now says so before opening the terminal and lists the sessions that would work. No test caught it because every panes harness launched tmm with `$TMUX` unset.
 - Made repeating tmux bindings repeat. Holding ctrl and tapping hjkl to resize after one prefix only moved a column once, and the keys after it went to the program as bytes, where `C-h` is 0x08 and backspaced over the command line. tmm now mirrors the rule tmux applies to `bind -r`, asking the server which keys repeat and how long the window is rather than assuming either.

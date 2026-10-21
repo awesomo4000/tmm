@@ -58,6 +58,28 @@ pub fn name(buf: []u8, key: vaxis.Key) ?[]const u8 {
         return w.buffered();
     }
 
+    // Which character this key actually produced, which is not always its
+    // codepoint. A terminal reporting alternate keys sends shift+9 as
+    // `CSI 57:41;2u` -- base layout `9`, shifted `)` -- and libvaxis puts the
+    // base in `codepoint` with `)` in `shifted_codepoint`. Spelling that from
+    // the codepoint gives tmux `9`, which is bound by default to
+    // `select-window -t :=9`, so `prefix )` silently switched a window
+    // instead of a session. tmux names a key by the character it makes, so
+    // the text the key generated is the first choice and the shifted
+    // codepoint the second.
+    const produced: u21 = blk: {
+        if (key.text) |text| {
+            const view = std.unicode.Utf8View.init(text) catch break :blk key.codepoint;
+            var it = view.iterator();
+            if (it.nextCodepoint()) |cp| {
+                // One character only: anything longer is not a key name.
+                if (it.nextCodepoint() == null and cp >= 0x20 and cp != 0x7f) break :blk cp;
+            }
+        }
+        if (key.mods.shift) if (key.shifted_codepoint) |cp| break :blk cp;
+        break :blk key.codepoint;
+    };
+
     // A single character. tmux's command parser reads the control stream
     // before the key name reaches `send-keys`, and it has its own ideas about
     // punctuation: `#` starts a comment, `;` separates commands, `{` opens a
@@ -67,7 +89,7 @@ pub fn name(buf: []u8, key: vaxis.Key) ?[]const u8 {
     // quotes fail for `'` itself. Alphanumerics are sent bare, because
     // `\a` and `\0` are not the keys `a` and `0`.
     var utf8: [4]u8 = undefined;
-    const len = std.unicode.utf8Encode(key.codepoint, &utf8) catch return null;
+    const len = std.unicode.utf8Encode(produced, &utf8) catch return null;
     const text = utf8[0..len];
     if (len == 1 and !std.ascii.isAlphanumeric(text[0])) w.writeByte('\\') catch return null;
     w.writeAll(text) catch return null;
@@ -302,4 +324,51 @@ test "every name this writes parses back to the key it came from" {
         try std.testing.expectEqual(key.mods.ctrl, back.mods.ctrl);
         try std.testing.expectEqual(key.mods.alt, back.mods.alt);
     }
+}
+
+test "a shifted punctuation key is named by the character it produced" {
+    var buf: [32]u8 = undefined;
+    // What a terminal reporting alternate keys sends for shift+9: the base
+    // layout key is `9` and the shifted key is `)`. Naming it from the
+    // codepoint gives tmux `9`, which is bound by default to
+    // `select-window -t :=9`, so `prefix )` switched a window instead of a
+    // session -- silently, because `9` is a perfectly valid key name.
+    try std.testing.expectEqualStrings("\\)", name(&buf, .{
+        .codepoint = '9',
+        .shifted_codepoint = ')',
+        .text = ")",
+        .mods = .{ .shift = true },
+    }).?);
+    // The same without the text field, which libvaxis fills in itself for
+    // ASCII. The shifted codepoint carries it.
+    try std.testing.expectEqualStrings("\\(", name(&buf, .{
+        .codepoint = '9',
+        .shifted_codepoint = '(',
+        .mods = .{ .shift = true },
+    }).?);
+    // A letter is unaffected: the text and the shifted codepoint agree with
+    // the uppercase character tmux would name.
+    try std.testing.expectEqualStrings("A", name(&buf, .{
+        .codepoint = 'a',
+        .shifted_codepoint = 'A',
+        .text = "A",
+        .mods = .{ .shift = true },
+    }).?);
+    // A ctrl chord produces no text, so the codepoint still decides and the
+    // modifier is spelled rather than folded in.
+    try std.testing.expectEqualStrings("C-h", name(&buf, .{
+        .codepoint = 'h',
+        .mods = .{ .ctrl = true },
+    }).?);
+    // Text longer than one character is not a key name, so it is ignored
+    // rather than sent as one.
+    try std.testing.expectEqualStrings("a", name(&buf, .{
+        .codepoint = 'a',
+        .text = "abc",
+    }).?);
+    // And a named key keeps its name even though it carries text.
+    try std.testing.expectEqualStrings("Enter", name(&buf, .{
+        .codepoint = vaxis.Key.enter,
+        .text = "\r",
+    }).?);
 }

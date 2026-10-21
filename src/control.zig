@@ -312,6 +312,24 @@ pub const Command = struct {
         try w.writeByte('\n');
         return w.buffered();
     }
+    /// Point this client at a session, the way `prefix (` does. tmux answers
+    /// with `%session-changed`, which the compositor follows.
+    pub fn switchClientBuf(buf: []u8, session: []const u8) ![]const u8 {
+        var w: std.Io.Writer = .fixed(buf);
+        try w.writeAll("switch-client -t ");
+        try w.writeAll(session);
+        try w.writeByte('\n');
+        return w.buffered();
+    }
+    /// Make a window the session's current one. Answered with
+    /// `%session-window-changed`.
+    pub fn selectWindowBuf(buf: []u8, window: []const u8) ![]const u8 {
+        var w: std.Io.Writer = .fixed(buf);
+        try w.writeAll("select-window -t ");
+        try w.writeAll(window);
+        try w.writeByte('\n');
+        return w.buffered();
+    }
     /// Seed a pane's current screen: escaped, with background, whole history off.
     pub fn capturePane(alloc: Allocator, pane: []const u8) ![]u8 {
         return std.fmt.allocPrint(alloc, "capture-pane -p -e -t {s}\n", .{pane});
