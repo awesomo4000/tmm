@@ -1,5 +1,13 @@
 # contrib/
 
+## terminal-restore/
+
+Put a terminal back after a full-screen program died without cleaning up --
+the state where moving the mouse spits escape sequences and `reset` does not
+help. Runs bare to fix one, or as a wrapper so it cannot happen again. See
+[terminal-restore/README.md](terminal-restore/README.md), which also covers
+why only a supervising process can do this in every case.
+
 ## agent-status/
 
 Make an agent report what it is doing over OSC 7501, so the tmm sidebar shows
