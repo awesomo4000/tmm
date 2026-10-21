@@ -111,18 +111,39 @@ pub const Compositor = struct {
     /// match what the person configured, and `C-b` is only the default.
     prefix: [2]?tmuxkey.Chord = @splat(null),
 
-    /// True between the prefix key and the key after it, which is the only
-    /// time tmm routes a press to tmux instead of to the pane.
+    /// Where tmm believes tmux has left this client's key table, which is
+    /// what decides whether a press goes to tmux or to the pane.
     ///
-    /// Tracked here rather than read back from tmux because reading it means
-    /// `Stream.request`, which writes a command and then reads the reply that
-    /// follows it; the display thread cannot do that safely while the event
-    /// worker is on the same stream (see `seed`). The cost is that a `-r`
-    /// repeat binding needs the prefix again for each repeat, where a real
-    /// tmux client would hold the table open. Everything else -- custom
-    /// tables from `switch-client -T` included -- works, because tmux is the
-    /// one keeping the table and only the routing decision is local.
-    in_prefix: bool = false,
+    /// Mirrored here rather than read back from tmux, because reading it
+    /// means `Stream.request` -- a write then a read -- and the display
+    /// thread cannot do that safely while the event worker is on the same
+    /// stream (see `seed`). Only this thread touches these fields: `sendKey`
+    /// is reached from the display thread alone.
+    ///
+    /// `repeating` is the state a `-r` binding leaves behind. tmux keeps the
+    /// table at `prefix` for `repeat-time` after running one, so the key can
+    /// be pressed again without the prefix, and every repeat re-arms that
+    /// window -- measured, not assumed: five repeats 500ms apart all ran,
+    /// across 2.5s of a 700ms window. Getting this wrong is not a missing
+    /// convenience: without it the second `C-h` of a resize takes the byte
+    /// path and the pane receives 0x08, and `C-j` would deliver 0x0a to
+    /// whatever is reading there.
+    prefix_state: enum { none, after_prefix, repeating } = .none,
+
+    /// When the current repeat window closes. Only meaningful in `repeating`.
+    repeat_deadline: ?std.Io.Timestamp = null,
+
+    /// The keys in tmux's prefix table that were bound with `-r`, spelled as
+    /// `tmuxkey.name` spells them so the two compare directly. Read from
+    /// `list-keys` at attach, because which keys repeat is the person's
+    /// choice and tmux will say.
+    repeat_keys: std.StringHashMapUnmanaged(void) = .empty,
+
+    /// `repeat-time` and `initial-repeat-time`, in milliseconds, as the
+    /// server reports them. A zero `initial-repeat-time` means the first
+    /// press uses `repeat-time`, which is what tmux documents.
+    repeat_ms: u32 = 500,
+    initial_repeat_ms: u32 = 0,
 
     /// How to reach this server, for the one-shot `capture-pane` that seeds a
     /// pane. Kept because that command must not go down the control stream:
@@ -161,6 +182,9 @@ pub const Compositor = struct {
             alloc.destroy(pane);
         }
         self.panes.deinit(alloc);
+        var repeats = self.repeat_keys.keyIterator();
+        while (repeats.next()) |key| alloc.free(key.*);
+        self.repeat_keys.deinit(alloc);
         if (self.window.len != 0) alloc.free(self.window);
         if (self.active_window.len != 0) alloc.free(self.active_window);
         if (self.focused.len != 0) alloc.free(self.focused);
@@ -441,19 +465,100 @@ pub const Compositor = struct {
     /// exactly how tmm behaved before this existed.
     pub fn loadPrefix(self: *Compositor) void {
         for ([_][]const u8{ "prefix", "prefix2" }, 0..) |opt, i| {
-            var argv: std.ArrayList([]const u8) = .empty;
-            defer argv.deinit(self.alloc);
-            self.serverArgv(&argv) catch return;
-            argv.appendSlice(self.alloc, &.{ "show-options", "-gv", opt }) catch return;
-            const result = std.process.run(self.alloc, self.io, .{
-                .argv = argv.items,
-                .stdout_limit = .limited(256),
-            }) catch continue;
-            defer self.alloc.free(result.stdout);
-            defer self.alloc.free(result.stderr);
-            if (result.term != .exited or result.term.exited != 0) continue;
-            self.prefix[i] = tmuxkey.Chord.parse(std.mem.trim(u8, result.stdout, " \t\r\n"));
+            const value = self.option(opt, 256) orelse continue;
+            defer self.alloc.free(value);
+            self.prefix[i] = tmuxkey.Chord.parse(std.mem.trim(u8, value, " \t\r\n"));
         }
+        for ([_][]const u8{ "repeat-time", "initial-repeat-time" }, 0..) |opt, i| {
+            const value = self.option(opt, 64) orelse continue;
+            defer self.alloc.free(value);
+            const n = std.fmt.parseInt(u32, std.mem.trim(u8, value, " \t\r\n"), 10) catch continue;
+            if (i == 0) self.repeat_ms = n else self.initial_repeat_ms = n;
+        }
+        self.loadRepeatKeys();
+    }
+
+    /// One `show-options -gv` as a one-shot command. Caller frees.
+    fn option(self: *Compositor, name: []const u8, limit: usize) ?[]u8 {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(self.alloc);
+        self.serverArgv(&argv) catch return null;
+        argv.appendSlice(self.alloc, &.{ "show-options", "-gv", name }) catch return null;
+        const result = std.process.run(self.alloc, self.io, .{
+            .argv = argv.items,
+            .stdout_limit = .limited(limit),
+        }) catch return null;
+        self.alloc.free(result.stderr);
+        if (result.term != .exited or result.term.exited != 0) {
+            self.alloc.free(result.stdout);
+            return null;
+        }
+        return result.stdout;
+    }
+
+    /// Learn which prefix-table keys repeat, from `list-keys`.
+    ///
+    /// tmux prints a binding as the `bind-key` command that would recreate
+    /// it, and a repeating one carries `-r`:
+    ///
+    ///     bind-key -r -T prefix C-h     resize-pane -L 1
+    ///     bind-key    -T prefix z       resize-pane -Z
+    ///
+    /// So the set is read rather than guessed, and a binding the person
+    /// changes is picked up by restarting tmm rather than by editing tmm.
+    /// Only the `prefix` table is read: that is where a prefix sequence
+    /// lands, and a `-r` key in a custom table reached by `switch-client -T`
+    /// is not covered.
+    fn loadRepeatKeys(self: *Compositor) void {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(self.alloc);
+        self.serverArgv(&argv) catch return;
+        argv.appendSlice(self.alloc, &.{ "list-keys", "-T", "prefix" }) catch return;
+        const result = std.process.run(self.alloc, self.io, .{
+            .argv = argv.items,
+            // A binding can be a whole display-menu, so this is not small.
+            .stdout_limit = .limited(1 << 20),
+        }) catch return;
+        defer self.alloc.free(result.stdout);
+        defer self.alloc.free(result.stderr);
+        if (result.term != .exited or result.term.exited != 0) return;
+
+        var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+        while (lines.next()) |line| {
+            // A config with more repeating keys than this is not something to
+            // allocate without bound for.
+            if (self.repeat_keys.count() >= 256) return;
+            const key = repeatKeyOf(line) orelse continue;
+            const owned = self.alloc.dupe(u8, key) catch return;
+            self.repeat_keys.put(self.alloc, owned, {}) catch {
+                self.alloc.free(owned);
+                return;
+            };
+        }
+    }
+
+    /// The key a `list-keys` line binds, if that line binds it with `-r`.
+    ///
+    /// Scanned by token rather than by column, because tmux pads the output
+    /// to align it and the padding is not part of the grammar.
+    fn repeatKeyOf(line: []const u8) ?[]const u8 {
+        var tokens = std.mem.tokenizeAny(u8, line, " \t");
+        if (!std.mem.eql(u8, tokens.next() orelse return null, "bind-key")) return null;
+        var repeat = false;
+        // Options come before `-T`; `-r` is the only one that matters here.
+        while (tokens.next()) |token| {
+            if (std.mem.eql(u8, token, "-r")) {
+                repeat = true;
+            } else if (std.mem.eql(u8, token, "-T")) {
+                _ = tokens.next() orelse return null; // the table name
+                const key = tokens.next() orelse return null;
+                return if (repeat) key else null;
+            } else if (token.len != 0 and token[0] != '-') {
+                // Past the options without seeing `-T`: not a form we read.
+                return null;
+            }
+        }
+        return null;
     }
 
     fn seed(self: *Compositor, pane: *Pane) !void {
@@ -605,39 +710,76 @@ pub const Compositor = struct {
     fn routeToTmux(self: *Compositor, key: vaxis.Key, action: surface.Action) bool {
         if (self.prefix[0] == null and self.prefix[1] == null) return false;
 
+        // A repeat window that has run out puts tmux back in `root`, where an
+        // unbound key reaches the pane as it always did. Checked before the
+        // state is read so a lapsed window never routes a key away.
+        if (self.prefix_state == .repeating and self.repeatLapsed()) {
+            self.prefix_state = .none;
+            self.repeat_deadline = null;
+        }
+
         // A release is not a tmux key. Swallowing the one that belongs to a
         // press we routed keeps the pane from seeing half a chord.
-        if (action != .press) return self.in_prefix;
+        if (action != .press) return self.prefix_state != .none;
 
-        const after_prefix = self.in_prefix;
-        if (!after_prefix) {
+        if (self.prefix_state == .none) {
             var is_prefix = false;
             for (self.prefix) |maybe| if (maybe) |chord| {
                 if (chord.matches(key)) is_prefix = true;
             };
             if (!is_prefix) return false;
         }
+        const opening = self.prefix_state == .none;
 
         var buf: [64]u8 = undefined;
         const spelled = tmuxkey.name(&buf, key) orelse {
-            // No tmux spelling for this key. After the prefix that ends the
-            // sequence -- tmux will drop an unbound key the same way -- and
-            // the pane must not be given the byte, or a chord nobody could
-            // bind would type into the shell.
-            self.in_prefix = false;
-            return after_prefix;
+            // No tmux spelling for this key, so tmux would drop it and fall
+            // back to `root`. The pane must not be given the byte either, or
+            // a chord nobody could bind would type into the program.
+            self.prefix_state = .none;
+            self.repeat_deadline = null;
+            return !opening;
         };
 
         var cmd_buf: [96]u8 = undefined;
         const cmd = control.Command.sendKeyNameBuf(&cmd_buf, spelled) catch {
-            self.in_prefix = false;
-            return after_prefix;
+            self.prefix_state = .none;
+            self.repeat_deadline = null;
+            return !opening;
         };
         self.stream.send(cmd) catch {};
-        // tmux moves its own table to `prefix` on the first and back to
-        // `root` on the second, so this only has to follow which one it was.
-        self.in_prefix = !after_prefix;
+
+        if (opening) {
+            // The prefix itself. tmux is now in `prefix` and the next press
+            // is the one it will look up there.
+            self.prefix_state = .after_prefix;
+            self.repeat_deadline = null;
+        } else if (self.repeat_keys.contains(spelled)) {
+            // A `-r` binding. tmux holds the table open, and every repeat
+            // re-arms it, so the deadline is set again here rather than only
+            // on the first one.
+            const window = if (self.prefix_state == .after_prefix and self.initial_repeat_ms != 0)
+                self.initial_repeat_ms
+            else
+                self.repeat_ms;
+            self.prefix_state = .repeating;
+            const now: std.Io.Timestamp = .now(self.io, .awake);
+            self.repeat_deadline = now.addDuration(.{
+                .nanoseconds = @as(i96, window) * std.time.ns_per_ms,
+            });
+        } else {
+            // Anything else ends the sequence, which is what tmux does with
+            // a key bound without `-r` and with one bound to nothing at all.
+            self.prefix_state = .none;
+            self.repeat_deadline = null;
+        }
         return true;
+    }
+
+    fn repeatLapsed(self: *Compositor) bool {
+        const deadline = self.repeat_deadline orelse return true;
+        const now: std.Io.Timestamp = .now(self.io, .awake);
+        return deadline.durationTo(now).nanoseconds > 0;
     }
 
     pub fn sendKey(self: *Compositor, key: vaxis.Key, action: surface.Action) void {
@@ -812,3 +954,36 @@ pub const Compositor = struct {
         };
     }
 };
+
+test "a repeating binding is recognised in what list-keys prints" {
+    // Real lines from `tmux list-keys -T prefix` on tmux 3.8. tmux pads the
+    // output to align it, which is why this is tokenised rather than sliced.
+    try std.testing.expectEqualStrings(
+        "C-h",
+        Compositor.repeatKeyOf("bind-key -r -T prefix C-h     resize-pane -L 1").?,
+    );
+    try std.testing.expectEqualStrings(
+        "M-Up",
+        Compositor.repeatKeyOf("bind-key -r -T prefix M-Up    resize-pane -U 5").?,
+    );
+    // Bound without -r, so it ends a prefix sequence rather than holding the
+    // table open. Not knowing the difference is the whole bug this prevents.
+    try std.testing.expect(Compositor.repeatKeyOf("bind-key    -T prefix z       resize-pane -Z") == null);
+    try std.testing.expect(Compositor.repeatKeyOf("bind-key    -T prefix h       select-pane -L") == null);
+    // A punctuation key is printed escaped, and that is the spelling tmm
+    // sends, so it is also the spelling that has to be stored.
+    try std.testing.expectEqualStrings(
+        "\\;",
+        Compositor.repeatKeyOf("bind-key -r -T prefix \\;      last-pane").?,
+    );
+    // Lines that are not a binding at all.
+    try std.testing.expect(Compositor.repeatKeyOf("") == null);
+    try std.testing.expect(Compositor.repeatKeyOf("something else entirely") == null);
+    try std.testing.expect(Compositor.repeatKeyOf("bind-key -r") == null);
+    try std.testing.expect(Compositor.repeatKeyOf("bind-key -r -T prefix") == null);
+    // A table other than prefix still parses; the caller asked for one table.
+    try std.testing.expectEqualStrings(
+        "C-k",
+        Compositor.repeatKeyOf("bind-key -r -T copy-mode C-k  send-keys -X cursor-up").?,
+    );
+}

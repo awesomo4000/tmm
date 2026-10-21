@@ -76,8 +76,8 @@ const help =
     \\       tmm is the terminal for each pane; tmux still owns the session,
     \\       the processes and the scrollback. Implies the split layout.
     \\       Your tmux prefix works: tmm hands it and the key after it to
-    \\       tmux, which runs your own bindings. A repeat binding needs the
-    \\       prefix again each time. Pane dividers cannot be dragged.
+    \\       tmux, which runs your own bindings, repeat bindings included.
+    \\       Pane dividers cannot be dragged.
     \\--session picks which session --panes shows; the newest by default.
     \\
 ;

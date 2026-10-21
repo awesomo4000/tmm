@@ -2,7 +2,8 @@
 
 ## 10/21/2026
 
-- Made tmux key bindings work in compositor mode. `C-a h` reached the shell as a 0x01 byte and an `h` before, because tmm writes keys as raw bytes and tmux never saw them as client input. A control-mode client has a real key table, and `send-keys -K` looks a key up in it, so tmm reads the configured prefix from the server and hands those two presses to tmux rather than interpreting any binding itself. A `-r` repeat binding still needs the prefix for each repeat.
+- Made repeating tmux bindings repeat. Holding ctrl and tapping hjkl to resize after one prefix only moved a column once, and the keys after it went to the program as bytes, where `C-h` is 0x08 and backspaced over the command line. tmm now mirrors the rule tmux applies to `bind -r`, asking the server which keys repeat and how long the window is rather than assuming either.
+- Made tmux key bindings work in compositor mode. `C-a h` reached the shell as a 0x01 byte and an `h` before, because tmm writes keys as raw bytes and tmux never saw them as client input. A control-mode client has a real key table, and `send-keys -K` looks a key up in it, so tmm reads the configured prefix from the server and hands those two presses to tmux rather than interpreting any binding itself.
 
 ## 10/20/2026
 
