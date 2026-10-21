@@ -297,6 +297,21 @@ pub const Command = struct {
         try w.writeByte('\n');
         return w.buffered();
     }
+    /// Make a pane the session's active one, so tmux agrees with tmm about
+    /// which pane has the keyboard.
+    ///
+    /// Without this the two diverge the moment a pane is clicked: tmm moves
+    /// the keyboard, tmux does not, and every binding afterwards acts on the
+    /// pane tmux still considers active -- `prefix z` zooms a pane you are
+    /// not typing in. tmux answers with `%window-pane-changed`, which the
+    /// compositor already follows, so the two end up agreeing either way.
+    pub fn selectPaneBuf(buf: []u8, pane: []const u8) ![]const u8 {
+        var w: std.Io.Writer = .fixed(buf);
+        try w.writeAll("select-pane -t ");
+        try w.writeAll(pane);
+        try w.writeByte('\n');
+        return w.buffered();
+    }
     /// Seed a pane's current screen: escaped, with background, whole history off.
     pub fn capturePane(alloc: Allocator, pane: []const u8) ![]u8 {
         return std.fmt.allocPrint(alloc, "capture-pane -p -e -t {s}\n", .{pane});

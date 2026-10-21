@@ -389,7 +389,7 @@ pub const Compositor = struct {
         }
         try argv.appendSlice(self.alloc, &.{
             "list-panes", "-t", window, "-F",
-            "#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height}",
+            "#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height} #{pane_active}",
         });
 
         const result = std.process.run(self.alloc, self.io, .{
@@ -402,6 +402,12 @@ pub const Compositor = struct {
 
         var rects: std.ArrayList(layout.PaneRect) = .empty;
         defer rects.deinit(self.alloc);
+        // Which pane tmux has active, so the keyboard starts where tmux
+        // already points rather than at whichever pane happened to be
+        // created first. Without it tmm typed into %0 while tmux considered
+        // %1 active, so every binding acted on a pane other than the one
+        // being typed in until something clicked.
+        var active: ?[]const u8 = null;
         var lines = std.mem.tokenizeAny(u8, result.stdout, "\n");
         while (lines.next()) |line| {
             var fields = std.mem.tokenizeAny(u8, line, " ");
@@ -412,10 +418,14 @@ pub const Compositor = struct {
             const y = std.fmt.parseInt(u32, fields.next() orelse continue, 10) catch continue;
             const w = std.fmt.parseInt(u32, fields.next() orelse continue, 10) catch continue;
             const h = std.fmt.parseInt(u32, fields.next() orelse continue, 10) catch continue;
+            if (fields.next()) |flag| if (std.mem.eql(u8, flag, "1")) {
+                active = id_text;
+            };
             try rects.append(self.alloc, .{ .id = id, .x = x, .y = y, .w = w, .h = h });
         }
         if (rects.items.len == 0) return;
         try self.applyRects(window, rects.items);
+        if (active) |id| self.focus(id) catch {};
     }
 
     /// Apply a layout string: add panes that appeared, drop those that went,
@@ -906,7 +916,17 @@ pub const Compositor = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         const pane = self.paneAtLocked(@intCast(col), @intCast(row)) orelse return;
-        if (mouse.type == .press) self.focusLocked(pane.id) catch {};
+        if (mouse.type == .press) {
+            self.focusLocked(pane.id) catch {};
+            // And tell tmux, so a binding pressed after a click acts on the
+            // pane that was clicked. Fire and forget, like every other
+            // command on the key path; tmux confirms with
+            // `%window-pane-changed`, which `apply` already handles.
+            var buf: [64]u8 = undefined;
+            if (control.Command.selectPaneBuf(&buf, pane.id)) |cmd| {
+                self.stream.send(cmd) catch {};
+            } else |_| {}
+        }
         pane.surface.sendMouse(
             mouse,
             col - @as(i16, @intCast(pane.rect.x)),

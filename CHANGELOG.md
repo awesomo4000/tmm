@@ -2,6 +2,7 @@
 
 ## 10/21/2026
 
+- Made tmm and tmux agree on which pane has the keyboard. tmm focused whichever pane was created first rather than the one tmux had active, and clicking a pane moved only tmm, so a binding like `prefix z` acted on a pane you were not typing in. Both only became visible once bindings worked at all.
 - Refused `--panes` on the session tmm is running in, which silently collapsed instead. Sizing that session re-tiles the window holding tmm, so tmm shrank itself from 200 columns to 4 and drew no region at all. It now says so before opening the terminal and lists the sessions that would work. No test caught it because every panes harness launched tmm with `$TMUX` unset.
 - Made repeating tmux bindings repeat. Holding ctrl and tapping hjkl to resize after one prefix only moved a column once, and the keys after it went to the program as bytes, where `C-h` is 0x08 and backspaced over the command line. tmm now mirrors the rule tmux applies to `bind -r`, asking the server which keys repeat and how long the window is rather than assuming either.
 - Made tmux key bindings work in compositor mode. `C-a h` reached the shell as a 0x01 byte and an `h` before, because tmm writes keys as raw bytes and tmux never saw them as client input. A control-mode client has a real key table, and `send-keys -K` looks a key up in it, so tmm reads the configured prefix from the server and hands those two presses to tmux rather than interpreting any binding itself.
