@@ -43,6 +43,7 @@ run = [
   "python3 tests/panes_exit.py",
   "python3 tests/panes_prefix.py",
   "python3 tests/panes_prefix_repeat.py",
+  "python3 tests/panes_nested.py",
   "python3 tests/exit_clean.py",
   "python3 tests/key_release.py",
   "python3 tests/images.py",

@@ -79,6 +79,8 @@ const help =
     \\       tmux, which runs your own bindings, repeat bindings included.
     \\       Pane dividers cannot be dragged.
     \\--session picks which session --panes shows; the newest by default.
+    \\       Running tmm inside tmux, name a session other than your own:
+    \\       compositing the one tmm sits in would resize tmm itself.
     \\
 ;
 /// Printed under a rejected `--focus-key`, so the fix does not need --help.
@@ -189,6 +191,49 @@ pub fn main(init: std.process.Init) !void {
     try servers.insert(ca, 0, .{ .name = opts.socket_name orelse if (opts.socket_path) |path| std.fs.path.basename(path) else "default", .options = opts });
     if (opts.socket_name == null and opts.socket_path == null)
         try sidebar.discover(ca, io, init.environ_map, init.minimal.environ, &servers);
+    // Compositing the session tmm is running in cannot work: tmm sizes the
+    // session, tmux re-tiles it, and the window being re-tiled holds tmm's
+    // own pane, so tmm shrinks itself a step at a time down to a few columns
+    // and draws no region at all. Caught here, before the terminal is
+    // opened, because the collapse reads as tmm being broken rather than
+    // aimed at the wrong session -- and because the fix is one flag away.
+    if (panes) if (panes_mod.hostSession(a, io, .{
+        .socket = opts.socket_path,
+        .label = opts.socket_name,
+        .session = panes_session,
+    }, init.environ_map)) |host| {
+        defer a.free(host);
+        if (panes_session == null or std.mem.eql(u8, panes_session.?, host)) {
+            var buf: [2048]u8 = undefined;
+            var out = std.Io.File.stderr().writer(io, &buf);
+            try out.interface.print(
+                \\tmm: --panes cannot composite "{s}", the session this tmm is running in.
+                \\Sizing it would re-tile the window holding this pane, which shrinks tmm
+                \\and then shrinks it again. Name another session instead:
+                \\
+            , .{host});
+            if (panes_mod.sessionNames(a, io, .{
+                .socket = opts.socket_path,
+                .label = opts.socket_name,
+            })) |names| {
+                defer {
+                    for (names) |name| a.free(name);
+                    a.free(names);
+                }
+                var other: usize = 0;
+                for (names) |name| {
+                    if (std.mem.eql(u8, name, host)) continue;
+                    try out.interface.print("    tmm --panes --session {s}\n", .{name});
+                    other += 1;
+                }
+                if (other == 0) try out.interface.writeAll(
+                    "    (this server has no other session; create one first)\n",
+                );
+            } else try out.interface.writeAll("    tmm --panes --session NAME\n");
+            try out.interface.flush();
+            std.process.exit(1);
+        }
+    };
     var tty_buf: [4096]u8 = undefined;
     var tty = try vaxis.Tty.init(io, &tty_buf);
     defer tty.deinit();

@@ -59,6 +59,92 @@ pub const Pane = struct {
     }
 };
 
+/// How to reach a server as a one-shot command, appended to `argv`.
+fn serverArgvInto(alloc: Allocator, opts: cmstream.Options, argv: *std.ArrayList([]const u8)) !void {
+    try argv.append(alloc, opts.tmux_bin);
+    if (opts.socket) |socket| {
+        try argv.append(alloc, "-S");
+        try argv.append(alloc, socket);
+    } else if (opts.label) |label| {
+        try argv.append(alloc, "-L");
+        try argv.append(alloc, label);
+    }
+}
+
+/// Run a tmux command and return its trimmed first line, or null. Caller frees.
+fn ask(alloc: Allocator, io: std.Io, opts: cmstream.Options, args: []const []const u8) ?[]u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(alloc);
+    serverArgvInto(alloc, opts, &argv) catch return null;
+    argv.appendSlice(alloc, args) catch return null;
+    const result = std.process.run(alloc, io, .{
+        .argv = argv.items,
+        .stdout_limit = .limited(4096),
+    }) catch return null;
+    alloc.free(result.stderr);
+    defer alloc.free(result.stdout);
+    if (result.term != .exited or result.term.exited != 0) return null;
+    const line = std.mem.trim(u8, result.stdout, " \t\r\n");
+    if (line.len == 0) return null;
+    return alloc.dupe(u8, line) catch null;
+}
+
+/// The session holding the pane tmm itself is running in, when that pane is
+/// on the very server tmm is about to composite. Null otherwise. Caller frees.
+///
+/// Compositing that session cannot work, and fails in a way that looks like
+/// tmm is broken rather than misaimed. tmm sizes the session with
+/// `refresh-client -C`, so tmux re-tiles it; that window contains tmm's own
+/// pane, which therefore shrinks, so tmm recomputes a smaller region and
+/// sizes it down again. Measured from a 200-column pane: 200, 132, 81, 30,
+/// then 4 columns and stuck at the floor, with no region drawn at all.
+///
+/// Both halves have to be checked. `$TMUX_PANE` alone is not enough, because
+/// pane ids are per-server and `%3` exists on every server, so a pane id from
+/// another server would resolve here and name an innocent session. The server
+/// is identified by asking both ends for `#{socket_path}`, which tmux
+/// normalises -- addressing a server through `/private/tmp` still reports
+/// `/tmp` -- so the two strings are comparable where the raw paths are not.
+pub fn hostSession(alloc: Allocator, io: std.Io, opts: cmstream.Options, env: *const std.process.Environ.Map) ?[]u8 {
+    const pane = env.get("TMUX_PANE") orelse return null;
+    const tmux_env = env.get("TMUX") orelse return null;
+    // `$TMUX` is socket,pid,session; only the socket is wanted here.
+    const socket_end = std.mem.indexOfScalar(u8, tmux_env, ',') orelse tmux_env.len;
+    const socket = tmux_env[0..socket_end];
+    if (socket.len == 0) return null;
+
+    const ours = ask(alloc, io, opts, &.{ "display-message", "-p", "#{socket_path}" }) orelse return null;
+    defer alloc.free(ours);
+    const theirs = ask(alloc, io, .{ .socket = socket, .tmux_bin = opts.tmux_bin }, &.{
+        "display-message", "-p", "#{socket_path}",
+    }) orelse return null;
+    defer alloc.free(theirs);
+    if (!std.mem.eql(u8, ours, theirs)) return null;
+
+    return ask(alloc, io, opts, &.{ "display-message", "-p", "-t", pane, "#{session_name}" });
+}
+
+/// Session names on this server, newest first, for telling someone which one
+/// to ask for. Caller frees the slice and each name.
+pub fn sessionNames(alloc: Allocator, io: std.Io, opts: cmstream.Options) ?[][]u8 {
+    const text = ask(alloc, io, opts, &.{
+        "list-sessions", "-F", "#{session_name}",
+    }) orelse return null;
+    defer alloc.free(text);
+    var list: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (list.items) |name| alloc.free(name);
+        list.deinit(alloc);
+    }
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const name = std.mem.trim(u8, line, " \t\r\n");
+        if (name.len == 0) continue;
+        list.append(alloc, alloc.dupe(u8, name) catch return null) catch return null;
+    }
+    return list.toOwnedSlice(alloc) catch null;
+}
+
 pub const Compositor = struct {
     io: std.Io,
     alloc: Allocator,
@@ -443,14 +529,7 @@ pub const Compositor = struct {
     /// that matters, and nothing on the keystroke path is shared.
     /// How to reach this server as a one-shot command, into `argv`.
     fn serverArgv(self: *Compositor, argv: *std.ArrayList([]const u8)) !void {
-        try argv.append(self.alloc, self.opts.tmux_bin);
-        if (self.opts.socket) |socket| {
-            try argv.append(self.alloc, "-S");
-            try argv.append(self.alloc, socket);
-        } else if (self.opts.label) |label| {
-            try argv.append(self.alloc, "-L");
-            try argv.append(self.alloc, label);
-        }
+        return serverArgvInto(self.alloc, self.opts, argv);
     }
 
     /// Ask tmux which key is its prefix, so `sendKey` can recognise it.
