@@ -278,6 +278,25 @@ pub const Command = struct {
         try out.append(alloc, '\n');
         return out.toOwnedSlice(alloc);
     }
+    /// Send a key to *this client* rather than to a pane, so tmux looks it up
+    /// in the client's own key table and runs whatever is bound there.
+    ///
+    /// This is the whole of tmm's tmux-binding support: `-K` is documented as
+    /// sending "to target-client, so they are looked up in the client's key
+    /// table", and a control-mode client has one like any other. No `-c` is
+    /// needed because a command written on the stream is already attributed to
+    /// that client. `name` must already be in tmux's spelling and escaped for
+    /// its command parser; `tmuxkey.name` is what produces it.
+    ///
+    /// On the caller-supplied buffer for the same reason `sendKeysHexBuf` is:
+    /// this is reached from the key path.
+    pub fn sendKeyNameBuf(buf: []u8, key_name: []const u8) ![]const u8 {
+        var w: std.Io.Writer = .fixed(buf);
+        try w.writeAll("send-keys -K ");
+        try w.writeAll(key_name);
+        try w.writeByte('\n');
+        return w.buffered();
+    }
     /// Seed a pane's current screen: escaped, with background, whole history off.
     pub fn capturePane(alloc: Allocator, pane: []const u8) ![]u8 {
         return std.fmt.allocPrint(alloc, "capture-pane -p -e -t {s}\n", .{pane});
@@ -385,6 +404,11 @@ test "command encoders format tmux lines" {
     const ws = try Command.refreshWindowSize(a, "@3", 80, 24);
     defer a.free(ws);
     try std.testing.expectEqualStrings("refresh-client -C @3:80x24\n", ws);
+    var kbuf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "send-keys -K C-a\n",
+        try Command.sendKeyNameBuf(&kbuf, "C-a"),
+    );
     const keys = try Command.sendKeysHex(a, "%4", "hi\x1b");
     defer a.free(keys);
     try std.testing.expectEqualStrings("send-keys -t %4 -H 68 69 1b\n", keys);

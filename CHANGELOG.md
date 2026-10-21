@@ -1,5 +1,9 @@
 # Changelog
 
+## 10/21/2026
+
+- Made tmux key bindings work in compositor mode. `C-a h` reached the shell as a 0x01 byte and an `h` before, because tmm writes keys as raw bytes and tmux never saw them as client input. A control-mode client has a real key table, and `send-keys -K` looks a key up in it, so tmm reads the configured prefix from the server and hands those two presses to tmux rather than interpreting any binding itself. A `-r` repeat binding still needs the prefix for each repeat.
+
 ## 10/20/2026
 
 - Decoded the PNG that `kitty icat` and timg transmit, which was being dropped: libghostty-vt leaves its decoder hook null in a library build, so every `f=100` transmission failed to load while chafa worked because it sends raw RGBA.

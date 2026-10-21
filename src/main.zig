@@ -75,6 +75,9 @@ const help =
     \\--panes composites a session's panes on the right instead of a shell.
     \\       tmm is the terminal for each pane; tmux still owns the session,
     \\       the processes and the scrollback. Implies the split layout.
+    \\       Your tmux prefix works: tmm hands it and the key after it to
+    \\       tmux, which runs your own bindings. A repeat binding needs the
+    \\       prefix again each time. Pane dividers cannot be dragged.
     \\--session picks which session --panes shows; the newest by default.
     \\
 ;
@@ -226,6 +229,9 @@ pub fn main(init: std.process.Init) !void {
         if (compositor) |c| {
             c.uaf_log = init.environ_map.get("TMM_UAF_LOG");
             c.unsafe_lookup = init.environ_map.get("TMM_UNSAFE_PANE_LOOKUP") != null;
+            // Before any key can be pressed: without it every key goes to
+            // the pane as a byte and no tmux binding fires.
+            c.loadPrefix();
         }
     }
     var compositor_task = if (compositor) |c|

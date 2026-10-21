@@ -31,6 +31,7 @@ const cmstream = @import("cmstream.zig");
 const layout = @import("layout.zig");
 const surface = @import("surface.zig");
 const sidebar = @import("sidebar.zig");
+const tmuxkey = @import("tmuxkey.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -102,6 +103,26 @@ pub const Compositor = struct {
     cell_height: u32 = 0,
 
     input_log: ?[]const u8 = null,
+
+    /// tmux's `prefix` and `prefix2`, as read from the server at attach, or
+    /// null for a prefix that is unset or that tmm cannot recognise.
+    ///
+    /// Asked for rather than assumed: a prefix is the one binding that has to
+    /// match what the person configured, and `C-b` is only the default.
+    prefix: [2]?tmuxkey.Chord = @splat(null),
+
+    /// True between the prefix key and the key after it, which is the only
+    /// time tmm routes a press to tmux instead of to the pane.
+    ///
+    /// Tracked here rather than read back from tmux because reading it means
+    /// `Stream.request`, which writes a command and then reads the reply that
+    /// follows it; the display thread cannot do that safely while the event
+    /// worker is on the same stream (see `seed`). The cost is that a `-r`
+    /// repeat binding needs the prefix again for each repeat, where a real
+    /// tmux client would hold the table open. Everything else -- custom
+    /// tables from `switch-client -T` included -- works, because tmux is the
+    /// one keeping the table and only the routing decision is local.
+    in_prefix: bool = false,
 
     /// How to reach this server, for the one-shot `capture-pane` that seeds a
     /// pane. Kept because that command must not go down the control stream:
@@ -396,9 +417,8 @@ pub const Compositor = struct {
     /// block and the capture's own reply is left to be parsed as events.
     /// Panes appear at human pace, so a fork and exec here costs nothing
     /// that matters, and nothing on the keystroke path is shared.
-    fn seed(self: *Compositor, pane: *Pane) !void {
-        var argv: std.ArrayList([]const u8) = .empty;
-        defer argv.deinit(self.alloc);
+    /// How to reach this server as a one-shot command, into `argv`.
+    fn serverArgv(self: *Compositor, argv: *std.ArrayList([]const u8)) !void {
         try argv.append(self.alloc, self.opts.tmux_bin);
         if (self.opts.socket) |socket| {
             try argv.append(self.alloc, "-S");
@@ -407,6 +427,39 @@ pub const Compositor = struct {
             try argv.append(self.alloc, "-L");
             try argv.append(self.alloc, label);
         }
+    }
+
+    /// Ask tmux which key is its prefix, so `sendKey` can recognise it.
+    ///
+    /// A one-shot command rather than the control stream, for the reason
+    /// `seed` is one: a request writes and then reads, and this runs while
+    /// the display thread may be writing keys to the same stdin. It happens
+    /// once, at startup, so a fork and an exec cost nothing.
+    ///
+    /// A server that cannot be asked leaves both null, which disables the
+    /// prefix path and leaves every key going to the pane as raw bytes --
+    /// exactly how tmm behaved before this existed.
+    pub fn loadPrefix(self: *Compositor) void {
+        for ([_][]const u8{ "prefix", "prefix2" }, 0..) |opt, i| {
+            var argv: std.ArrayList([]const u8) = .empty;
+            defer argv.deinit(self.alloc);
+            self.serverArgv(&argv) catch return;
+            argv.appendSlice(self.alloc, &.{ "show-options", "-gv", opt }) catch return;
+            const result = std.process.run(self.alloc, self.io, .{
+                .argv = argv.items,
+                .stdout_limit = .limited(256),
+            }) catch continue;
+            defer self.alloc.free(result.stdout);
+            defer self.alloc.free(result.stderr);
+            if (result.term != .exited or result.term.exited != 0) continue;
+            self.prefix[i] = tmuxkey.Chord.parse(std.mem.trim(u8, result.stdout, " \t\r\n"));
+        }
+    }
+
+    fn seed(self: *Compositor, pane: *Pane) !void {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(self.alloc);
+        try self.serverArgv(&argv);
         try argv.appendSlice(self.alloc, &.{ "capture-pane", "-p", "-e", "-t", pane.id });
 
         const result = std.process.run(self.alloc, self.io, .{
@@ -542,7 +595,53 @@ pub const Compositor = struct {
         self.focused = try self.alloc.dupe(u8, pane);
     }
 
+    /// Give tmux a key to look up in its own key table, rather than giving
+    /// the pane a byte. Returns false when this key is not tmm's business.
+    ///
+    /// Two presses go this way and no others: the prefix, and the one key
+    /// after it. Everything else takes the raw `send-keys -H` path below,
+    /// which is what keeps the kitty keyboard protocol and the keystroke
+    /// deadline intact -- nothing here runs while someone is typing.
+    fn routeToTmux(self: *Compositor, key: vaxis.Key, action: surface.Action) bool {
+        if (self.prefix[0] == null and self.prefix[1] == null) return false;
+
+        // A release is not a tmux key. Swallowing the one that belongs to a
+        // press we routed keeps the pane from seeing half a chord.
+        if (action != .press) return self.in_prefix;
+
+        const after_prefix = self.in_prefix;
+        if (!after_prefix) {
+            var is_prefix = false;
+            for (self.prefix) |maybe| if (maybe) |chord| {
+                if (chord.matches(key)) is_prefix = true;
+            };
+            if (!is_prefix) return false;
+        }
+
+        var buf: [64]u8 = undefined;
+        const spelled = tmuxkey.name(&buf, key) orelse {
+            // No tmux spelling for this key. After the prefix that ends the
+            // sequence -- tmux will drop an unbound key the same way -- and
+            // the pane must not be given the byte, or a chord nobody could
+            // bind would type into the shell.
+            self.in_prefix = false;
+            return after_prefix;
+        };
+
+        var cmd_buf: [96]u8 = undefined;
+        const cmd = control.Command.sendKeyNameBuf(&cmd_buf, spelled) catch {
+            self.in_prefix = false;
+            return after_prefix;
+        };
+        self.stream.send(cmd) catch {};
+        // tmux moves its own table to `prefix` on the first and back to
+        // `root` on the second, so this only has to follow which one it was.
+        self.in_prefix = !after_prefix;
+        return true;
+    }
+
     pub fn sendKey(self: *Compositor, key: vaxis.Key, action: surface.Action) void {
+        if (self.routeToTmux(key, action)) return;
         if (self.unsafe_lookup) {
             // The pattern this replaced: look the pane up, release the lock,
             // then use the pointer. The wait only makes a window that is

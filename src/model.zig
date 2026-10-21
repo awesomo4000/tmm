@@ -214,6 +214,7 @@ test {
     _ = @import("focuskey.zig");
     _ = @import("png.zig");
     _ = @import("reported.zig");
+    _ = @import("tmuxkey.zig");
     _ = @import("status.zig");
     _ = @import("control.zig");
     _ = @import("layout.zig");
