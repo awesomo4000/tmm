@@ -962,3 +962,54 @@ tmux kitty tracking issue #4902 (closed in favor of #5445); link-pane #719
 (TODO forever — why we don't rewrite tmux's model); hide/unhide pane #3047.
 libghostty: ghostty-vt module PR #8840; render-state image exposure #12111
 (closed, not planned); Ghostling (kitty renderer reference, ~270 LoC).
+
+## 9. Open: the exit-time leak report that will not reproduce
+
+Reported 10/21/2026 from a real `--shell` run: roughly 27 `DebugAllocator`
+leak reports on exit. Recorded here because the same group was seen once
+before and written off as unexplained, and a second sighting with a fuller
+trace is worth keeping.
+
+The reported sites, by count: 13 in ghostty's `base64_scalar.decode`, 3 in
+libtmux `which`, 3 at `backend.zig:900` (`Tracker.update`), 3 around
+`backend.zig:640` (`needsCapture`) and `collectWithCache`, and a handful in
+`ArrayList.ensureTotalCapacity`.
+
+**Do not chase those line numbers.** The traces interleave frames that cannot
+belong to one call: `std.fs.path.join` is shown calling `parseIntWithSign`,
+and `needsCapture` is shown allocating at its own `return` statement. The
+binary is a Debug build, so this is not inlining from optimisation; the
+likely cause is the unwinder walking `std.Io.Threaded` async frames. Treat
+the named lines as symbols near the truth, not as the truth.
+
+Fifteen scenarios failed to reproduce it, all with noisy panes, because
+`tests/exit_clean.py` established that idle shells hide this whole class of
+bug: `--shell` and sidebar-only; quitting at 2s, 3.5s, 6s and 10s; quitting
+immediately, before the first snapshot; the shell exiting first by `exit` and
+by ctrl-D, then `q`; resizing first; 0, 3 and 12 kitty images transmitted
+through the region; three sessions of panes running a process named `claude`
+so agent detection, `Tracker` and `needsCapture` all allocate; and pane churn
+so tracks go stale. Every one exited clean.
+
+Ruled out by reading, so nobody repeats it:
+
+- `sidebar.discover` leaks its `directory` and every skipped socket `path`,
+  but into the config arena, which `main` deinits. Harmless as written, and
+  a real leak the day anyone passes it a different allocator.
+- `Tracker.update`'s `stale` list has its `defer stale.deinit(self.a)`.
+- `Region.destroy` does reach `surface.deinit` and `terminal.deinit`, so the
+  region's kitty images are freed, and `vx.deinit` runs.
+- `postEvent` parks in `not_full.wait` when the queue is full, and a cancel
+  there surfaces as an error the worker already handles by destroying the
+  snapshot it was holding.
+- The exit defer orders `stopping`, `wake`, the three cancels, `clearShared`
+  and then `drain`, so the only snapshot producer is joined before the queue
+  is emptied. The server-switch path at `main.zig:607` repeats it correctly.
+
+Two things would make the next sighting diagnosable rather than another dead
+end. `drain` swallows an error from `loop.tryEvent()` and stops on it, so a
+failed queue lock would silently leave events undrained -- worth making loud
+even though it is not known to happen. And `init.gpa` is std's allocator with
+its default frame count; a leak this rare is worth more frames, which means
+`main` owning its allocator rather than taking the one `std.process.Init`
+hands it.
