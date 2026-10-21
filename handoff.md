@@ -991,6 +991,13 @@ through the region; three sessions of panes running a process named `claude`
 so agent detection, `Tracker` and `needsCapture` all allocate; and pane churn
 so tracks go stale. Every one exited clean.
 
+Five more were tried after the report that the server had gone away first,
+which was the suspected trigger: `kill-server` under a running tmm, killing
+every session one by one, `detach-client -a`, the same in sidebar-only mode,
+and quitting 0.2s after the server died rather than waiting. All clean too,
+in `--shell` and sidebar alike. So losing the control stream is not it, and
+tmm tears down correctly when the thing it is a view over disappears.
+
 Ruled out by reading, so nobody repeats it:
 
 - `sidebar.discover` leaks its `directory` and every skipped socket `path`,
