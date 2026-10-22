@@ -1,9 +1,8 @@
 # Toolchain pinning for tmm. See https://mise.jdx.dev
 #
 # Keep this in step with build.zig.zon's minimum_zig_version; they move
-# together. The control-mode compositor work targets 0.16.0 and goes to 0.17.0
-# once the dependency tree lands there (libvaxis PR 370, ghostty PR 14519, and
-# a 0.17 branch of libtmux).
+# together. tmm targets 0.16.0 and goes to 0.17.0 once its dependencies land
+# there (libvaxis PR 370 and a 0.17 branch of libtmux).
 #
 # Deliberately no ZIG_GLOBAL_CACHE_DIR here: packages currently resolve out of
 # zig-pkg/, which is not a Zig convention and is not set by any env var or
@@ -20,73 +19,18 @@ run = [
   # leave tmux servers and directories behind when they do not exit normally.
   "sh tools/clean-test-leftovers.sh",
   "zig build test",
-  # Early, while the machine is still quiet. These assert a worst case, and a
-  # worst case is sensitive to load: run late, after the suites that spawn
-  # dozens of processes, they reported 13ms where the same build reports
-  # 0.3ms on its own. Loosening the budget was the wrong answer, because the
-  # regression this catches showed a 0.2ms median with a 29ms worst case.
-  "env TMM_WCET_MS=25 python3 tests/keylag.py",
-  "env TMM_WCET_MS=25 python3 tests/keylag_native.py",
-  "python3 tests/keyscope.py --self-test",
   "python3 tests/control_mode.py",
   "python3 tests/reconcile_live.py",
   "python3 tests/reconcile_stress.py",
   "python3 tests/measure_queries.py",
   "python3 tests/follow.py",
-  "python3 tests/split_shell.py",
-  "python3 tests/focus_key.py",
-  "python3 tests/compositor.py",
-  "python3 tests/compositor_windows.py",
-  "python3 tests/scrollback.py",
-  "python3 tests/pane_churn.py",
-  "python3 tests/pane_use_after_free.py",
-  "python3 tests/panes_exit.py",
-  "python3 tests/panes_prefix.py",
-  "python3 tests/panes_prefix_repeat.py",
-  "python3 tests/panes_nested.py",
-  "python3 tests/panes_focus_sync.py",
-  "python3 tests/panes_navigate.py",
   "python3 tests/exit_clean.py",
-  "python3 tests/key_release.py",
-  "python3 tests/images.py",
-  "python3 tests/images_png.py",
-  "python3 tests/images_relative.py",
-  "python3 tests/images_virtual.py",
-  "python3 tests/size_report.py",
-  "python3 tests/program_status.py",
-  "python3 tests/sidebar_status.py",
-  "python3 tests/agent_hooks.py",
   "python3 tests/agent_hooks_sidebar.py",
-]
-
-[tasks.latency]
-description = "Latency on a quiet machine: the product, then the floors under it"
-run = [
-  "sh tools/clean-test-leftovers.sh",
-  "python3 tests/keylag.py",
-  "python3 tests/keylag_native.py",
-  "python3 tests/pty_floor.py",
-  "python3 tests/tmux_floor.py",
 ]
 
 [tasks.clean-tests]
 description = "Remove tmux servers and directories a killed test run left in /tmp"
 run = ["sh tools/clean-test-leftovers.sh"]
-
-[tasks.deps-check]
-description = "How far behind is the vendored libghostty-vt, and what changed"
-run = ["sh tools/deps-check.sh"]
-
-[tasks.floors]
-description = "Reference latency floors: the machine and tmux, measured alone"
-run = [
-  "python3 tests/pty_floor.py",
-  "python3 tests/tmux_floor.py",
-]
-
-[tasks.image-emission]
-description = "What image viewers emit bare, inside tmux, and inside a tmm region"
-run = ["python3 tools/image-emission.py"]
 
 [tasks.probe]
 description = "Control-mode probe: mise run probe -- -S <socket> -t <session>"

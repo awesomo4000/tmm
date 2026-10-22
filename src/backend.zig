@@ -735,9 +735,9 @@ const output_wake_interval_ms: i64 = 500;
 /// Floor sampling rate. Control events make the UI react immediately, but some
 /// state is not derivable from events yet: agent completion needs two
 /// consecutive idle samples, and an idle agent emits no %output to trigger the
-/// second one. Until status.zig derives agent state from live %output (Phase 2
-/// of the compositor plan), the collector still needs a periodic tick. This
-/// restores exactly the old cadence as a floor; event wakes sit on top of it.
+/// second one. Until status.zig derives agent state from live %output, the
+/// collector still needs a periodic tick. This restores exactly the old
+/// cadence as a floor; event wakes sit on top of it.
 pub fn heartbeatWorker(io: std.Io, shared: *Shared) void {
     while (!shared.stopping.load(.acquire)) {
         io.sleep(.fromMilliseconds(500), .awake) catch return;

@@ -3,21 +3,18 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-"""A reported state reaches the sidebar with no compositor running.
+"""A reported state reaches the sidebar from a Claude Code hook.
 
-tests/agent_hooks.py covers `--panes`, where tmm runs a terminal per pane and
-parses OSC 7501 out of the pane's own bytes. That is the minority of how tmm
-is used: it is a view over tmux, and in sidebar-only and `--shell` mode it
-talks to tmux over control mode and never sees pane output at all. The
-in-band route therefore reaches nothing in those modes, and `%output` on a
-control stream only covers the session that client is attached to anyway --
-both measured, both recorded in src/reported.zig.
+tmm is a view over tmux: it talks to tmux over control mode and never sees a
+pane's own output, so an OSC 7501 written to a pane's tty reaches nothing it
+reads. `%output` on a control stream would only cover the session that client
+is attached to anyway -- measured, and recorded in src/reported.zig.
 
-So a reporter also writes the record to the `@tmm_status` pane option, which
-tmm reads for every pane on the server in the `list-panes -a` query it
-already makes. This asserts that path, in the two modes the other test does
-not cover, and across two sessions -- because covering one session is exactly
-what the in-band route could have managed.
+So a reporter writes the record to the `@tmm_status` pane option, which tmm
+reads for every pane on the server in the `list-panes -a` query it already
+makes. This asserts that path through the real hook, run detached as Claude
+Code runs it, across two sessions -- because covering only the attached
+session is exactly what an in-band route could have managed.
 
 What this does NOT change is the heuristic. Screen detection still runs and
 still decides every pane that reported nothing; the last case here is the
@@ -43,7 +40,9 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from screen import Screen  # noqa: E402
 
-ROWS, COLS, SPLIT = 44, 170, 34
+# The sidebar fills the window; rows are read from its left part only, which
+# is where a row's indicator and name are drawn.
+ROWS, COLS, READ_COLS = 44, 170, 34
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'zig-out/bin/tmm'
 HOOK = ROOT / 'contrib/agent-status/claude-status-hook.py'
@@ -94,7 +93,7 @@ def run_mode(argv, label):
                         os.write(fd, b'\x1b[0n')
 
         def sidebar():
-            return [line[:SPLIT] for line in display.lines()]
+            return [line[:READ_COLS] for line in display.lines()]
 
         def until(predicate, limit=15):
             deadline = time.monotonic() + limit
@@ -132,7 +131,7 @@ def run_mode(argv, label):
             # terminal of tmm's to touch. The option carried it.
             fire(pane_a, 'UserPromptSubmit', user_input='hi')
             assert until(lambda: any('●' in l for l in sidebar())), \
-                ('%s: a report did not reach the sidebar without a compositor'
+                ('%s: a report did not reach the sidebar'
                  % label, [l for l in sidebar() if l.strip()][-12:])
 
             # The option really is what carried it, not a coincidence.
@@ -170,8 +169,8 @@ def run_mode(argv, label):
             assert any('bash' in l or 'shell' in l for l in rows), \
                 ('%s: a pane that reported nothing lost its inferred row'
                  % label, rows[-12:])
-            print('ok (%s): a reported state reached the sidebar with no '
-                  'compositor, in two sessions, and a pane that reported '
+            print('ok (%s): a reported state reached the sidebar '
+                  'in two sessions, and a pane that reported '
                   'nothing kept its inferred row' % label)
         finally:
             for sig in (signal.SIGTERM, signal.SIGKILL):
@@ -192,12 +191,7 @@ def run_mode(argv, label):
 def main():
     if not BINARY.exists():
         raise SystemExit('build first: zig build')
-    # Pure sidebar mode: no terminal of tmm's own anywhere.
     run_mode([], 'sidebar')
-    # And split mode, where tmm has a region but it is a shell on tmm's own
-    # pty rather than a tmux pane, so the panes are still only reachable
-    # through tmux.
-    run_mode(['--shell', '--split', str(SPLIT)], '--shell')
 
 
 if __name__ == '__main__':

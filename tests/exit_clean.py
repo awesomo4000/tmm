@@ -34,8 +34,6 @@ import termios
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import keys  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'zig-out/bin/tmm'
@@ -71,21 +69,18 @@ def main():
     time.sleep(1.0)
     try:
         failures = []
-        for label, extra, delay in (('sidebar only', [], 1.0),
-                                    ('with a region', ['--shell', '--split', '30'], 2.0)):
-            count, sites = run(root, extra, delay)
-            if count:
-                failures.append('%s: %d leak report(s) at %s'
-                                % (label, count, ', '.join(sorted(sites))))
+        count, sites = run(root, 1.0)
+        if count:
+            failures.append('%d leak report(s) at %s'
+                            % (count, ', '.join(sorted(sites))))
     finally:
         subprocess.run(['tmux', '-L', 'noisy', 'kill-server'], capture_output=True, env=env)
     if failures:
         raise SystemExit('tmm leaked at exit:\n  ' + '\n  '.join(failures))
-    print('ok: tmm exits without leaking the queues the control worker filled, '
-          'with the sidebar alone and with a region')
+    print('ok: tmm exits without leaking the queues the control worker filled')
 
 
-def run(root, extra, delay):
+def run(root, delay):
     pid, fd = pty.fork()
     if pid == 0:
         for stale in ('TMUX', 'TMUX_PANE'):
@@ -93,7 +88,7 @@ def run(root, extra, delay):
         os.environ.update({'TERM': 'xterm-256color', 'COLORTERM': 'truecolor',
                            'TMUX_TMPDIR': root, 'SHELL': '/bin/sh'})
         try:
-            os.execv(str(BINARY), [str(BINARY), '-L', 'noisy'] + extra)
+            os.execv(str(BINARY), [str(BINARY), '-L', 'noisy'])
         except Exception:
             os._exit(127)
     fcntl.ioctl(fd, termios.TIOCSWINSZ,
@@ -113,12 +108,6 @@ def run(root, extra, delay):
         # Early on purpose: the leak is what the collector has not consumed,
         # so a late quit finds the queues already empty and proves nothing.
         if not asked and time.monotonic() - start > delay:
-            # With a region the shell holds the keyboard at startup, so q
-            # would go to the shell: the focus key first, then quit from
-            # the sidebar.
-            if extra:
-                os.write(fd, keys.FOCUS)
-                time.sleep(0.3)
             os.write(fd, b'q')
             asked = True
     try:

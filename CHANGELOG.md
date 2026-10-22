@@ -1,5 +1,10 @@
 # Changelog
 
+## 10/22/2026
+
+- Returned tmm to being a sidebar controller for tmux. The `--shell` region and the `--panes` compositor are gone, with libghostty-vt, the PNG decoder, the tmux key spelling and the focus key: about 4,700 of 8,800 lines, and the binary from 10.4 MB to 3.2 MB. Getting kitty graphics through a stock tmux meant reimplementing the tmux client one piece at a time, so the terminal work moved to a separate compositor that owns its own pseudoterminals and runs tmux in a window. What stays is what tmm is used for: reading tmux over control mode, the sidebar and its status icons, agent detection, and reported status through the `@tmm_status` pane option.
+- Tagged the last commit with both modes `compositor-final`, kept as a stable reference because that code is being adapted elsewhere. `handoff.md`, the compositor's implementation notes, is read from there now.
+
 ## 10/21/2026
 
 - Let the sidebar navigate tmm itself in `--panes` mode. Clicking a pane reported "Select a display first" and did nothing, because every navigation path assumed a separate tmux client to drive, and in this mode tmm is the client.

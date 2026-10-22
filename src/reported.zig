@@ -2,28 +2,26 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! An OSC 7501 record as a tmux pane option, for the modes with no terminal.
+//! An OSC 7501 record as a tmux pane option.
 //!
-//! The in-band route only reaches the compositor. tmm parses OSC 7501 out of a
-//! pane's bytes, and it only has those bytes under `--panes`, where it runs a
-//! terminal per pane; in sidebar-only and `--shell` mode it talks to tmux over
-//! control mode and never sees pane output. Worse, `%output` on a control
-//! stream arrives only for the session that client is attached to, so even
-//! decoding it would cover one session out of however many the sidebar lists.
-//! Measured, not assumed: a control client attached to session A is told
-//! nothing about output in session B.
+//! tmm reads tmux over control mode and never sees a pane's own bytes, so an
+//! OSC 7501 written to a pane cannot reach it in band. `%output` on a control
+//! stream would not help either: it arrives only for the session that client
+//! is attached to, so decoding it would cover one session out of however many
+//! the sidebar lists. Measured, not assumed: a control client attached to
+//! session A is told nothing about output in session B.
 //!
-//! So a reporter also writes the record to a tmux pane option, `@tmm_status`,
-//! which tmm reads for every pane on the server in the `list-panes -a` query it
+//! So a reporter writes the record to a tmux pane option, `@tmm_status`, which
+//! tmm reads for every pane on the server in the `list-panes -a` query it
 //! already makes. tmm has read pane options for agent state for a while
 //! (`@agent_state` and friends), so this is the established channel here rather
 //! than a new one; what is new is carrying the whole OSC 7501 vocabulary over
 //! it instead of a bare state word, so `error`, a blocked kind, a percentage
-//! and a title all survive outside the compositor.
+//! and a title all survive.
 //!
 //! The payload is byte for byte the one the escape sequence carries, which is
-//! the point of this module: one vocabulary, two transports, one parser. A
-//! reporter formats a record once and sends it both ways.
+//! the point of this module: one vocabulary and one parser, whichever way a
+//! reporter sends it.
 
 const std = @import("std");
 const sidebar = @import("sidebar.zig");

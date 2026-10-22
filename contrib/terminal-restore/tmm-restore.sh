@@ -12,7 +12,7 @@
 # Or wrap a program so the terminal is restored however that program ends,
 # which is the only way to cover a kill that cannot be caught:
 #
-#     tmm-restore.sh tmm --panes
+#     tmm-restore.sh tmm
 #
 # The modes below are set by the program, not by the shell, and they live in
 # the terminal emulator rather than in any process. So when a program dies

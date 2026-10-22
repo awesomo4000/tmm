@@ -5,12 +5,11 @@ Put a terminal back after a full-screen program died without cleaning up.
 The symptom is unmistakable: the shell comes back and works, but moving the
 mouse over the window spits escape sequences, or keys arrive as garbage, or
 the screen is still the alternate one. tmm turns on mouse tracking and the
-kitty keyboard protocol when a region or the compositor starts forwarding
-input, and turns them off on the way out. If it never gets to the way out,
-the terminal keeps them.
+kitty keyboard protocol when it starts, and turns them off on the way out. If
+it never gets to the way out, the terminal keeps them.
 
     tmm-restore.sh                 # fix a terminal that is already a mess
-    tmm-restore.sh tmm --panes     # or wrap, so it cannot happen again
+    tmm-restore.sh tmm             # or wrap, so it cannot happen again
 
 ## Why `reset` does not do it
 

@@ -12,18 +12,6 @@
             .url = "git+https://github.com/rockorager/libvaxis#f37c42a3b324131c131d066767968e1f5b976453",
             .hash = "vaxis-0.6.0-BWNV_AIQDADLTDo5jCn27pBWJBvi-sTrSkSKwITQWgUV",
         },
-        // Already in the graph by way of vaxis, and declared here as well so
-        // the PNG decoder in src/png.zig can import it: a transitive
-        // dependency is not addressable from this build. Same URL and hash as
-        // vaxis uses, so there is one copy and one version of it.
-        .zigimg = .{
-            .url = "git+https://github.com/zigimg/zigimg#d695acd97c02e57bb151e8f659d1280f5cd6ca70",
-            .hash = "zigimg-0.1.0-8_eo2oyaFwBZwJpmqPkCfVXWBrHcqbYwmrp1I6bTD3lI",
-        },
-        .ghostty_vt = .{
-            .url = "vendor/libghostty-vt-source.tar.gz",
-            .hash = "ghostty-1.3.2-dev-5UdBC7HSMwHbw-f09Zh-LAvAH-H-Wmt9wIlix37EQB3b",
-        },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "src", "vendor", "LICENSE", "README.md", "THIRD_PARTY_NOTICES.md", "licenses" },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "LICENSE", "README.md", "THIRD_PARTY_NOTICES.md", "licenses" },
 }

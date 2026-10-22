@@ -10,13 +10,13 @@ const tmux = @import("libtmux");
 pub const Server = struct { name: []const u8, options: tmux.ServerOptions };
 pub const Action = union(enum) { server: usize, display: usize, session: usize, pane: usize, new_session, blink };
 
-/// What a program in a pane said about itself (OSC 7501), as opposed to what
-/// reading its screen suggested.
+/// What a program in a pane said about itself (OSC 7501, carried to tmm as
+/// the `@tmm_status` pane option), as opposed to what reading its screen
+/// suggested.
 ///
-/// Carries no slices on purpose: the records live behind the owning
-/// surface's lock, and a slice handed out here would outlive the lookup. The
-/// title is copied into the struct for that reason rather than referenced.
-/// The label beside the indicator still comes from the pane's command.
+/// The title is copied into the struct rather than referenced, so a record
+/// never borrows from the snapshot it was parsed out of. The label beside the
+/// indicator still comes from the pane's command.
 pub const Reported = struct {
     /// Longest title a row has space for beside the name and the indicator.
     pub const title_max = 24;
@@ -47,18 +47,6 @@ pub const Reported = struct {
     }
 };
 
-/// How the sidebar asks what a pane reported. Null for a mode with no
-/// terminal of its own, where nothing can be observed in band.
-pub const Status = struct {
-    ctx: ?*anyopaque,
-    get: *const fn (ctx: ?*anyopaque, pane_id: []const u8) ?Reported,
-
-    fn nothing(_: ?*anyopaque, _: []const u8) ?Reported {
-        return null;
-    }
-
-    pub const none: Status = .{ .ctx = null, .get = nothing };
-};
 pub const Row = struct {
     text: []const u8,
     key: []const u8 = "",
@@ -68,7 +56,7 @@ pub const Row = struct {
     heading: bool = false,
     continuation: bool = false,
 };
-pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snapshot: ?*backend.Snapshot, target: ?backend.Request, label: ?[]const u8, home: ?[]const u8, reported: Status) ![]Row {
+pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snapshot: ?*backend.Snapshot, target: ?backend.Request, label: ?[]const u8, home: ?[]const u8) ![]Row {
     var list: std.ArrayList(Row) = .empty;
     try list.append(a, .{ .text = "servers", .heading = true });
     try list.append(a, .{ .text = "" });
@@ -123,14 +111,10 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
                 // The detector says as much about itself: quiet output is
                 // never a completion, a transition between polls is missed,
                 // and an unrecognised screen stays unknown. A report has none
-                // of those failure modes.
-                // In band first, then the pane option. The compositor's copy
-                // is the fresher of the two when both exist -- it was parsed
-                // out of the pane's own bytes as they arrived, where the
-                // option is only as new as the last query -- and outside the
-                // compositor the in-band route sees nothing at all.
-                const said = reported.get(reported.ctx, pane.id) orelse
-                    reported_opt.parse(pane.reported);
+                // of those failure modes. It arrives as a pane option rather
+                // than in band, because tmm reads tmux over control mode and
+                // never sees a pane's own bytes; see src/reported.zig.
+                const said = reported_opt.parse(pane.reported);
                 const state = if (said) |r| r.indicator() else m.agentIndicator(pane.state);
                 const is_agent = pane.agent.len > 0 or said != null;
                 const pane_active = active and std.mem.eql(u8, pane.id, s.focused_pane);

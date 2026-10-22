@@ -9,28 +9,6 @@ pub fn build(b: *std.Build) void {
     const mod = b.createModule(.{ .root_source_file = b.path("src/main.zig"), .target = target, .optimize = optimize });
     mod.addImport("libtmux", b.dependency("libtmux", .{}).module("libtmux"));
     mod.addImport("vaxis", b.dependency("vaxis", .{ .target = target, .optimize = optimize }).module("vaxis"));
-    // libghostty-vt: escape parsing + terminal/screen state, one Terminal per
-    // tmux pane for the control-mode compositor. Kitty graphics is enabled by
-    // default in its build options (only forced off on freestanding targets).
-    // simd=false: ghostty defaults SIMD on, which links libc++. Zig 0.16.0 cannot
-    // build its own bundled libcxx for aarch64-macos (undeclared INFINITY in
-    // __random/clamp_to_integral.h), so the C++ path breaks the build. Without
-    // SIMD the module is pure Zig, which is also what makes it dependency-free.
-    // Revisit when Zig ships a working libcxx.
-    const ghostty_vt = b.dependency("ghostty_vt", .{
-        .target = target,
-        .optimize = optimize,
-        .simd = false,
-    }).module("ghostty-vt");
-    mod.addImport("ghostty-vt", ghostty_vt);
-    // zigimg backs the PNG decoder in src/png.zig, which libghostty-vt calls
-    // through its `sys.decode_png` hook; see that file for why the hook is
-    // null without it.
-    const zigimg = b.dependency("zigimg", .{ .target = target, .optimize = optimize }).module("zigimg");
-    mod.addImport("zigimg", zigimg);
-    // openpty for the terminal region; see src/pty.zig.
-    mod.link_libc = true;
-    if (target.result.os.tag == .linux) mod.linkSystemLibrary("util", .{});
     const exe = b.addExecutable(.{ .name = "tmm", .root_module = mod });
     b.installArtifact(exe);
     // Development probe for the control-mode stream. Not installed; run with
@@ -42,23 +20,11 @@ pub fn build(b: *std.Build) void {
     b.step("cmprobe", "Run the control-mode probe").dependOn(&probe_run.step);
     b.getInstallStep().dependOn(&b.addInstallArtifact(probe, .{}).step);
 
-    // Timestamping endpoint for the latency harness. Installed, because
-    // tests/keylag.py runs it as the program whose keystrokes are timed.
-    const keyprobe_mod = b.createModule(.{ .root_source_file = b.path("src/keyprobe.zig"), .target = target, .optimize = optimize });
-    keyprobe_mod.link_libc = true;
-    const keyprobe = b.addExecutable(.{ .name = "keyprobe", .root_module = keyprobe_mod });
-    b.installArtifact(keyprobe);
-
     const run = b.addRunArtifact(exe);
     if (b.args) |args| run.addArgs(args);
     b.step("run", "Run tmm").dependOn(&run.step);
     const test_mod = b.createModule(.{ .root_source_file = b.path("src/model.zig"), .target = target, .optimize = optimize });
-    test_mod.addImport("ghostty-vt", ghostty_vt);
-    test_mod.addImport("zigimg", zigimg);
     test_mod.addImport("vaxis", b.dependency("vaxis", .{ .target = target, .optimize = optimize }).module("vaxis"));
-    // region.zig reaches pty.zig, which needs openpty; see src/pty.zig.
-    test_mod.link_libc = true;
-    if (target.result.os.tag == .linux) test_mod.linkSystemLibrary("util", .{});
     const tests = b.addTest(.{ .root_module = test_mod });
     b.step("test", "Test record parsing and target identity").dependOn(&b.addRunArtifact(tests).step);
 }

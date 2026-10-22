@@ -10,10 +10,10 @@
 # sidebar row for that pane shows the reported state. A terminal that does not
 # know OSC 7501 ignores it, so this is safe to leave installed anywhere.
 #
-# Sent twice, by two routes, because neither reaches every tmm mode: in band to
-# the pane tty, which only the compositor reads, and out of band as the
-# `@tmm_status` pane option, which tmm reads for every pane in every mode. See
-# the README beside this file.
+# Sent twice. tmm reads the `@tmm_status` pane option, for every pane on the
+# server; the escape sequence goes to the pane tty as well, because that is the
+# protocol and a terminal that reads it sees the record when the agent runs
+# outside tmux. See the README beside this file.
 #
 # A report is an addition to tmm screen detector, never a replacement: that
 # detector needs no cooperation from anything and keeps running for every pane
@@ -87,20 +87,20 @@ for opt in "$@"; do
     if [ -z "$payload" ]; then payload=$opt; else payload="$payload:$opt"; fi
 done
 
-# Two transports for the one record, because neither reaches every mode.
+# Two transports for the one record.
 #
-# In band, to the pane tty: this is the protocol, and it is what the compositor
-# reads -- parsed out of the pane's own bytes as they arrive, with no query in
-# between. One write, so the sequence cannot be torn in half by another process
-# writing to the same pane between the introducer and the terminator.
+# In band, to the pane tty: this is the protocol itself. Inside tmux it goes
+# nowhere, since tmux consumes an OSC it does not implement, but outside tmux a
+# terminal that reads OSC 7501 sees it. One write, so the sequence cannot be
+# torn in half by another process writing to the same pane between the
+# introducer and the terminator.
 printf '\033]7501;%s\033\\' "$payload" > "$tty" 2>/dev/null || true
 
-# Out of band, as a pane option: the in-band route only reaches tmm under
-# `--panes`, and even a tmm that decoded the control stream would be told about
-# output in the session its client is attached to and no other. The option is
-# read for every pane on the server in the query tmm already makes, so sidebar
-# and `--shell` mode see the record too. The payload is the same text either
-# way, parsed by src/reported.zig.
+# Out of band, as a pane option: this is what tmm reads. tmm never sees a
+# pane's own output, and a control client is told about output only in the
+# session it is attached to. The option is read for every pane on the server in
+# the query tmm already makes. The payload is the same text either way, parsed
+# by src/reported.zig.
 #
 # `state=clear` removes the record rather than setting one, so the option is
 # unset instead of being left holding a state nothing stands behind.
