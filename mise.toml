@@ -26,6 +26,8 @@ run = [
   "python3 tests/follow.py",
   "python3 tests/exit_clean.py",
   "python3 tests/agent_hooks_sidebar.py",
+  "python3 tests/claude_hook.py",
+  "python3 tests/reported_lifetime.py",
 ]
 
 [tasks.clean-tests]

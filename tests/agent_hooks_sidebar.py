@@ -111,6 +111,8 @@ def run_mode(argv, label):
             env['TMUX'] = '%s,0,0' % socket
             env['TMUX_PANE'] = pane
             env['TMM_REPORT_TMUX'] = TMUX
+            # The hook keeps per-session state in TMPDIR; keep it in here.
+            env['TMPDIR'] = root
             proc = subprocess.run(
                 [sys.executable, str(HOOK)],
                 input=json.dumps(payload).encode(),
@@ -126,6 +128,19 @@ def run_mode(argv, label):
             pane_b = tmux('display-message', '-p', '-t', 'beta',
                           '#{pane_id}').strip()
             assert pane_a and pane_b, 'no panes to report from'
+
+            # Something has to be running in each pane, as Claude Code is when
+            # it reports. A record whose pane is back at its shell's prompt
+            # ends there, as the specification says, so a hook fired at an
+            # idle shell would be reporting for a program that is not running.
+            for pane in (pane_a, pane_b):
+                tmux('send-keys', '-t', pane, 'sleep 31337', 'Enter')
+            def running():
+                listed = tmux('list-panes', '-a', '-F', '#{pane_current_command}')
+                return listed.split().count('sleep') == 2
+            if not until(running, 5):
+                raise AssertionError(('the stand-in agents never started',
+                                      tmux('list-panes', '-a', '-F', '#{pane_current_command}')))
 
             # The hook never touched a terminal: in this mode there is no
             # terminal of tmm's to touch. The option carried it.
@@ -166,7 +181,9 @@ def run_mode(argv, label):
             # pane never reported, and its row is still drawn from what tmm
             # worked out by itself.
             rows = [l for l in sidebar() if l.strip()]
-            assert any('bash' in l or 'shell' in l for l in rows), \
+            # The cleared pane falls back to its plain command, `sleep`, with
+            # no reported indicator beside it.
+            assert any(l.strip() == 'sleep' for l in rows), \
                 ('%s: a pane that reported nothing lost its inferred row'
                  % label, rows[-12:])
             print('ok (%s): a reported state reached the sidebar '

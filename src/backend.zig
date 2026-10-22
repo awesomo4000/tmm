@@ -333,6 +333,7 @@ pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Reque
     for (snapshot.panes, pane_rows) |*pane, record| {
         const root_pid = std.fmt.parseInt(u32, record[8], 10) catch 0;
         const process = m.processAgentInfo(processes, root_pid);
+        pane.at_prompt = m.atPrompt(processes, root_pid);
         pane.run_identity = try std.fmt.allocPrint(a, "{s}:{d}:{s}", .{ record[8], if (process) |info| info.pid else root_pid, record[9] });
         if (pane.agent.len > 0) {
             pane.agent_source = "metadata";

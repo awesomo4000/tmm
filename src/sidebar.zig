@@ -114,7 +114,9 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
                 // of those failure modes. It arrives as a pane option rather
                 // than in band, because tmm reads tmux over control mode and
                 // never sees a pane's own bytes; see src/reported.zig.
-                const said = reported_opt.parse(pane.reported);
+                // As it stands now rather than as written: a record whose
+                // writer is gone, with the pane back at its prompt, ends.
+                const said = reported_opt.current(pane.reported, pane.at_prompt);
                 const state = if (said) |r| r.indicator() else m.agentIndicator(pane.state);
                 const is_agent = pane.agent.len > 0 or said != null;
                 const pane_active = active and std.mem.eql(u8, pane.id, s.focused_pane);

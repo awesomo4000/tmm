@@ -2,6 +2,10 @@
 
 ## 10/22/2026
 
+- Ended a reported status when its writer is gone. `@tmm_status` stayed until something cleared it, so an agent killed with `kill -9` read as working forever. tmm now drops a `working`, `blocked` or `idle` record once the pane's own shell runs nothing, read from the process table it already has, and keeps `done` and `error`, as the specification says.
+- Brought the status parser to revision 0.4 of the protocol. A report with a bad title, message or id, or over a limit, is discarded whole instead of drawn without the bad part; `kind` and `progress` count only with the states they belong to. A title longer than the row was dropped rather than cut, and the test meant to show it cut passed on the empty string that left.
+- Fixed three faults in the Claude Code hook found by comparing it with tuios. Notifications were matched on the human-readable `message` instead of `notification_type`, so they never fired. Approving a permission quickly left `!` showing, because only the next tool call could end a block and the rate limit could drop it. And `Stop` reported idle where the protocol means `done`.
+- Recorded how tuios integrates its agent harnesses and implements OSC 7501, in `notes/tuios.md`.
 - Returned tmm to being a sidebar controller for tmux. The `--shell` region and the `--panes` compositor are gone, with libghostty-vt, the PNG decoder, the tmux key spelling and the focus key: about 4,700 of 8,800 lines, and the binary from 10.4 MB to 3.2 MB. Getting kitty graphics through a stock tmux meant reimplementing the tmux client one piece at a time, so the terminal work moved to a separate compositor that owns its own pseudoterminals and runs tmux in a window. What stays is what tmm is used for: reading tmux over control mode, the sidebar and its status icons, agent detection, and reported status through the `@tmm_status` pane option.
 - Tagged the last commit with both modes `compositor-final`, kept as a stable reference because that code is being adapted elsewhere. `handoff.md`, the compositor's implementation notes, is read from there now.
 

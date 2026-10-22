@@ -66,6 +66,15 @@ protocol, it costs one write, and a terminal that reads OSC 7501 picks it up
 when the agent runs outside tmux. Inside tmux it goes nowhere, because tmux
 consumes an OSC it does not implement.
 
+A record lasts as long as the program that wrote it, as the protocol says.
+Once the pane is back at its own shell's prompt, tmm stops showing a
+`working`, `blocked` or `idle` record, so an agent that crashes without
+sending its clear does not read as working forever; `done` and `error` stay.
+One consequence when trying the reporter by hand: `tmm-report.sh
+state=working` typed at a prompt shows nothing, because by the time tmm
+looks the pane is at its prompt again. Run something alongside it, or report
+`done`.
+
 Nothing here is a failure mode when tmm is not up. The emitter exits 0 and
 silently with no tmux, with a stale pane id, and with nothing reading the pane.
 Forty reports into a pane running a full-screen TUI leave its display byte for
@@ -93,15 +102,36 @@ existing `hooks` array rather than replacing it.
 | Event | Reported |
 | --- | --- |
 | `UserPromptSubmit` | `working` |
-| `PreToolUse` | `working`, with the tool name, at most once a second |
-| `PermissionRequest` | `blocked`, `kind=permission` |
+| `PreToolUse` | `working`, with the tool name; at most once a second while already working |
+| `PermissionRequest` | `blocked`, `kind=permission`, with the tool name |
+| `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`, `ElicitationResult` | `working`, only from `blocked`: the prompt was answered |
 | `Notification` `permission_prompt` | `blocked`, `kind=permission` |
-| `Notification` `elicitation_dialog` | `blocked`, `kind=question` |
-| `Notification` `idle_prompt`, `agent_needs_input` | `idle` |
-| `Notification` `agent_completed` | `done` |
-| `Stop` | `idle` |
+| `Notification` `elicitation_dialog`, `elicitation_url_dialog`, `agent_needs_input` | `blocked`, `kind=question` |
+| `Notification` `idle_prompt` | `idle`, only from `working` |
+| `Stop` | `done` |
 | `StopFailure` | `error` |
 | `SessionEnd` | `clear` |
+
+A Notification is mapped by its `notification_type`. Its `message` is the
+sentence a person reads, so an earlier version that keyed on `message` never
+matched a real payload; only a release old enough to send no type is read from
+its text, for the two messages it is known to send.
+
+The tool events after a prompt are what take a pane off `blocked` once you
+answer. They fire on every tool call, so the hook remembers the state it last
+reported, per session in `TMPDIR`, and in the ordinary case reads that one
+small file and does nothing else. Before them only the next `PreToolUse` could
+end a block, and the rate limit could drop it, so approving quickly left `!`
+showing.
+
+`Stop` is `done` because the protocol's `done` means finished with a result
+you have not looked at, which is what the end of a turn is. Reporting `idle`
+hid the completion that tmm's screen detector would otherwise have marked,
+since a report always outranks it.
+
+The mapping follows tuios's Claude Code integration, which cites Claude Code's
+hook documentation for each event; `notes/tuios.md` in the repository compares
+the two.
 
 Anything else is ignored on purpose. A report replaces a record completely, so
 mapping an event whose meaning is unclear would overwrite a known state with a

@@ -89,12 +89,22 @@ def main():
         def marker_rows():
             return [i for i, line in enumerate(screen.lines()) if MARKER in line]
 
-        def row_of(label):
-            """The sidebar row showing `label`, which the fixture makes unique."""
-            for i, line in enumerate(screen.lines()):
-                if label in line:
-                    return i
-            raise AssertionError(('row not on screen', label, screen.lines()))
+        def row_of(label, limit=15):
+            """The sidebar row showing `label`, which the fixture makes unique.
+
+            Waited for rather than read once. The first snapshot can take
+            longer than any fixed pause on a loaded machine: a single read
+            three seconds after launch failed in a full suite run, right after
+            a test that spawns dozens of processes, and passed alone.
+            """
+            deadline = time.monotonic() + limit
+            while True:
+                for i, line in enumerate(screen.lines()):
+                    if label in line:
+                        return i
+                if time.monotonic() >= deadline:
+                    raise AssertionError(('row not on screen', label, screen.lines()))
+                pump(0.3)
 
         def settle(expect_row, what, limit=8):
             deadline = time.monotonic() + limit

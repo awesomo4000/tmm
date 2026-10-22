@@ -58,8 +58,10 @@ pub const Client = struct {
 pub const Session = struct { id: []const u8, name: []const u8, path: []const u8 };
 /// `reported` is the OSC 7501 record a reporter wrote to the `@tmm_status`
 /// pane option, still as the payload text; see src/reported.zig for why it
-/// arrives as a pane option rather than in band.
-pub const Pane = struct { session: []const u8, window: []const u8, id: []const u8, cwd: []const u8, command: []const u8, agent: []const u8, state: []const u8, status: []const u8, activity: []const u8 = "", reported: []const u8 = "", agent_source: []const u8 = "none", status_source: []const u8 = "unknown", status_rule: []const u8 = "", run_identity: []const u8 = "", completion: u64 = 0, unread: bool = false, interrupted: bool = false };
+/// arrives as a pane option rather than in band. `at_prompt` is whether the
+/// pane's own shell runs nothing, which ends an in-progress record; see
+/// `atPrompt`.
+pub const Pane = struct { session: []const u8, window: []const u8, id: []const u8, cwd: []const u8, command: []const u8, agent: []const u8, state: []const u8, status: []const u8, activity: []const u8 = "", reported: []const u8 = "", at_prompt: bool = false, agent_source: []const u8 = "none", status_source: []const u8 = "unknown", status_rule: []const u8 = "", run_identity: []const u8 = "", completion: u64 = 0, unread: bool = false, interrupted: bool = false };
 
 /// Strip terminal controls from display text without changing internal IDs.
 pub fn display(alloc: Allocator, value: []const u8) ![]const u8 {
@@ -139,6 +141,73 @@ pub fn processAgentInfo(processes: []const Process, root: u32) ?struct { name: [
     }
     return null;
 }
+/// Whether a process name is an interactive shell. A login shell is listed by
+/// `ps` with a leading `-` (`-bash`), and `comm` may be a full path, so both
+/// are stripped before comparing.
+pub fn isShellName(command: []const u8) bool {
+    var name = std.fs.path.basename(command);
+    if (name.len > 0 and name[0] == '-') name = name[1..];
+    inline for (.{ "sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "yash", "nu", "elvish", "xonsh", "pwsh", "ion", "osh" }) |shell| {
+        if (std.mem.eql(u8, name, shell)) return true;
+    }
+    return false;
+}
+
+/// Whether a pane is sitting at its own shell's prompt: its root process is a
+/// shell, and nothing runs under it.
+///
+/// This is how tmm sees the moment the specification ties a program-status
+/// record's end to. A terminal drops `working` and `blocked` when the program
+/// exits or the next prompt starts (OSC 133 A); tmm never sees a pane's bytes,
+/// so it has no OSC 133, but a shell with no children is a shell at its
+/// prompt. Structural rather than by the foreground's name, because a
+/// reporter running as `sh build.sh` has a shell's name and is very much
+/// alive -- it is a child of the pane's shell, so the pane is not at a prompt.
+///
+/// False whenever the answer is not known, so a missing process table or a
+/// root that has already gone never drops a record. A pane whose root is the
+/// program itself (`tmux new-window claude`) is never at a prompt either,
+/// which keeps that program's record for as long as the pane lives.
+pub fn atPrompt(processes: []const Process, root: u32) bool {
+    if (root == 0) return false;
+    var found = false;
+    for (processes) |p| {
+        if (p.parent == root) return false;
+        if (p.pid == root) {
+            if (!isShellName(p.command)) return false;
+            found = true;
+        }
+    }
+    return found;
+}
+test "a pane is at its prompt only when its own shell runs nothing" {
+    const a = std.testing.allocator;
+    const p = try parseProcesses(a,
+        \\10 1 -bash
+        \\11 10 claude
+        \\20 1 /opt/homebrew/bin/bash
+        \\30 1 -zsh
+        \\31 30 sh
+        \\32 31 make
+        \\40 1 claude
+        \\50 1 vim
+    );
+    defer a.free(p);
+    // An agent under the shell: not at a prompt.
+    try std.testing.expect(!atPrompt(p, 10));
+    // A shell with nothing under it, named by full path: at its prompt.
+    try std.testing.expect(atPrompt(p, 20));
+    // A script running as `sh` under a login zsh: a shell's name, still alive.
+    try std.testing.expect(!atPrompt(p, 30));
+    // A pane whose root is the program itself is never at a prompt.
+    try std.testing.expect(!atPrompt(p, 40));
+    try std.testing.expect(!atPrompt(p, 50));
+    // Unknown is never "at a prompt": a root that has gone, or no table.
+    try std.testing.expect(!atPrompt(p, 99));
+    try std.testing.expect(!atPrompt(&.{}, 20));
+    try std.testing.expect(!atPrompt(p, 0));
+}
+
 pub const Indicator = struct { symbol: []const u8, color: u8 };
 pub fn agentIndicator(state: []const u8) Indicator {
     const end = std.mem.indexOfScalar(u8, state, ':') orelse state.len;

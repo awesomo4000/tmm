@@ -180,6 +180,11 @@ These carry into the cleanup:
    accepted with any state, where the spec ignores them outside
    `blocked`/`working`. The key and value grammars are not checked.
 
+All six were fixed on 10/22/2026, in the commit after these notes: the hook
+by `tests/claude_hook.py`, the lifetime by `tests/reported_lifetime.py`, and
+the parser by the unit tests in `src/reported.zig`. Each test was run against
+the code before the fix and fails there.
+
 Not wrong, but different: tmm keeps one record per pane, since the pane option
 is a single string, where the spec has an id hierarchy. The emitter only ever
 writes the root record, so nothing is lost today.
