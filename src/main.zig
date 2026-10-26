@@ -174,6 +174,14 @@ pub fn main(init: std.process.Init) !void {
     var pressed: ?[]const u8 = null;
     defer if (pressed) |p| a.free(p);
     var offset: usize = 0;
+    // Sessions folded to their name, by session id. Owned keys; a session
+    // that has gone simply never matches again.
+    var folded: std.StringHashMapUnmanaged(void) = .empty;
+    defer {
+        var keys = folded.keyIterator();
+        while (keys.next()) |k| a.free(k.*);
+        folded.deinit(a);
+    }
     var editor: ?Editor = null;
     defer if (editor) |*e| e.deinit(a);
     var error_text: ?[]const u8 = null;
@@ -270,6 +278,9 @@ pub fn main(init: std.process.Init) !void {
                     if (mouse.type == .release) {
                         if (mouse.button == .left) if (index) |i| if (pressed) |p| {
                             if (std.mem.eql(u8, p, rows[i].key)) action = rows[i].action;
+                            if (action) |chosen| if (chosen == .session and mouse.col < sidebar.fold_width) {
+                                action = .{ .fold = chosen.session };
+                            };
                         };
                         if (pressed) |p| a.free(p);
                         pressed = null;
@@ -327,7 +338,7 @@ pub fn main(init: std.process.Init) !void {
                     var i = cursor orelse if (down) rows.len - 1 else 0;
                     for (0..rows.len) |_| {
                         i = if (down) (i + 1) % rows.len else (i + rows.len - 1) % rows.len;
-                        if (rows[i].action != null and !rows[i].continuation) {
+                        if (rows[i].action != null) {
                             cursor = i;
                             break;
                         }
@@ -336,6 +347,9 @@ pub fn main(init: std.process.Init) !void {
                 }
                 if (key.matches(vaxis.Key.enter, .{})) if (cursor) |c| {
                     action = rows[c].action;
+                };
+                if (key.matches(vaxis.Key.space, .{})) if (cursor) |c| if (rows[c].action) |chosen| if (chosen == .session) {
+                    action = .{ .fold = chosen.session };
                 };
             },
         }
@@ -404,6 +418,13 @@ pub fn main(init: std.process.Init) !void {
                     error_text = try a.dupe(u8, "Select a display first");
                 }
             },
+            .fold => |i| if (snapshot) |s| {
+                if (folded.fetchRemove(s.sessions[i].id)) |entry| a.free(entry.key) else {
+                    const id = try a.dupe(u8, s.sessions[i].id);
+                    errdefer a.free(id);
+                    try folded.put(a, id, {});
+                }
+            },
             .new_session => if (target == null) {
                 if (error_text) |e| a.free(e);
                 error_text = try a.dupe(u8, "Select a display first");
@@ -419,7 +440,7 @@ pub fn main(init: std.process.Init) !void {
         };
         _ = layout_arena.reset(.retain_capacity);
         const fa = layout_arena.allocator();
-        rows = try sidebar.rows(fa, servers.items, current_server, snapshot, target, label, init.environ_map.get("HOME"));
+        rows = try sidebar.rows(fa, servers.items, current_server, snapshot, target, label, init.environ_map.get("HOME"), &folded);
         if (editor) |edit| if (edit.create) {
             for (rows, 0..) |row, i| if (row.action != null and row.action.? == .new_session and i + 1 < rows.len) {
                 rows[i + 1].key = edit.key;
@@ -437,7 +458,9 @@ pub fn main(init: std.process.Init) !void {
         var natural: u16 = new_button_col + new_button_text.len;
         for (rows) |row| {
             const safe = try m.display(fa, row.text);
-            natural = @max(natural, win.gwidth(safe) +| 1);
+            var width = win.gwidth(safe) +| 1;
+            if (row.detail.len > 0) width +|= win.gwidth(try m.display(fa, row.detail)) +| 1;
+            natural = @max(natural, width);
         }
         sidebar_width = win.width;
         sidebar_height = win.height;
@@ -465,7 +488,7 @@ pub fn main(init: std.process.Init) !void {
             };
             if (row.action != null and row.action.? == .new_session) {
                 const heading_win = win.child(.{ .width = @min(win.width, new_button_col) });
-                draw(heading_win, fa, i + 2, row.text, .{ .bold = true, .ul_style = .single });
+                draw(heading_win, fa, i + 2, row.text, .{ .bold = true });
                 const button = win.child(.{ .x_off = @min(win.width, new_button_col), .width = @min(win.width -| new_button_col, new_button_text.len) });
                 draw(button, fa, i + 2, new_button_text, .{
                     .bg = if (highlighted) .{ .rgb = .{ 38, 43, 49 } } else .default,
@@ -474,10 +497,9 @@ pub fn main(init: std.process.Init) !void {
                 });
                 continue;
             }
-            const selected = row.active or (row.continuation and offset + i > 0 and rows[offset + i - 1].active);
             const background: vaxis.Cell.Color = if (highlighted)
                 .{ .rgb = .{ 38, 43, 49 } }
-            else if (selected)
+            else if (row.active)
                 .{ .rgb = .{ 27, 35, 43 } }
             else
                 .default;
@@ -485,18 +507,25 @@ pub fn main(init: std.process.Init) !void {
                 const rectangle = win.child(.{ .y_off = @intCast(i + 2), .width = column_width, .height = 1 });
                 rectangle.fill(.{ .style = .{ .bg = background } });
             }
-            draw(win, fa, i + 2, row.text, .{
+            // A folded session with a finished result is green whatever
+            // else it is: that is the one thing the fold has to show.
+            const color: u8 = if (row.done) (if (highlighted) 10 else 2) else if (row.active or (highlighted and !mouse_cursor)) 14 else if (highlighted) (if (row.color < 8) row.color + 8 else 7) else row.color;
+            const text_style: vaxis.Cell.Style = .{
                 .bg = background,
-                .fg = .{ .index = if (row.active or (highlighted and !mouse_cursor)) 14 else if (highlighted) (if (row.color < 8) row.color + 8 else 7) else row.color },
-                .bold = (highlighted and !mouse_cursor) or row.active or row.heading,
-                .ul_style = if (row.heading) .single else .off,
-            });
+                .fg = .{ .index = color },
+                .bold = (highlighted and !mouse_cursor) or row.active or row.heading or row.done,
+            };
+            draw(win, fa, i + 2, row.text, text_style);
+            if (row.detail.len > 0) {
+                const after = win.gwidth(m.display(fa, row.text) catch row.text) +| 1;
+                if (after < win.width) draw(win.child(.{ .x_off = after }), fa, i + 2, row.detail, .{ .bg = background, .fg = .{ .index = 8 } });
+            }
         }
         if (win.height >= 2) draw(win, fa, win.height - 2, error_text orelse "", .{ .fg = .{ .index = 1 } });
         if (win.height >= 1) draw(win, fa, win.height - 1, if (editor) |edit|
             if (edit.pending) "saving..." else "Enter save  Esc cancel"
         else
-            "j/k move  q quit", .{ .fg = .{ .index = 8 } });
+            "j/k move  space fold  q quit", .{ .fg = .{ .index = 8 } });
 
         // Wait out the rest of the frame budget, and hand over the moment
         // input arrives: a frame rendered late is invisible, and the key
@@ -525,7 +554,7 @@ fn mouseHit(rows: []const sidebar.Row, offset: usize, mouse: vaxis.Mouse, width:
     const i = offset + @as(usize, @intCast(mouse.row - 2));
     if (i >= rows.len or rows[i].action == null) return null;
     if (rows[i].action.? == .new_session and (mouse.col < new_button_col or mouse.col >= new_button_col + new_button_text.len)) return null;
-    return if (rows[i].continuation and i > 0) i - 1 else i;
+    return i;
 }
 /// Drop everything `Shared` owns. Both callers cancel the collector and the
 /// control worker first, so nothing is queued behind this and the mutex is

@@ -182,8 +182,8 @@ def run_mode(argv, label):
             # worked out by itself.
             rows = [l for l in sidebar() if l.strip()]
             # The cleared pane falls back to its plain command, `sleep`, with
-            # no reported indicator beside it.
-            assert any(l.strip() == 'sleep' for l in rows), \
+            # no reported indicator before it; its directory follows it.
+            assert any(l.split()[:1] == ['sleep'] for l in rows), \
                 ('%s: a pane that reported nothing lost its inferred row'
                  % label, rows[-12:])
             print('ok (%s): a reported state reached the sidebar '

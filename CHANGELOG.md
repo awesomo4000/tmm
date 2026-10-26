@@ -1,5 +1,10 @@
 # Changelog
 
+## 10/26/2026
+
+- Made the sidebar compact. Each pane is one row, its directory dimmed after the name rather than on a line of its own, and the blank rows after every heading, between a session and its panes, and after each session are gone; one blank row is left between sections. Headings are bold without the underline.
+- Let a session fold to its name. `[-]` before the name folds it and `[+]` opens it, by click or with space. Folded, the name turns green when an agent in it shows a check.
+
 ## 10/22/2026
 
 - Ended a reported status when its writer is gone. `@tmm_status` stayed until something cleared it, so an agent killed with `kill -9` read as working forever. tmm now drops a `working`, `blocked` or `idle` record once the pane's own shell runs nothing, read from the process table it already has, and keeps `done` and `error`, as the specification says.

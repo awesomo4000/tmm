@@ -30,6 +30,8 @@ The default launch lists the default server and discovers other running sockets 
 
 Hover highlights an item; click selects it. Wheel scrolling moves the list without activating anything. `j`/`k` or arrows move among actionable rows; Enter activates. `q` or Ctrl-C exits.
 
+Click the `[-]` before a session name, or press space on it, to fold the session to that one row; `[+]` opens it again. A folded session's name turns green when an agent in it shows a check, so a finished turn is not hidden by the fold. Folds last until tmm exits.
+
 1. Pick a server.
 2. Pick the display you want to control. Each display row shows `terminal app : session name`, for example `Ghostty : tmm coding`. Parent-process tracing finds the terminal app; matching names get a tty suffix for disambiguation, and unknown owners fall back to the tty. SSH connections are labeled SSH because the remote terminal app is not visible.
 3. Click a pane to show its exact session, window, and pane. To switch a session without choosing a pane, highlight its name and press Enter.
@@ -42,7 +44,7 @@ Click `blink` below the displays, or press `b`, to identify the selected display
 
 The current pane is read from `list-clients`, which expands its formats per client. `display-message -c <client>` looks like the way to ask where one client is, but `-c` only selects the client for client-specific formats: the target the formats expand against is the server's current pane, so it answers the same for every client and does not move when a client navigates.
 
-The active server, selected display, active session, and current pane use brighter text without inverse backgrounds. Entries use a subtle background for selection and hover, spanning the widest content in the column, clipped to the terminal width. Pane backgrounds cover both the name and directory. A `▸` at the left edge marks the selected display’s current pane; hover does not move that marker. Click `[new]` beside the sessions heading to enter a name, then Enter to create or Escape to cancel. Creation uses the selected display’s current pane directory, names the session and first window, and switches that display into the new session. Other displays stay where they are. Select a display before creating a session. Click either the pane name or its directory to focus that pane on the selected display. The current pane marker follows native tmux navigation too. Each pane's current directory is indented beneath its row, with the home directory abbreviated to `~`. It follows changes to that pane's working directory. Session paths are not displayed.
+The active server, selected display, active session, and current pane use brighter text without inverse backgrounds. Entries use a subtle background for selection and hover, spanning the widest content in the column, clipped to the terminal width. A `▸` at the left edge marks the selected display’s current pane; hover does not move that marker. Click `[new]` beside the sessions heading to enter a name, then Enter to create or Escape to cancel. Creation uses the selected display’s current pane directory, names the session and first window, and switches that display into the new session. Other displays stay where they are. Select a display before creating a session. Click a pane to focus it on the selected display. The current pane marker follows native tmux navigation too. Each pane's current directory follows its name, dimmed, with the home directory abbreviated to `~`. It follows changes to that pane's working directory. Session paths are not displayed.
 
 ## Agents
 

@@ -28,6 +28,7 @@ run = [
   "python3 tests/agent_hooks_sidebar.py",
   "python3 tests/claude_hook.py",
   "python3 tests/reported_lifetime.py",
+  "python3 tests/fold.py",
 ]
 
 [tasks.clean-tests]

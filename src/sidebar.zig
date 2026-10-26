@@ -8,7 +8,11 @@ const backend = @import("backend.zig");
 const reported_opt = @import("reported.zig");
 const tmux = @import("libtmux");
 pub const Server = struct { name: []const u8, options: tmux.ServerOptions };
-pub const Action = union(enum) { server: usize, display: usize, session: usize, pane: usize, new_session, blink };
+pub const Action = union(enum) { server: usize, display: usize, session: usize, fold: usize, pane: usize, new_session, blink };
+
+/// Columns the fold mark takes at the start of a session row; a click inside
+/// it folds rather than selects.
+pub const fold_width = 3;
 
 /// What a program in a pane said about itself (OSC 7501, carried to tmm as
 /// the `@tmm_status` pane option), as opposed to what reading its screen
@@ -54,19 +58,23 @@ pub const Row = struct {
     color: u8 = 7,
     active: bool = false,
     heading: bool = false,
-    continuation: bool = false,
+    /// Drawn dim after the text, for what is useful but not the point: a
+    /// pane's directory.
+    detail: []const u8 = "",
+    /// A folded session holding a finished result nobody has looked at, so
+    /// its name says so in place of the rows it hides.
+    done: bool = false,
 };
-pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snapshot: ?*backend.Snapshot, target: ?backend.Request, label: ?[]const u8, home: ?[]const u8) ![]Row {
+pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snapshot: ?*backend.Snapshot, target: ?backend.Request, label: ?[]const u8, home: ?[]const u8, folded: *const std.StringHashMapUnmanaged(void)) ![]Row {
     var list: std.ArrayList(Row) = .empty;
     try list.append(a, .{ .text = "servers", .heading = true });
-    try list.append(a, .{ .text = "" });
     for (servers, 0..) |server, i| try list.append(a, .{
         .text = server.name,
         .key = try std.fmt.allocPrint(a, "server:{d}", .{i}),
         .action = .{ .server = i },
         .active = i == current,
     });
-    try list.appendSlice(a, &.{ .{ .text = "" }, .{ .text = "displays", .heading = true }, .{ .text = "" } });
+    try list.appendSlice(a, &.{ .{ .text = "" }, .{ .text = "displays", .heading = true } });
     if (snapshot) |s| {
         for (s.clients, 0..) |client, i| {
             var name = client.session;
@@ -94,19 +102,23 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
         if (s.clients.len == 0) try list.append(a, .{ .text = "no attached displays", .color = 8 });
     }
     if (target != null) try list.append(a, .{ .text = "  blink", .key = "blink", .action = .blink, .color = 8 });
-    try list.appendSlice(a, &.{ .{ .text = "" }, .{ .text = "sessions", .heading = true, .key = "new-session", .action = .new_session }, .{ .text = "" } });
+    try list.appendSlice(a, &.{ .{ .text = "" }, .{ .text = "sessions", .heading = true, .key = "new-session", .action = .new_session } });
     if (snapshot) |s| {
         for (s.sessions, 0..) |session, i| {
             var active = false;
             if (target) |t| for (s.clients) |client| {
                 if (client.same(t.client) and std.mem.eql(u8, client.session, session.id)) active = true;
             };
-            try list.append(a, .{ .text = session.name, .key = try std.fmt.allocPrint(a, "session:{s}", .{session.id}), .action = .{ .session = i }, .active = active });
-            var has_panes = false;
+            const fold = folded.contains(session.id);
+            const session_row = list.items.len;
+            try list.append(a, .{
+                .text = try std.fmt.allocPrint(a, "{s} {s}", .{ if (fold) "[+]" else "[-]", session.name }),
+                .key = try std.fmt.allocPrint(a, "session:{s}", .{session.id}),
+                .action = .{ .session = i },
+                .active = active,
+            });
             for (s.panes, 0..) |pane, pane_index| {
                 if (!std.mem.eql(u8, pane.session, session.id)) continue;
-                if (!has_panes) try list.append(a, .{ .text = "" });
-                has_panes = true;
                 // What the program said beats what its screen suggested.
                 // The detector says as much about itself: quiet output is
                 // never a completion, a transition between polls is missed,
@@ -119,6 +131,10 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
                 const said = reported_opt.current(pane.reported, pane.at_prompt);
                 const state = if (said) |r| r.indicator() else m.agentIndicator(pane.state);
                 const is_agent = pane.agent.len > 0 or said != null;
+                if (fold) {
+                    if (is_agent and (std.mem.eql(u8, state.symbol, "✓") or pane.unread)) list.items[session_row].done = true;
+                    continue;
+                }
                 const pane_active = active and std.mem.eql(u8, pane.id, s.focused_pane);
                 const marker = if (pane_active) "▸" else " ";
                 // A reported record is current by construction, so the
@@ -152,14 +168,12 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
                 else
                     try std.fmt.allocPrint(a, "{s}   {s}", .{ marker, if (pane.command.len > 0) pane.command else "shell" });
                 const pane_key = try std.fmt.allocPrint(a, "pane:{s}:{s}", .{ pane.session, pane.id });
-                try list.append(a, .{ .text = text, .key = pane_key, .action = .{ .pane = pane_index }, .color = if (is_agent) state.color else 7, .active = pane_active });
                 var path = pane.cwd;
                 if (home) |h| if (h.len > 0 and std.mem.startsWith(u8, path, h) and (path.len == h.len or path[h.len] == '/')) {
                     path = try std.fmt.allocPrint(a, "~{s}", .{path[h.len..]});
                 };
-                try list.append(a, .{ .text = try std.fmt.allocPrint(a, "    {s}", .{path}), .color = 8, .key = pane_key, .action = .{ .pane = pane_index }, .continuation = true });
+                try list.append(a, .{ .text = text, .detail = path, .key = pane_key, .action = .{ .pane = pane_index }, .color = if (is_agent) state.color else 7, .active = pane_active });
             }
-            try list.append(a, .{ .text = "" });
         }
     }
     return list.toOwnedSlice(a);
