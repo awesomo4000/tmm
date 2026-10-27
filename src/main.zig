@@ -482,6 +482,7 @@ pub fn main(init: std.process.Init) !void {
             const safe = try m.display(fa, row.text);
             var width = win.gwidth(safe) +| 1;
             if (row.detail.len > 0) width +|= win.gwidth(try m.display(fa, row.detail)) +| 1;
+            if (isEntry(row) and row.active) width +|= selected_mark.len;
             natural = @max(natural, width);
         }
         sidebar_width = win.width;
@@ -554,6 +555,12 @@ pub fn main(init: std.process.Init) !void {
                 // apart from the purple directories beside them.
                 const end = win.gwidth(m.display(fa, row.text) catch row.text);
                 tint(win, i + top, 0, end, if (row.active) .cool_lift else .cool);
+            } else if (isEntry(row)) {
+                // Servers and displays in green, well away from the pink of
+                // the headings above them, with a mark beside the selected one.
+                const end = win.gwidth(m.display(fa, row.text) catch row.text);
+                paint(win, i + top, 0, end, entry_rgb);
+                if (row.active) draw(win.child(.{ .x_off = end }), fa, i + top, selected_mark, .{ .fg = .{ .rgb = entry_rgb }, .bold = true });
             } else if (row.active and row.color == 7 and row.name_rgb == null) {
                 tint(win, i + top, 0, win.width, .lift);
             }
@@ -563,18 +570,9 @@ pub fn main(init: std.process.Init) !void {
                 paint(win, i + top, from, from + win.gwidth(m.display(fa, row.name) catch row.name), rgb);
             };
         }
-        // Neither the selection nor the hover recolours a line's own text
-        // or background. What is selected is ruled above and below, so the
-        // rules sit on the row before it and on its own row; drawn after
-        // every row so a later row cannot overwrite them.
-        for (rows[offset..], 0..) |row, i| {
-            if (i >= visible) break;
-            if (row.action == null or !row.active) continue;
-            rule(win, i + top - 1, column_width);
-            rule(win, i + top, column_width);
-        }
-        // The pointer or cursor marks its whole group in the gutter, blank
-        // row above included, and its own row a little wider.
+        // The pointer or cursor marks its whole group in the gutter, through
+        // the blank row that closes it, and its own row a little wider. The
+        // lines themselves are never recoloured.
         if (cursor) |c| if (c < rows.len) {
             const group = groupAround(rows, c);
             var r = group.first;
@@ -771,16 +769,23 @@ fn paintSymbols(win: vaxis.Window, row: usize, symbol: []const u8, color: u8) vo
 /// Columns kept clear on the left for the hover bar, which marks the row
 /// the pointer or cursor is on the way a card's edge does.
 const gutter: u16 = 1;
-/// The bar: one flat colour per row, taken from the field's left edge so it
-/// runs down the gradient beside the group. The pointer's own row is wider.
+/// The bar's one colour, a green-cyan that no heading or name is drawn in.
+const bar_rgb: aurora.RGB = .{ 72, 214, 176 };
+/// Server and display names, and the mark beside the selected one.
+const entry_rgb: aurora.RGB = .{ 150, 206, 128 };
+const selected_mark = " ◂";
+/// A server or display row, the ones that carry the selected mark.
+fn isEntry(row: sidebar.Row) bool {
+    const action = row.action orelse return false;
+    return action == .server or action == .display;
+}
+/// The bar beside one row; the pointer's own row is wider.
 fn hoverBar(win: vaxis.Window, row: usize, wide: bool) void {
     if (row >= win.height) return;
-    const down = fieldHeight(win);
-    const colour = aurora.lift(aurora.at(fieldWidth(win), down, 0, @min(@as(u16, @intCast(row)), down -| 1)));
-    win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = if (wide) "▌" else "▎", .width = 1 }, .style = .{ .fg = .{ .rgb = colour } } });
+    win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = if (wide) "▌" else "▎", .width = 1 }, .style = .{ .fg = .{ .rgb = bar_rgb } } });
 }
 /// The rows that belong with row `c`: the run of non-blank rows around it
-/// and the blank row that opens it, which is where a session begins.
+/// and the blank row that closes it.
 fn groupAround(rows: []const sidebar.Row, c: usize) struct { first: usize, last: usize } {
     const blank = struct {
         fn is(row: sidebar.Row) bool {
@@ -789,28 +794,10 @@ fn groupAround(rows: []const sidebar.Row, c: usize) struct { first: usize, last:
     }.is;
     var first = c;
     while (first > 0 and !blank(rows[first - 1])) first -= 1;
-    if (first > 0) first -= 1;
     var last = c;
     while (last + 1 < rows.len and !blank(rows[last + 1])) last += 1;
+    if (last + 1 < rows.len) last += 1;
     return .{ .first = first, .last = last };
-}
-/// Where the selection rule starts and where it fades to.
-const rule_from: aurora.RGB = .{ 200, 222, 96 };
-const rule_to: aurora.RGB = .{ 140, 92, 226 };
-/// A line under `row` across the clickable column, greenish yellow at the
-/// left fading to purple at the right, leaving the text as it is.
-fn rule(win: vaxis.Window, row: usize, width: u16) void {
-    if (row >= win.height) return;
-    const span = @min(width, win.width);
-    var x: u16 = 0;
-    while (x < span) : (x += 1) {
-        var cell = win.readCell(x, @intCast(row)) orelse continue;
-        // A cleared cell is drawn by erasing, which would drop the rule.
-        cell.default = false;
-        cell.style.ul_style = .single;
-        cell.style.ul = .{ .rgb = aurora.mix(rule_from, rule_to, x, span -| 1) };
-        win.writeCell(x, @intCast(row), cell);
-    }
 }
 /// Mouse columns as the list sees them, so column 0 is the list's first
 /// column and the gutter is -1.

@@ -2,8 +2,8 @@
 
 ## 10/27/2026
 
-- Marked the hover and keyboard cursor with a bar in a one-column gutter on the left, beside the whole group from the blank row that opens it, and wider at the row itself, instead of recolouring the line.
-- Ruled the selection above and below with a line fading from greenish yellow to purple, in place of the coloured background that made its text hard to read.
+- Marked the hover and keyboard cursor with a green-cyan bar in a one-column gutter on the left, beside the whole group through the blank row that closes it, and wider at the row itself, instead of recolouring the line.
+- Dropped the coloured background behind the selection, which made its text hard to read. Server and display names are now green, apart from the pink headings, and the selected ones carry a `◂`.
 - Renamed the message for a selected display that went away from "Target disconnected" to "Display disconnected".
 - Cleared the hover when the sidebar loses focus. Leaving the pane without a click still leaves it lit: nothing tells a pane the pointer has gone.
 - Selected the display when it is the only one attached and none has been chosen, at launch or when the first one attaches.
