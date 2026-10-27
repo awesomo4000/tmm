@@ -58,6 +58,12 @@ const help =
 pub fn main(init: std.process.Init) !void {
     const a = init.gpa;
     const io = init.io;
+    // One lettering for the whole run, so it does not change under the person.
+    const lettering = banner.choose(init.environ_map.get("TMM_BANNER"), roll: {
+        var bytes: [8]u8 = undefined;
+        io.random(&bytes);
+        break :roll std.mem.readInt(u64, &bytes, .little);
+    });
     var args = init.minimal.args.iterate();
     _ = args.next();
     var opts: tmux.ServerOptions = .{};
@@ -469,8 +475,7 @@ pub fn main(init: std.process.Init) !void {
         column_width = @min(win.width, natural);
         // The banner, then a blank row, then the list; the plain title when
         // the banner is wider than the window.
-        const chosen = banner.named(init.environ_map.get("TMM_BANNER"));
-        const title = if (bannerWidth(win, chosen) <= win.width) chosen else banner.plain;
+        const title = if (bannerWidth(win, lettering) <= win.width) lettering else banner.plain;
         top = @intCast(title.lines.len + 1);
         const visible: usize = win.height -| (top + 2);
         offset = @min(offset, rows.len -| visible);

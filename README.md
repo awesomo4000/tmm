@@ -28,7 +28,7 @@ The default launch lists the default server and discovers other running sockets 
 
 ## Navigation
 
-The name at the top is drawn in block letters in the aurora field, with `tmux` over `µmanager` to its right when there is room, the `t` above the `µ`, centred on the banner's height and a row low when that cannot be exact. `TMM_BANNER` picks the letters, while they are being chosen: `quadrant` (the default), `slant`, `chunky`, `block`, `heavy`, `round`, `light`, `double`, `pipes`, `ascii`, or `plain` for the one-line title, which is also what a window too narrow for the banner gets.
+The name at the top is drawn in block letters in the aurora field, with `tmux` over `µmanager` to its right when there is room, the `t` above the `µ`, centred on the banner's height and a row low when that cannot be exact. Each launch picks the letters at random from `quadrant`, `slant`, `chunky`, `block`, `heavy`, `round`, `light`, `double`, `pipes` and `ascii`; `TMM_BANNER=<name>` asks for one. `plain`, the one-line title, is what a window too narrow for the banner gets, and is never picked at random.
 
 Hover highlights an item; click selects it. Wheel scrolling moves the list without activating anything. `j`/`k` or arrows move among actionable rows; Enter activates. `q` or Ctrl-C exits.
 
