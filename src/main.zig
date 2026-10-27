@@ -52,7 +52,7 @@ const help =
     \\       tmm [-L socket-name | -S socket-path] --dump
     \\Run beside an ordinary tmux client. Select a display before navigating.
     \\Mouse: hover highlights, click selects, wheel browses without selecting.
-    \\Sessions: j/k or arrows to browse, Enter to switch the selected display.
+    \\Sessions: j/k or arrows step between them, Enter switches the display.
     \\1-9 and 0 switch it to the first ten sessions as listed. ? lists the keys.
     \\Click a server, display, session, or agent. b blinks the display. q exits.
     \\--dump prints a read-only JSON snapshot without opening the terminal UI.
@@ -416,6 +416,12 @@ pub fn main(init: std.process.Init) !void {
                     defer a.free(listed);
                     if (n < listed.len) action = .{ .session = listed[n] };
                 };
+                // With the keys panel open, q closes the panel rather than
+                // tmm; Ctrl-C still quits.
+                if (key.matches('q', .{}) and show_keys) {
+                    show_keys = false;
+                    break :key_event;
+                }
                 if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) break;
                 // Shift-J and Shift-K move the cursor's session down and up.
                 const later = key.matches('J', .{}) or key.matches('j', .{ .shift = true }) or key.matches(vaxis.Key.down, .{ .shift = true });
@@ -438,11 +444,14 @@ pub fn main(init: std.process.Init) !void {
                 }
                 const down = key.matches('j', .{}) or key.matches(vaxis.Key.down, .{});
                 const up = key.matches('k', .{}) or key.matches(vaxis.Key.up, .{});
+                // Between sessions only: Enter then switches the display to
+                // the session, leaving whichever pane is current there.
+                // Panes, servers and displays are for the mouse.
                 if ((down or up) and rows.len > 0) {
                     var i = cursor orelse if (down) rows.len - 1 else 0;
                     for (0..rows.len) |_| {
                         i = if (down) (i + 1) % rows.len else (i + rows.len - 1) % rows.len;
-                        if (rows[i].action != null) {
+                        if (rows[i].action != null and rows[i].action.? == .session) {
                             cursor = i;
                             break;
                         }
@@ -893,13 +902,13 @@ fn paintSymbols(win: vaxis.Window, row: usize, symbol: []const u8, color: u8) vo
 }
 /// What `?` lists, key then what it does.
 const bindings = [_][2][]const u8{
-    .{ "j k  ↓ ↑", "move" },
+    .{ "j k  ↓ ↑", "next, previous session" },
     .{ "J K", "move the session down, up" },
     .{ "1-9 0", "switch to session 1 to 10" },
-    .{ "Enter", "switch to it, or select" },
+    .{ "Enter", "switch to the session" },
     .{ "space", "fold the session" },
     .{ "b", "blink the display" },
-    .{ "?  Esc", "close this" },
+    .{ "?  Esc  q", "close this" },
     .{ "q", "quit" },
     .{ "click", "select; a name renames" },
     .{ "drag", "move a session" },

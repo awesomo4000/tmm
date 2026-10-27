@@ -9,10 +9,13 @@ as tmm lists them, and `?` opens a panel of the key bindings.
 Against one disposable server with sessions alpha, beta and gamma and one
 display attached to alpha:
 
-- `?` opens the panel and `?` closes it again; Escape closes it too.
+- `?` opens the panel and `?` closes it again; Escape closes it too, and so
+  does `q`, which while the panel is open does not quit.
 - `2` sends the display to beta, the second session listed.
 - After gamma is dragged to the top, `1` sends it to gamma and `3` to beta:
   the numbers count the list as arranged, not the server's own order.
+- `j` and `k` step between sessions only, never stopping on a pane, and
+  Enter switches the display to the session they land on.
 
 Only disposable tmux sockets and files under /tmp are mutated.
 """
@@ -155,6 +158,15 @@ def main():
             os.write(fd, b'\x1b')
             if not until(lambda: not panel()):
                 failures.append('Escape did not close the keys panel')
+            # q closes an open panel and leaves tmm running.
+            os.write(fd, b'?')
+            until(panel)
+            os.write(fd, b'q')
+            if not until(lambda: not panel()):
+                failures.append('q did not close the keys panel')
+            pump(0.3)
+            if os.waitpid(pid, os.WNOHANG) != (0, 0):
+                failures.append('q with the keys panel open quit tmm')
 
             os.write(fd, b'2')
             if not until(lambda: on() == 'beta'):
@@ -168,6 +180,16 @@ def main():
             os.write(fd, b'3')
             if not until(lambda: on() == 'beta'):
                 failures.append('3 did not follow the arranged order to beta: %r' % on())
+
+            # The drag left the cursor on gamma. j steps to the next session,
+            # alpha, past gamma's pane, and Enter switches to it; stopping on
+            # the pane would have sent the display to gamma instead.
+            os.write(fd, b'j\r')
+            if not until(lambda: on() == 'alpha'):
+                failures.append('j and Enter did not go to the next session: %r' % on())
+            os.write(fd, b'k\r')
+            if not until(lambda: on() == 'gamma'):
+                failures.append('k and Enter did not go to the previous session: %r' % on())
         finally:
             for child in (pid, cpid):
                 for sig in (signal.SIGTERM, signal.SIGKILL):
