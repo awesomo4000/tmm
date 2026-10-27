@@ -3,21 +3,22 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-"""Hover is a bar in the gutter beside the whole group, wider at the row
-itself, and ends when the pane loses focus. A selected display is marked
-beside its name, with nothing recoloured behind it. A lone display is
-selected without being asked for.
+"""Bars in the gutter mark whole groups, wider at the row itself: a bright
+one stays with what is selected, a dim one follows the pointer and goes when
+the pane loses focus. Nothing is recoloured behind a line. A lone display is
+selected without being asked for, marked `▸` and ending in the blink mark.
 
 Two tmm runs against one disposable server:
 
 - The first starts with no display attached. When one attaches it is the only
-  choice, so it is selected: `blink`, which only shows for a selected display,
-  appears.
+  choice, so it is selected: the blink mark, which only shows on a selected
+  display, appears.
 - The second starts with that display already attached and selects it at once.
-  Its row carries the selected mark, with no background behind the session.
-  Then the pointer hovers a session's pane: the wide bar is beside the pane,
-  the narrow one beside the session's name, and none beside the blank row
-  above it or the other session. A focus-out report
+  Its row carries `▸`, and its session the bright bar, wide at its current
+  pane, with no background behind it. Then the pointer hovers a pane of
+  another session: the dim bar runs from that session's name through the
+  blank row below it, wide at the pane, and the selected session keeps its
+  bright one. A focus-out report
   (what a terminal sends when the pane loses focus) must take the bars away.
 
 Colours are read per cell from the screen model.
@@ -46,6 +47,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'zig-out/bin/tmm'
 TMUX = shutil.which('tmux') or 'tmux'
 BAR, WIDE = '▎', '▌'
+BRIGHT, DIM = ('rgb', 72, 214, 176), ('rgb', 87, 153, 141)
 
 
 def spawn(argv, rows, cols):
@@ -133,6 +135,7 @@ def main():
 
         tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'alpha', '-x', '80', '-y', '24')
         tmux('new-session', '-d', '-s', 'beta', '-x', '80', '-y', '24')
+        tmux('new-session', '-d', '-s', 'gamma', '-x', '80', '-y', '24')
         client = None
         uis = []
         try:
@@ -140,10 +143,10 @@ def main():
             uis.append(first)
             if not first.until(lambda: first.shows('no attached displays')):
                 failures.append('the first run never drew its empty display list')
-            if first.shows('blink'):
+            if first.shows('✶'):
                 failures.append('a display was selected before any attached')
             client = spawn([TMUX, '-S', socket, 'attach', '-t', 'alpha'], 24, 80)
-            if not first.until(lambda: first.shows('blink')):
+            if not first.until(lambda: first.shows('✶')):
                 failures.append('the first display to attach was not selected: %r'
                                 % first.display.lines())
             stop(first.pid, first.fd)
@@ -151,46 +154,51 @@ def main():
 
             second = Ui(socket)
             uis.append(second)
-            if not second.until(lambda: second.shows('blink')):
+            if not second.until(lambda: second.shows('✶')):
                 failures.append('the one attached display was not selected at launch: %r'
                                 % second.display.lines())
-            if not second.until(lambda: any(l.endswith(' : alpha ◂') for l in second.display.lines())):
+            if not second.until(lambda: any(l[1:].startswith('▸ ') and l.endswith(' : alpha ✶')
+                                            for l in second.display.lines())):
                 failures.append('the selected display was not marked: %r'
                                 % second.display.lines())
             if second.fill('▼ alpha') is not None:
                 failures.append('the selection recoloured its line: %r'
                                 % (second.fill('▼ alpha'),))
+
+            def bars(top, count):
+                """The gutter from row `top` down, as (glyph, colour) pairs."""
+                return [(second.display.grid[r][0],
+                         second.display.colour(r, 0) if second.display.grid[r][0] != ' ' else None)
+                        for r in range(top, top + count)]
+
+            alpha = second.row_of('▼ alpha')
+            selected = [(BAR, BRIGHT), (WIDE, BRIGHT), (BAR, BRIGHT)]
+            if alpha is None or not second.until(lambda: bars(alpha, 3) == selected):
+                failures.append('the selected session did not keep the bright bar: %r'
+                                % (bars(alpha, 3) if alpha is not None else None,))
             row = second.row_of('▼ beta')
             if row is None:
                 failures.append('the beta session never drew')
             else:
                 # The pane under beta's name.
                 os.write(second.fd, b'\x1b[<35;6;%dM' % (row + 2))
-                if not second.until(lambda: second.display.grid[row + 1][0] == WIDE):
-                    failures.append('hover did not draw the wide bar beside the pane: %r'
-                                    % (second.display.grid[row + 1][0],))
-                if second.gutter('▼ beta') != BAR or second.gutter('▼ beta', above=1) != ' ':
-                    failures.append('the narrow bar was not beside the session alone: %r'
-                                    % [second.gutter('▼ beta', a) for a in (1, 0)])
+                # The blank row above beta closes alpha's group, so it is
+                # alpha's bright bar, not the hover's.
+                hovered = [(BAR, BRIGHT), (BAR, DIM), (WIDE, DIM), (BAR, DIM)]
+                if not second.until(lambda: bars(row - 1, 4) == hovered):
+                    failures.append('hover did not run the dim bar from the session through '
+                                    'the blank row below it: %r' % bars(row - 1, 4))
                 if second.fill('▼ beta') is not None:
                     failures.append('hover recoloured the line: %r'
                                     % (second.fill('▼ beta'),))
-                if second.gutter('▼ alpha') != ' ':
-                    failures.append('the bar reached a session the pointer is not in')
+                if bars(alpha, 3) != selected:
+                    failures.append('hovering elsewhere changed the selected bar: %r'
+                                    % bars(alpha, 3))
                 os.write(second.fd, b'\x1b[O')
-                if not second.until(lambda: second.gutter('▼ beta') == ' '
-                                    and second.display.grid[row + 1][0] == ' '):
-                    failures.append('losing focus did not clear the hover: %r'
-                                    % (second.gutter('▼ beta'),))
-                # A session with another below it: the bar runs on through
-                # the blank row that closes it.
-                alpha = second.row_of('▼ alpha')
-                os.write(second.fd, b'\x1b[<35;6;%dM' % (alpha + 1))
-                if not second.until(lambda: [second.display.grid[alpha + d][0] for d in (-1, 0, 1, 2)]
-                                    == [' ', WIDE, BAR, BAR]):
-                    failures.append('the bar did not run from the session through the blank '
-                                    'row below it: %r' % [second.display.grid[alpha + d][0]
-                                                          for d in (-1, 0, 1, 2)])
+                if not second.until(lambda: bars(row, 3) == [(' ', None)] * 3):
+                    failures.append('losing focus did not clear the hover: %r' % bars(row, 3))
+                if bars(alpha, 3) != selected:
+                    failures.append('losing focus cleared the selected bar: %r' % bars(alpha, 3))
         finally:
             for ui in uis:
                 stop(ui.pid, ui.fd)

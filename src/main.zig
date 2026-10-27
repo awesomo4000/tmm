@@ -303,6 +303,13 @@ pub fn main(init: std.process.Init) !void {
                             if (action) |chosen| if (chosen == .session and mouse.col < sidebar.fold_width) {
                                 action = .{ .fold = chosen.session };
                             };
+                            // The mark at the end of the selected display.
+                            if (action) |chosen| if (chosen == .display and rows[i].active and
+                                std.mem.endsWith(u8, rows[i].text, sidebar.blink_mark) and
+                                mouse.col + 1 >= vx.window().gwidth(rows[i].text))
+                            {
+                                action = .blink;
+                            };
                         };
                         if (pressed) |p| a.free(p);
                         pressed = null;
@@ -482,7 +489,6 @@ pub fn main(init: std.process.Init) !void {
             const safe = try m.display(fa, row.text);
             var width = win.gwidth(safe) +| 1;
             if (row.detail.len > 0) width +|= win.gwidth(try m.display(fa, row.detail)) +| 1;
-            if (isEntry(row) and row.active) width +|= selected_mark.len;
             natural = @max(natural, width);
         }
         sidebar_width = win.width;
@@ -557,10 +563,10 @@ pub fn main(init: std.process.Init) !void {
                 tint(win, i + top, 0, end, if (row.active) .cool_lift else .cool);
             } else if (isEntry(row)) {
                 // Servers and displays in green, well away from the pink of
-                // the headings above them, with a mark beside the selected one.
+                // the headings above them; the blink mark in gold.
                 const end = win.gwidth(m.display(fa, row.text) catch row.text);
                 paint(win, i + top, 0, end, entry_rgb);
-                if (row.active) draw(win.child(.{ .x_off = end }), fa, i + top, selected_mark, .{ .fg = .{ .rgb = entry_rgb }, .bold = true });
+                if (std.mem.endsWith(u8, row.text, sidebar.blink_mark)) paint(win, i + top, end -| 1, end, blink_rgb);
             } else if (row.active and row.color == 7 and row.name_rgb == null) {
                 tint(win, i + top, 0, win.width, .lift);
             }
@@ -570,17 +576,37 @@ pub fn main(init: std.process.Init) !void {
                 paint(win, i + top, from, from + win.gwidth(m.display(fa, row.name) catch row.name), rgb);
             };
         }
-        // The pointer or cursor marks its whole group in the gutter, through
-        // the blank row that closes it, and its own row a little wider. The
-        // lines themselves are never recoloured.
+        // Bars in the gutter, card edges beside a whole group through the
+        // blank row that closes it, a little wider at the row itself. What
+        // is selected keeps a bright one; the pointer or cursor gets a dim
+        // one. The lines themselves are never recoloured.
+        const bars = try fa.alloc(Bar, rows.len);
+        @memset(bars, .none);
+        for (rows, 0..) |row, r| if (row.action != null and row.active) {
+            const group = groupAround(rows, r);
+            for (bars[group.first .. group.last + 1]) |*b| if (b.* == .none) {
+                b.* = .selected;
+            };
+        };
+        // Wide at the last selected row of a group: a session's current
+        // pane rather than the session above it.
+        for (rows, 0..) |row, r| if (row.action != null and row.active) {
+            const later = for (rows[r + 1 .. groupAround(rows, r).last + 1]) |next| {
+                if (next.action != null and next.active) break true;
+            } else false;
+            if (!later) bars[r] = .selected_wide;
+        };
         if (cursor) |c| if (c < rows.len) {
             const group = groupAround(rows, c);
-            var r = group.first;
-            while (r <= group.last) : (r += 1) {
-                if (r < offset or r - offset >= visible) continue;
-                hoverBar(vx.window(), r - offset + top, r == c);
-            }
+            for (bars[group.first .. group.last + 1]) |*b| if (b.* == .none) {
+                b.* = .hover;
+            };
+            if (bars[c] != .selected_wide) bars[c] = .hover_wide;
         };
+        for (bars, 0..) |b, r| {
+            if (b == .none or r < offset or r - offset >= visible) continue;
+            drawBar(vx.window(), r - offset + top, b);
+        }
         if (win.height >= 2) draw(win, fa, win.height - 2, error_text orelse "", .{ .fg = .{ .index = 1 } });
         if (win.height >= 1) draw(win, fa, win.height - 1, if (editor) |edit|
             if (edit.pending) "saving..." else "Enter save  Esc cancel"
@@ -769,20 +795,25 @@ fn paintSymbols(win: vaxis.Window, row: usize, symbol: []const u8, color: u8) vo
 /// Columns kept clear on the left for the hover bar, which marks the row
 /// the pointer or cursor is on the way a card's edge does.
 const gutter: u16 = 1;
-/// The bar's one colour, a green-cyan that no heading or name is drawn in.
+/// The selection's bar, a green-cyan that no heading or name is drawn in,
+/// and the hover's, the same green greyed and dimmed.
 const bar_rgb: aurora.RGB = .{ 72, 214, 176 };
-/// Server and display names, and the mark beside the selected one.
+const hover_rgb: aurora.RGB = .{ 87, 153, 141 };
+/// Server and display names.
 const entry_rgb: aurora.RGB = .{ 150, 206, 128 };
-const selected_mark = " ◂";
-/// A server or display row, the ones that carry the selected mark.
+/// The blink mark, warm so it reads as something to press.
+const blink_rgb: aurora.RGB = .{ 232, 198, 104 };
+/// A server or display row.
 fn isEntry(row: sidebar.Row) bool {
     const action = row.action orelse return false;
     return action == .server or action == .display;
 }
-/// The bar beside one row; the pointer's own row is wider.
-fn hoverBar(win: vaxis.Window, row: usize, wide: bool) void {
+const Bar = enum { none, hover, hover_wide, selected, selected_wide };
+fn drawBar(win: vaxis.Window, row: usize, bar: Bar) void {
     if (row >= win.height) return;
-    win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = if (wide) "▌" else "▎", .width = 1 }, .style = .{ .fg = .{ .rgb = bar_rgb } } });
+    const wide = bar == .hover_wide or bar == .selected_wide;
+    const colour = if (bar == .selected or bar == .selected_wide) bar_rgb else hover_rgb;
+    win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = if (wide) "▌" else "▎", .width = 1 }, .style = .{ .fg = .{ .rgb = colour } } });
 }
 /// The rows that belong with row `c`: the run of non-blank rows around it
 /// and the blank row that closes it.

@@ -87,7 +87,12 @@ def main():
             raise AssertionError(('client not attached', client))
 
         def marker_rows():
-            return [i for i, line in enumerate(screen.lines()) if MARKER in line]
+            """Rows with the current-pane marker. Servers and displays carry
+            the same mark for their selection, so only the sessions below
+            their heading count."""
+            lines = screen.lines()
+            start = next((i for i, l in enumerate(lines) if l[1:].startswith('sessions')), len(lines))
+            return [i for i, line in enumerate(lines) if i > start and MARKER in line]
 
         def row_of(label, limit=15):
             """The sidebar row showing `label`, which the fixture makes unique.

@@ -184,9 +184,11 @@ def main():
             first = next(c['name'] for c in initial['clients'] if c['pid'] == str(first_pid))
             second = next(c['name'] for c in initial['clients'] if c['pid'] == str(second_pid))
             ui_pid, ui_fd = terminal([str(BINARY), '-S', socket, '--client', first])
-            until(lambda: shows('µmanager') and shows('fake-codex') and shows('blink'), 'the sidebar')
+            until(lambda: shows('µmanager') and shows('fake-codex') and shows('✶'), 'the sidebar')
             # Both displays, both sessions, and all their panes are visible together.
-            click(row_of(first_word('blink')))  # blink selected display
+            # The mark at the end of the selected display blinks it.
+            star = row_of('✶')
+            click(star, screens[ui_fd].lines()[star - 1].index('✶') + 1)
             until(lambda: b'tmm display:' in terminal_output.get(first_fd, b''), 'the blink on the selected display')
             assert b'tmm display:' not in terminal_output.get(second_fd, b'')
             # Hover and cancelled clicks do not navigate.
@@ -218,10 +220,13 @@ def main():
             click(row_of('fake-codex') + 1)  # the new split, listed after its window's agent
             until(lambda: where(first) == split, 'the split click to navigate')
             assert sessions()[second] == 'alpha'
-            until(lambda: '▸'.encode() in terminal_output[ui_fd][marker:], 'the current-pane marker to move on click')
-            marker = len(terminal_output[ui_fd])
+            # Read from the row itself: servers and displays carry the same
+            # mark for their own selection.
+            def marked(row):
+                return screens[ui_fd].lines()[row - 1][1:].startswith('▸')
+            until(lambda: marked(row_of('fake-codex') + 1), 'the current-pane marker to move on click')
             tmux('select-pane', '-t', agent)
-            until(lambda: '▸'.encode() in terminal_output[ui_fd][marker:], 'the current-pane marker to follow native navigation')
+            until(lambda: marked(row_of('fake-codex')), 'the current-pane marker to follow native navigation')
             click(row_of('fake-codex'))
             until(lambda: where(first) == agent, 'the agent click to navigate')
             tmux('kill-pane', '-t', split)
