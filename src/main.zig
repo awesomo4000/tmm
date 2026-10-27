@@ -611,6 +611,17 @@ pub fn main(init: std.process.Init) !void {
             };
             if (bars[c] != .selected_wide) bars[c] = .hover_wide;
         };
+        // The selected session sits on a faint card, side to side, from
+        // its name through its last pane, under the bars.
+        for (rows, 0..) |row, r| if (row.active and row.action != null and row.action.? == .session) {
+            var card = r;
+            while (card < rows.len and (card == r or !(rows[card].action != null and rows[card].action.? == .session)) and
+                !(rows[card].text.len == 0 and !rows[card].heading)) : (card += 1)
+            {
+                if (card < offset or card - offset >= visible) continue;
+                shade(vx.window(), card - offset + top, card_rgb);
+            }
+        };
         for (bars, 0..) |b, r| {
             if (b == .none or r < offset or r - offset >= visible) continue;
             drawBar(vx.window(), r - offset + top, b);
@@ -806,7 +817,21 @@ const gutter: u16 = 1;
 /// The selection's bar, a green-cyan that no heading or name is drawn in,
 /// and the hover's, the same green greyed and dimmed.
 const bar_rgb: aurora.RGB = .{ 72, 214, 176 };
-const hover_rgb: aurora.RGB = .{ 87, 153, 141 };
+const hover_rgb: aurora.RGB = .{ 58, 96, 90 };
+/// Behind the selected session: a grey-blue barely off the dark.
+const card_rgb: aurora.RGB = .{ 36, 41, 54 };
+/// `rgb` behind every cell of `row`, blank ones included.
+fn shade(win: vaxis.Window, row: usize, rgb: aurora.RGB) void {
+    if (row >= win.height) return;
+    var x: u16 = 0;
+    while (x < win.width) : (x += 1) {
+        var cell = win.readCell(x, @intCast(row)) orelse continue;
+        // A cleared cell is drawn by erasing, which would drop the shade.
+        cell.default = false;
+        cell.style.bg = .{ .rgb = rgb };
+        win.writeCell(x, @intCast(row), cell);
+    }
+}
 /// Server and display names.
 const entry_rgb: aurora.RGB = .{ 150, 206, 128 };
 /// The blink mark, warm so it reads as something to press.
@@ -821,7 +846,9 @@ fn drawBar(win: vaxis.Window, row: usize, bar: Bar) void {
     if (row >= win.height) return;
     const wide = bar == .hover_wide or bar == .selected_wide;
     const colour = if (bar == .selected or bar == .selected_wide) bar_rgb else hover_rgb;
-    win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = if (wide) "◗" else "▎", .width = 1 }, .style = .{ .fg = .{ .rgb = colour } } });
+    // Over whatever background the row has, so a card runs behind it.
+    const under = if (win.readCell(0, @intCast(row))) |cell| cell.style.bg else .default;
+    win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = if (wide) "◗" else "▎", .width = 1 }, .style = .{ .fg = .{ .rgb = colour }, .bg = under } });
 }
 /// The rows that belong with row `c`: the run of non-blank rows around it
 /// and the blank row that closes it.

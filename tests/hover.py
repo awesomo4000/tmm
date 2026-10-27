@@ -3,10 +3,10 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-"""Bars in the gutter mark whole groups, wider at the row itself: a bright
-one stays with what is selected, a dim one follows the pointer and goes when
-the pane loses focus. Nothing is recoloured behind a line. A lone display is
-selected without being asked for, marked `➤` and ending in the blink mark.
+"""Bars in the gutter mark sessions, wider at the row itself: a bright one
+stays with the selected session, which also sits on a faint card, and a dim
+one follows the pointer and goes when the pane loses focus. A lone display
+is selected without being asked for, marked `➤` and ending in the blink mark.
 
 Two tmm runs against one disposable server:
 
@@ -14,12 +14,12 @@ Two tmm runs against one disposable server:
   choice, so it is selected: the blink mark, which only shows on a selected
   display, appears.
 - The second starts with that display already attached and selects it at once.
-  Its row carries `➤` and no bar, and its session the bright bar, wide at its current
-  pane, with no background behind it. Then the pointer hovers a pane of
-  another session: the dim bar runs from that session's name through the
-  blank row below it, wide at the pane, and the selected session keeps its
-  bright one. A focus-out report
-  (what a terminal sends when the pane loses focus) must take the bars away.
+  Its row carries `➤` and no bar. Its session has the bright bar, wide at its
+  current pane, and the card behind its rows side to side. Then the pointer
+  hovers a pane of another session: the dim bar runs from that session's name
+  through the blank row below it, wide at the pane, with no card, and the
+  selected session keeps its bright one. A focus-out report (what a terminal
+  sends when the pane loses focus) must take the dim bar away.
 
 Colours are read per cell from the screen model.
 
@@ -47,7 +47,8 @@ ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'zig-out/bin/tmm'
 TMUX = shutil.which('tmux') or 'tmux'
 BAR, WIDE = '▎', '◗'
-BRIGHT, DIM = ('rgb', 72, 214, 176), ('rgb', 87, 153, 141)
+BRIGHT, DIM = ('rgb', 72, 214, 176), ('rgb', 58, 96, 90)
+CARD = ('rgb', 36, 41, 54)
 
 
 def spawn(argv, rows, cols):
@@ -161,9 +162,16 @@ def main():
                                             for l in second.display.lines())):
                 failures.append('the selected display was not marked: %r'
                                 % second.display.lines())
-            if second.fill('▼ alpha') is not None:
-                failures.append('the selection recoloured its line: %r'
+            # The selected session sits on a faint card, side to side; the
+            # blank row after it does not.
+            def carded(r):
+                return all(second.display.background(r, c) == CARD for c in range(0, COLS))
+            alpha_row = second.row_of('▼ alpha')
+            if alpha_row is None or not second.until(lambda: carded(alpha_row) and carded(alpha_row + 1)):
+                failures.append('the selected session was not on its card: %r'
                                 % (second.fill('▼ alpha'),))
+            elif carded(alpha_row + 2):
+                failures.append('the card ran past the session into the blank row')
             display = second.row_of('➤ ')
             if display is None or second.display.colour(display, 1) != BRIGHT \
                     or second.display.grid[display][0] != ' ':
