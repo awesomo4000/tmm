@@ -3,11 +3,11 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-"""Bars in the gutter mark sessions, wider at the row itself: a bright one
-stays with the selected session, which also sits on a faint card fading to
-the right, and a dim
-one follows the pointer and goes when the pane loses focus. A lone display
-is selected without being asked for, marked `➤` and ending in the blink mark.
+"""Bars in the gutter mark sessions, with a half circle at a pane's own
+row: a bright one stays with the selected session, which also sits on a
+faint card fading to the right, and a dim one follows the pointer and goes
+when the pane loses focus. A lone display is selected without being asked
+for, marked `➤` and ending in the blink mark.
 
 Two tmm runs against one disposable server:
 
@@ -15,11 +15,11 @@ Two tmm runs against one disposable server:
   choice, so it is selected: the blink mark, which only shows on a selected
   display, appears.
 - The second starts with that display already attached and selects it at once.
-  Its row carries `➤` and no bar. Its session has the bright bar, wide at its
-  current pane, and the card behind it through the blank row that closes
-  it. Then the pointer
-  hovers a pane of another session: the dim bar runs from that session's name
-  through the blank row below it, wide at the pane, with no card, and the
+  Its row carries `➤` and no bar. Its session has the bright bar with a half
+  circle at its current pane, and the card behind it through the blank row
+  that closes it. Then the pointer hovers a pane of another session: the dim
+  bar runs from that session's name through the blank row below it, with a
+  half circle at the pane, with no card, and the
   selected session keeps its bright one. A focus-out report (what a terminal
   sends when the pane loses focus) must take the dim bar away.
 
@@ -48,7 +48,9 @@ ROWS, COLS = 40, 60
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'zig-out/bin/tmm'
 TMUX = shutil.which('tmux') or 'tmux'
-BAR, WIDE = '▌', '◗'
+# The bar in the gutter, and the half circle that grows out of it into the
+# next column at a pane's own row.
+BAR, BLOB = '▐', '◗'
 BRIGHT, DIM = ('rgb', 72, 214, 176), ('rgb', 58, 96, 90)
 CARD = ('rgb', 20, 28, 33)
 
@@ -194,13 +196,14 @@ def main():
                                 % (second.display.lines()[display] if display is not None else None,))
 
             def bars(top, count):
-                """The gutter from row `top` down, as (glyph, colour) pairs."""
-                return [(second.display.grid[r][0],
+                """The gutter from row `top` down, as (glyph, blob beside it,
+                colour) for each row."""
+                return [(second.display.grid[r][0], second.display.grid[r][1] == BLOB,
                          second.display.colour(r, 0) if second.display.grid[r][0] != ' ' else None)
                         for r in range(top, top + count)]
 
             alpha = second.row_of('▼ alpha')
-            selected = [(BAR, BRIGHT), (WIDE, BRIGHT), (BAR, BRIGHT)]
+            selected = [(BAR, False, BRIGHT), (BAR, True, BRIGHT), (BAR, False, BRIGHT)]
             if alpha is None or not second.until(lambda: bars(alpha, 3) == selected):
                 failures.append('the selected session did not keep the bright bar: %r'
                                 % (bars(alpha, 3) if alpha is not None else None,))
@@ -212,7 +215,7 @@ def main():
                 os.write(second.fd, b'\x1b[<35;6;%dM' % (row + 2))
                 # The blank row above beta closes alpha's group, so it is
                 # alpha's bright bar, not the hover's.
-                hovered = [(BAR, BRIGHT), (BAR, DIM), (WIDE, DIM), (BAR, DIM)]
+                hovered = [(BAR, False, BRIGHT), (BAR, False, DIM), (BAR, True, DIM), (BAR, False, DIM)]
                 if not second.until(lambda: bars(row - 1, 4) == hovered):
                     failures.append('hover did not run the dim bar from the session through '
                                     'the blank row below it: %r' % bars(row - 1, 4))
@@ -223,7 +226,7 @@ def main():
                     failures.append('hovering elsewhere changed the selected bar: %r'
                                     % bars(alpha, 3))
                 os.write(second.fd, b'\x1b[O')
-                if not second.until(lambda: bars(row, 3) == [(' ', None)] * 3):
+                if not second.until(lambda: bars(row, 3) == [(' ', False, None)] * 3):
                     failures.append('losing focus did not clear the hover: %r' % bars(row, 3))
                 if bars(alpha, 3) != selected:
                     failures.append('losing focus cleared the selected bar: %r' % bars(alpha, 3))

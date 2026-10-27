@@ -34,7 +34,10 @@ from screen import Screen  # noqa: E402
 
 BINARY = Path(__file__).resolve().parents[1] / 'zig-out/bin/tmm'
 ROWS, COLS = 40, 60
-MARKER = '▸'
+# The current pane's mark: the half circle on the selected session's bar,
+# bright. The pointer or cursor gets the same half circle dimmed.
+MARKER = '◗'
+SELECTED = ('rgb', 72, 214, 176)
 
 
 def main():
@@ -87,12 +90,12 @@ def main():
             raise AssertionError(('client not attached', client))
 
         def marker_rows():
-            """Rows with the current-pane marker. Servers and displays carry
-            the same mark for their selection, so only the sessions below
-            their heading count."""
+            """Rows with the current-pane marker, among the sessions below
+            their heading."""
             lines = screen.lines()
             start = next((i for i, l in enumerate(lines) if l[1:].startswith('sessions')), len(lines))
-            return [i for i, line in enumerate(lines) if i > start and MARKER in line]
+            return [i for i, line in enumerate(lines) if i > start and line[1:2] == MARKER
+                    and screen.colour(i, 1) == SELECTED]
 
         def row_of(label, limit=15):
             """The sidebar row showing `label`, which the fixture makes unique.

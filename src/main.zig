@@ -629,7 +629,7 @@ pub fn main(init: std.process.Init) !void {
         };
         for (bars, 0..) |b, r| {
             if (b == .none or r < offset or r - offset >= visible) continue;
-            drawBar(vx.window(), r - offset + top, b);
+            drawBar(vx.window(), r - offset + top, b, rows[r].action != null and rows[r].action.? == .pane);
         }
         if (win.height >= 2) draw(win, fa, win.height - 2, error_text orelse "", .{ .fg = .{ .index = 1 } });
         if (win.height >= 1) draw(win, fa, win.height - 1, if (editor) |edit|
@@ -852,13 +852,20 @@ fn isEntry(row: sidebar.Row) bool {
     return action == .server or action == .display;
 }
 const Bar = enum { none, hover, hover_wide, selected, selected_wide };
-fn drawBar(win: vaxis.Window, row: usize, bar: Bar) void {
+/// The bar is a right half block in every row, so it runs unbroken down the
+/// group and sits flush against the column beside it. At a pane's own row a
+/// half circle grows out of it into that column, where the pane's `▸` would
+/// be; a session's row keeps its fold arrow there and has the bar alone.
+fn drawBar(win: vaxis.Window, row: usize, bar: Bar, pane: bool) void {
     if (row >= win.height) return;
     const wide = bar == .hover_wide or bar == .selected_wide;
     const colour = if (bar == .selected or bar == .selected_wide) palette.selected_bar else palette.hover_bar;
     // Over whatever background the row has, so a card runs behind it.
-    const under = if (win.readCell(0, @intCast(row))) |cell| cell.style.bg else .default;
-    win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = if (wide) "◗" else "▌", .width = 1 }, .style = .{ .fg = .{ .rgb = colour }, .bg = under } });
+    for ([_]u16{ 0, 1 }, [_][]const u8{ "▐", "◗" }) |x, glyph| {
+        if (x == 1 and !(wide and pane)) break;
+        const under = if (win.readCell(x, @intCast(row))) |cell| cell.style.bg else .default;
+        win.writeCell(x, @intCast(row), .{ .char = .{ .grapheme = glyph, .width = 1 }, .style = .{ .fg = .{ .rgb = colour }, .bg = under } });
+    }
 }
 /// The rows that belong with row `c`: the run of non-blank rows around it
 /// and the blank row that closes it.
