@@ -7,6 +7,7 @@ const m = @import("model.zig");
 const backend = @import("backend.zig");
 const reported_opt = @import("reported.zig");
 const palette = @import("palette.zig");
+const Order = @import("order.zig").Order;
 const tmux = @import("libtmux");
 pub const Server = struct { name: []const u8, options: tmux.ServerOptions };
 pub const Action = union(enum) { server: usize, display: usize, session: usize, fold: usize, pane: usize, new_session, blink };
@@ -79,7 +80,7 @@ pub const entry_mark = "➤";
 /// Ends the selected display's row; clicking it blinks that display.
 pub const blink_mark = "✶";
 
-pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snapshot: ?*backend.Snapshot, target: ?backend.Request, label: ?[]const u8, home: ?[]const u8, folded: *const std.StringHashMapUnmanaged(void)) ![]Row {
+pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snapshot: ?*backend.Snapshot, target: ?backend.Request, label: ?[]const u8, home: ?[]const u8, folded: *const std.StringHashMapUnmanaged(void), order: *const Order) ![]Row {
     var list: std.ArrayList(Row) = .empty;
     try list.append(a, .{ .text = "servers", .heading = true });
     // Servers and displays are indented like panes, with an arrow beside
@@ -125,7 +126,8 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
     }
     try list.appendSlice(a, &.{ .{ .text = "" }, .{ .text = "sessions", .heading = true, .key = "new-session", .action = .new_session } });
     if (snapshot) |s| {
-        for (s.sessions, 0..) |session, i| {
+        for (try order.arrange(a, s.sessions)) |i| {
+            const session = s.sessions[i];
             var active = false;
             if (target) |t| for (s.clients) |client| {
                 if (client.same(t.client) and std.mem.eql(u8, client.session, session.id)) active = true;

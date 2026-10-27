@@ -288,4 +288,5 @@ test {
     _ = @import("aurora.zig");
     _ = @import("banner.zig");
     _ = @import("sidebar.zig");
+    _ = @import("order.zig");
 }

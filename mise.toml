@@ -27,7 +27,7 @@ run = [
     tests/control_mode.py tests/reconcile_live.py tests/reconcile_stress.py \
     tests/measure_queries.py tests/follow.py tests/exit_clean.py \
     tests/agent_hooks_sidebar.py tests/claude_hook.py tests/reported_lifetime.py \
-    tests/fold.py tests/hover.py tests/integration.py""",
+    tests/fold.py tests/hover.py tests/reorder.py tests/integration.py""",
 ]
 
 [tasks.clean-tests]

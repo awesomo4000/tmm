@@ -11,6 +11,7 @@ const backend = @import("backend.zig");
 const aurora = @import("aurora.zig");
 const palette = @import("palette.zig");
 const banner = @import("banner.zig");
+const Order = @import("order.zig").Order;
 pub const panic = std.debug.FullPanic(struct {
     fn call(message: []const u8, address: ?usize) noreturn {
         vaxis.recover();
@@ -193,6 +194,12 @@ pub fn main(init: std.process.Init) !void {
         while (keys.next()) |k| a.free(k.*);
         folded.deinit(a);
     }
+    // The order sessions are listed in, as arranged in this run.
+    var order: Order = .{};
+    defer order.deinit(a);
+    // A session being dragged to a new place in the list.
+    var drag: ?Drag = null;
+    defer if (drag) |d| a.free(d.id);
     var editor: ?Editor = null;
     defer if (editor) |*e| e.deinit(a);
     var error_text: ?[]const u8 = null;
@@ -254,6 +261,7 @@ pub fn main(init: std.process.Init) !void {
                 if (!s.valid) s.destroy(a) else {
                     if (snapshot) |old| old.destroy(a);
                     snapshot = s;
+                    try order.sync(a, s.sessions);
                     if (initial_client) |name| {
                         for (s.clients) |client| if (std.mem.eql(u8, client.name, name)) {
                             target = try backend.Request.copy(a, client, null);
@@ -302,7 +310,39 @@ pub fn main(init: std.process.Init) !void {
                         if (pressed) |p| a.free(p);
                         pressed = if (index) |i| try a.dupe(u8, rows[i].key) else null;
                         cursor = index;
+                        // A press on a session's name may turn into a drag;
+                        // the fold arrow beside it only ever folds.
+                        if (drag) |d| a.free(d.id);
+                        drag = null;
+                        if (index) |i| if (rows[i].action) |chosen| if (chosen == .session and mouse.col >= sidebar.fold_width) if (snapshot) |s| {
+                            const id = s.sessions[chosen.session].id;
+                            drag = .{ .id = try a.dupe(u8, id), .row = mouse.row, .from = order.indexOf(id) orelse 0 };
+                        };
                     }
+                    if (mouse.type == .drag) if (drag) |*d| {
+                        // Moving off the row it was pressed on makes it a
+                        // drag; from then on the session follows the
+                        // pointer, taking the place of whichever session's
+                        // rows it is over.
+                        if (mouse.row != d.row) d.moved = true;
+                        if (d.moved) {
+                            if (mouse.row < top) offset -|= 1;
+                            if (mouse.row >= @as(i32, sidebar_height) - 2) offset = @min(offset + 1, rows.len -| 1);
+                            if (sessionAt(rows, offset, mouse.row)) |over| if (snapshot) |s| {
+                                if (order.indexOf(s.sessions[over].id)) |to| order.moveTo(d.id, to);
+                            };
+                        }
+                    };
+                    if (mouse.type == .release) if (drag) |d| {
+                        const moved = d.moved;
+                        a.free(d.id);
+                        drag = null;
+                        // A drag that moved is not also a click on the name.
+                        if (moved) if (pressed) |p| {
+                            a.free(p);
+                            pressed = null;
+                        };
+                    };
                     if (mouse.type == .release) {
                         if (mouse.button == .left) if (index) |i| if (pressed) |p| {
                             if (std.mem.eql(u8, p, rows[i].key)) action = rows[i].action;
@@ -354,7 +394,20 @@ pub fn main(init: std.process.Init) !void {
                     }
                     break :key_event;
                 }
+                // Escape during a drag puts the session back where it was.
+                if (key.matches(vaxis.Key.escape, .{})) if (drag) |d| {
+                    if (d.moved) order.moveTo(d.id, d.from);
+                    a.free(d.id);
+                    drag = null;
+                };
                 if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) break;
+                // Shift-J and Shift-K move the cursor's session down and up.
+                const later = key.matches('J', .{}) or key.matches('j', .{ .shift = true }) or key.matches(vaxis.Key.down, .{ .shift = true });
+                const earlier = key.matches('K', .{}) or key.matches('k', .{ .shift = true }) or key.matches(vaxis.Key.up, .{ .shift = true });
+                if (later or earlier) if (cursor) |c| if (snapshot) |s| if (sessionOf(rows, c)) |i| {
+                    order.step(s.sessions[i].id, if (later) 1 else -1);
+                    reveal = true;
+                };
                 if (key.matches('b', .{})) {
                     if (cursor) |c| {
                         if (rows[c].action) |selected| switch (selected) {
@@ -412,6 +465,7 @@ pub fn main(init: std.process.Init) !void {
                 drain(a, &loop);
                 if (snapshot) |s| s.destroy(a);
                 snapshot = null;
+                order.clear(a);
                 if (target) |t| t.deinit(a);
                 target = null;
                 if (error_text) |e| a.free(e);
@@ -475,7 +529,7 @@ pub fn main(init: std.process.Init) !void {
         };
         _ = layout_arena.reset(.retain_capacity);
         const fa = layout_arena.allocator();
-        rows = try sidebar.rows(fa, servers.items, current_server, snapshot, target, label, init.environ_map.get("HOME"), &folded);
+        rows = try sidebar.rows(fa, servers.items, current_server, snapshot, target, label, init.environ_map.get("HOME"), &folded, &order);
         if (editor) |edit| if (edit.create) {
             for (rows, 0..) |row, i| if (row.action != null and row.action.? == .new_session and i + 1 < rows.len) {
                 rows[i + 1].key = edit.key;
@@ -640,7 +694,7 @@ pub fn main(init: std.process.Init) !void {
         if (win.height >= 1) draw(win, fa, win.height - 1, if (editor) |edit|
             if (edit.pending) "saving..." else "Enter save  Esc cancel"
         else
-            "j/k move  space fold  q quit", .{ .fg = .{ .index = 8 } });
+            "j/k move  J/K reorder  space fold  q quit", .{ .fg = .{ .index = 8 } });
 
         // Wait out the rest of the frame budget, and hand over the moment
         // input arrives: a frame rendered late is invisible, and the key
@@ -819,6 +873,34 @@ fn paintSymbols(win: vaxis.Window, row: usize, symbol: []const u8, color: u8) vo
         if (std.mem.eql(u8, glyph, "✓")) cell.style.fg = .{ .index = 2 } else if (std.mem.eql(u8, glyph, symbol)) cell.style.fg = .{ .index = color } else continue;
         win.writeCell(x, @intCast(row), cell);
     }
+}
+const Drag = struct {
+    /// The session being dragged, owned.
+    id: []const u8,
+    /// The row it was pressed on, and whether the pointer has left it.
+    row: i16,
+    moved: bool = false,
+    /// Where it was in the order, for Escape to put it back.
+    from: usize,
+};
+/// The session whose rows include row `r`: its own name row or the nearest
+/// one above.
+fn sessionOf(rows: []const sidebar.Row, r: usize) ?usize {
+    var i = @min(r, rows.len -| 1);
+    while (true) {
+        if (rows[i].action) |chosen| if (chosen == .session) return chosen.session;
+        if (i == 0) return null;
+        i -= 1;
+    }
+}
+/// The session under screen row `row` while dragging: above the first
+/// session it is the first, below the last it is the last.
+fn sessionAt(rows: []const sidebar.Row, offset: usize, row: i16) ?usize {
+    if (rows.len == 0) return null;
+    const r = offset +| @as(usize, @intCast(@max(0, @as(i32, row) - @as(i32, top))));
+    if (sessionOf(rows, r)) |i| return i;
+    for (rows) |each| if (each.action) |chosen| if (chosen == .session) return chosen.session;
+    return null;
 }
 /// Columns kept clear on the left for the hover bar, which marks the row
 /// the pointer or cursor is on the way a card's edge does.
