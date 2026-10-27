@@ -196,7 +196,8 @@ def main():
                 """The status glyph on the watched agent's row, if drawn."""
                 for line in screen.lines():
                     if 'codex' in line:
-                        parts = line.strip().split()
+                        # Column 0 is the hover gutter.
+                        parts = line[1:].split()
                         return parts[0] if parts else ''
                 return None
 

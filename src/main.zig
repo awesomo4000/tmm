@@ -562,13 +562,27 @@ pub fn main(init: std.process.Init) !void {
                 const from = win.gwidth(m.display(fa, row.text[0..at]) catch row.text[0..at]);
                 paint(win, i + top, from, from + win.gwidth(m.display(fa, row.name) catch row.name), rgb);
             };
-            // What is selected wears the field washed over the dark,
-            // spanning the clickable column. What the pointer or cursor is
-            // on gets a bar in the gutter instead, so the line itself is
-            // never recoloured by passing over it.
-            if (row.action != null and row.active) wash(win, i + top, 0, column_width, 30);
-            if (highlighted) hoverBar(vx.window(), i + top);
         }
+        // Neither the selection nor the hover recolours a line's own text
+        // or background. What is selected is ruled above and below, so the
+        // rules sit on the row before it and on its own row; drawn after
+        // every row so a later row cannot overwrite them.
+        for (rows[offset..], 0..) |row, i| {
+            if (i >= visible) break;
+            if (row.action == null or !row.active) continue;
+            rule(win, i + top - 1, column_width);
+            rule(win, i + top, column_width);
+        }
+        // The pointer or cursor marks its whole group in the gutter, blank
+        // row above included, and its own row a little wider.
+        if (cursor) |c| if (c < rows.len) {
+            const group = groupAround(rows, c);
+            var r = group.first;
+            while (r <= group.last) : (r += 1) {
+                if (r < offset or r - offset >= visible) continue;
+                hoverBar(vx.window(), r - offset + top, r == c);
+            }
+        };
         if (win.height >= 2) draw(win, fa, win.height - 2, error_text orelse "", .{ .fg = .{ .index = 1 } });
         if (win.height >= 1) draw(win, fa, win.height - 1, if (editor) |edit|
             if (edit.pending) "saving..." else "Enter save  Esc cancel"
@@ -758,12 +772,45 @@ fn paintSymbols(win: vaxis.Window, row: usize, symbol: []const u8, color: u8) vo
 /// the pointer or cursor is on the way a card's edge does.
 const gutter: u16 = 1;
 /// The bar: one flat colour per row, taken from the field's left edge so it
-/// moves along the gradient with the pointer.
-fn hoverBar(win: vaxis.Window, row: usize) void {
+/// runs down the gradient beside the group. The pointer's own row is wider.
+fn hoverBar(win: vaxis.Window, row: usize, wide: bool) void {
     if (row >= win.height) return;
     const down = fieldHeight(win);
     const colour = aurora.lift(aurora.at(fieldWidth(win), down, 0, @min(@as(u16, @intCast(row)), down -| 1)));
-    win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = "▎", .width = 1 }, .style = .{ .fg = .{ .rgb = colour } } });
+    win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = if (wide) "▌" else "▎", .width = 1 }, .style = .{ .fg = .{ .rgb = colour } } });
+}
+/// The rows that belong with row `c`: the run of non-blank rows around it
+/// and the blank row that opens it, which is where a session begins.
+fn groupAround(rows: []const sidebar.Row, c: usize) struct { first: usize, last: usize } {
+    const blank = struct {
+        fn is(row: sidebar.Row) bool {
+            return row.text.len == 0 and !row.heading;
+        }
+    }.is;
+    var first = c;
+    while (first > 0 and !blank(rows[first - 1])) first -= 1;
+    if (first > 0) first -= 1;
+    var last = c;
+    while (last + 1 < rows.len and !blank(rows[last + 1])) last += 1;
+    return .{ .first = first, .last = last };
+}
+/// Where the selection rule starts and where it fades to.
+const rule_from: aurora.RGB = .{ 200, 222, 96 };
+const rule_to: aurora.RGB = .{ 140, 92, 226 };
+/// A line under `row` across the clickable column, greenish yellow at the
+/// left fading to purple at the right, leaving the text as it is.
+fn rule(win: vaxis.Window, row: usize, width: u16) void {
+    if (row >= win.height) return;
+    const span = @min(width, win.width);
+    var x: u16 = 0;
+    while (x < span) : (x += 1) {
+        var cell = win.readCell(x, @intCast(row)) orelse continue;
+        // A cleared cell is drawn by erasing, which would drop the rule.
+        cell.default = false;
+        cell.style.ul_style = .single;
+        cell.style.ul = .{ .rgb = aurora.mix(rule_from, rule_to, x, span -| 1) };
+        win.writeCell(x, @intCast(row), cell);
+    }
 }
 /// Mouse columns as the list sees them, so column 0 is the list's first
 /// column and the gutter is -1.
@@ -771,16 +818,6 @@ fn intoBody(event: Event) Event {
     var shifted = event;
     if (shifted == .mouse) shifted.mouse.col -= @intCast(gutter);
     return shifted;
-}
-fn wash(win: vaxis.Window, row: usize, from: u16, to: u16, percent: u32) void {
-    if (row >= win.height) return;
-    const down = fieldHeight(win);
-    var x = from;
-    while (x < @min(to, win.width)) : (x += 1) {
-        var cell = win.readCell(x, @intCast(row)) orelse continue;
-        cell.style.bg = .{ .rgb = aurora.wash(aurora.at(fieldWidth(win), down, @min(x, fieldWidth(win) -| 1), @min(@as(u16, @intCast(row)), down -| 1)), percent) };
-        win.writeCell(x, @intCast(row), cell);
-    }
 }
 fn draw(win: vaxis.Window, a: std.mem.Allocator, row: usize, text: []const u8, style: vaxis.Cell.Style) void {
     if (row >= win.height) return;

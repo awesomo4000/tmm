@@ -12,9 +12,10 @@ on screen arrives as "F12", "sid", "bar" with the unchanged cells missing.
 Any assertion on rendered text has to replay the cursor.
 
 This handles the subset libvaxis emits: absolute and relative cursor moves,
-erases, text, and the foreground and background colour of each cell. Other
-styles are discarded; this answers "what does it say, and in which colours",
-not "what does it look like".
+erases, text, the foreground and background colour of each cell, and the
+colour of its underline when it has one. Other styles are discarded; this
+answers "what does it say, and in which colours", not "what does it look
+like".
 
 A colour is ('index', n) for a palette entry, ('rgb', r, g, b) for a direct
 one, or None for the default. Per cell is the only way to ask, because tmm
@@ -34,8 +35,11 @@ class Screen:
         self.grid = [[' '] * cols for _ in range(rows)]
         self.colours = [[None] * cols for _ in range(rows)]
         self.backgrounds = [[None] * cols for _ in range(rows)]
+        self.underlines = [[None] * cols for _ in range(rows)]
         self.row = self.col = 0
         self.fg = self.bg = None
+        self.underlined = False
+        self.ul = None
         # The tail of the last feed when it ended inside an escape sequence or
         # a UTF-8 character. Output arrives in whatever chunks the reads
         # return, and a sequence split across two of them otherwise lands on
@@ -47,6 +51,10 @@ class Screen:
 
     def background(self, row, col):
         return self.backgrounds[row][col]
+
+    def underline(self, row, col):
+        """The underline colour, 'default' for one without a colour, or None."""
+        return self.underlines[row][col]
 
     def line(self, row):
         return ''.join(self.grid[row]).rstrip()
@@ -73,6 +81,7 @@ class Screen:
             self.grid[self.row][self.col] = ch
             self.colours[self.row][self.col] = self.fg
             self.backgrounds[self.row][self.col] = self.bg
+            self.underlines[self.row][self.col] = (self.ul or 'default') if self.underlined else None
         self.col += 1
 
     def feed(self, data: bytes):
@@ -134,12 +143,28 @@ class Screen:
         return 2
 
     def _sgr(self, params: bytes):
-        args = [int(p) if p.isdigit() else 0 for p in re.split(rb'[;:]', params)] if params else [0]
+        # A colour in colon form is one parameter whose parts may include an
+        # empty colour-space id, as in 58:2::r:g:b. Rewrite it in the
+        # semicolon form, dropping that id, so the parts line up below.
+        groups = []
+        for group in (params or b'0').split(b';'):
+            parts = group.split(b':')
+            if len(parts) == 6 and parts[1] == b'2':
+                parts = parts[:2] + parts[3:]
+            groups.extend(parts)
+        args = [int(p) if p.isdigit() else 0 for p in groups]
         i = 0
         while i < len(args):
             p = args[i]
             if p == 0:
-                self.fg = self.bg = None
+                self.fg = self.bg = self.ul = None
+                self.underlined = False
+            elif p == 4:
+                self.underlined = True
+            elif p == 24:
+                self.underlined = False
+            elif p == 59:
+                self.ul = None
             elif p == 39:
                 self.fg = None
             elif p == 49:
@@ -152,7 +177,7 @@ class Screen:
                 self.fg = ('index', p - 82)
             elif 100 <= p <= 107:
                 self.bg = ('index', p - 92)
-            elif p in (38, 48) and i + 1 < len(args):
+            elif p in (38, 48, 58) and i + 1 < len(args):
                 colour = None
                 if args[i + 1] == 5 and i + 2 < len(args):
                     colour = ('index', args[i + 2])
@@ -163,8 +188,10 @@ class Screen:
                 if colour is not None:
                     if p == 38:
                         self.fg = colour
-                    else:
+                    elif p == 48:
                         self.bg = colour
+                    else:
+                        self.ul = colour
             i += 1
 
     def _csi(self, params: bytes, final: bytes):
@@ -205,11 +232,13 @@ class Screen:
                     self.grid[self.row][c] = ' '
                     self.colours[self.row][c] = None
                     self.backgrounds[self.row][c] = None
+                    self.underlines[self.row][c] = None
                 start = self.row + 1
             for r in range(max(0, start), self.rows):
                 self.grid[r] = [' '] * self.cols
                 self.colours[r] = [None] * self.cols
                 self.backgrounds[r] = [None] * self.cols
+                self.underlines[r] = [None] * self.cols
         elif final == ord('K'):
             if 0 <= self.row < self.rows:
                 mode = arg(0, 0)
@@ -219,3 +248,4 @@ class Screen:
                     self.grid[self.row][c] = ' '
                     self.colours[self.row][c] = None
                     self.backgrounds[self.row][c] = None
+                    self.underlines[self.row][c] = None

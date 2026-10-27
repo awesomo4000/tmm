@@ -3,18 +3,22 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-"""Hover is a bar in the gutter, not a recoloured line, and ends when the
-pane loses focus; a lone display is selected without being asked for.
+"""Hover is a bar in the gutter beside the whole group, wider at the row
+itself, and ends when the pane loses focus. The selection is ruled above and
+below and does not recolour its line. A lone display is selected without
+being asked for.
 
 Two tmm runs against one disposable server:
 
 - The first starts with no display attached. When one attaches it is the only
-  choice, so it is selected: its row wears the selection bar and `blink`, which
-  only shows for a selected display, appears.
+  choice, so it is selected: `blink`, which only shows for a selected display,
+  appears.
 - The second starts with that display already attached and selects it at once.
-  Then the pointer hovers a session row, which must get the bar in the gutter
-  and keep its own background, and a focus-out report (what a terminal sends
-  when the pane loses focus) must take the bar away.
+  Its session is ruled under its own row and under the blank row above, with
+  no background. Then the pointer hovers a session's pane: the wide bar is
+  beside the pane, the narrow one beside the rest of that session and its
+  opening blank row, and none beside the other session. A focus-out report
+  (what a terminal sends when the pane loses focus) must take the bars away.
 
 Colours are read per cell from the screen model.
 
@@ -41,7 +45,7 @@ ROWS, COLS = 40, 60
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'zig-out/bin/tmm'
 TMUX = shutil.which('tmux') or 'tmux'
-BAR = '▎'
+BAR, WIDE = '▎', '▌'
 
 
 def spawn(argv, rows, cols):
@@ -106,10 +110,15 @@ class Ui:
         r = self.row_of(text)
         return 'not drawn' if r is None else self.display.background(r, 1)
 
-    def gutter(self, text):
-        """What the gutter left of the row starting `text` holds."""
+    def ruled(self, r):
+        """Whether row `r` is underlined from its first column past its text."""
+        return all(self.display.underline(r, c) not in (None, 'default') for c in range(1, 12))
+
+    def gutter(self, text, above=0):
+        """What the gutter holds left of the row starting `text`, or `above`
+        rows over it."""
         r = self.row_of(text)
-        return 'not drawn' if r is None else self.display.grid[r][0]
+        return 'not drawn' if r is None else self.display.grid[r - above][0]
 
     def shows(self, text):
         return any(text in l for l in self.display.lines())
@@ -149,25 +158,35 @@ def main():
             if not second.until(lambda: second.shows('blink')):
                 failures.append('the one attached display was not selected at launch: %r'
                                 % second.display.lines())
-            # The selected display's session carries the selection bar.
-            if not second.until(lambda: second.fill('▼ alpha') not in (None, 'not drawn')):
-                failures.append('the selected session had no selection fill: %r'
+            # The selected display's session is ruled above and below.
+            def selection_ruled():
+                r = second.row_of('▼ alpha')
+                return r is not None and second.ruled(r) and second.ruled(r - 1)
+            if not second.until(selection_ruled):
+                failures.append('the selected session was not ruled above and below')
+            if second.fill('▼ alpha') is not None:
+                failures.append('the selection recoloured its line: %r'
                                 % (second.fill('▼ alpha'),))
             row = second.row_of('▼ beta')
             if row is None:
                 failures.append('the beta session never drew')
             else:
-                os.write(second.fd, b'\x1b[<35;4;%dM' % (row + 1))
-                if not second.until(lambda: second.gutter('▼ beta') == BAR):
-                    failures.append('hover did not draw the bar: %r'
-                                    % (second.gutter('▼ beta'),))
+                # The pane under beta's name.
+                os.write(second.fd, b'\x1b[<35;6;%dM' % (row + 2))
+                if not second.until(lambda: second.display.grid[row + 1][0] == WIDE):
+                    failures.append('hover did not draw the wide bar beside the pane: %r'
+                                    % (second.display.grid[row + 1][0],))
+                if second.gutter('▼ beta') != BAR or second.gutter('▼ beta', above=1) != BAR:
+                    failures.append('the narrow bar did not run beside the session and its '
+                                    'blank row: %r' % [second.gutter('▼ beta', a) for a in (1, 0)])
                 if second.fill('▼ beta') is not None:
                     failures.append('hover recoloured the line: %r'
                                     % (second.fill('▼ beta'),))
-                if second.gutter('▼ alpha') == BAR:
-                    failures.append('the bar was drawn on a row the pointer is not on')
+                if second.gutter('▼ alpha') != ' ':
+                    failures.append('the bar reached a session the pointer is not in')
                 os.write(second.fd, b'\x1b[O')
-                if not second.until(lambda: second.gutter('▼ beta') == ' '):
+                if not second.until(lambda: second.gutter('▼ beta') == ' '
+                                    and second.display.grid[row + 1][0] == ' '):
                     failures.append('losing focus did not clear the hover: %r'
                                     % (second.gutter('▼ beta'),))
         finally:

@@ -108,7 +108,7 @@ def main():
             raise AssertionError(('no row shows', match, lines))
 
         def first_word(word):
-            return lambda line: line.lstrip('▎').split()[:1] == [word]
+            return lambda line: line.lstrip('▎▌').split()[:1] == [word]
 
         # Column 4 is past the hover gutter and a session's fold arrow, so a
         # click lands on the name.
@@ -146,7 +146,7 @@ def main():
             tmm saw happen, so waits on the states leading up to one read the
             sidebar, not a separate --dump that may have sampled the pane at
             a different moment."""
-            return next(([t for t in l.lstrip('▎').split() if t != '▸'] for l in screens[ui_fd].lines() if name in l.lstrip('▎').split()), [])
+            return next(([t for t in l.lstrip('▎▌').split() if t != '▸'] for l in screens[ui_fd].lines() if name in l.lstrip('▎▌').split()), [])
 
         def agent_state():
             return next(p for p in snapshot()['panes'] if p['id'] == agent)
