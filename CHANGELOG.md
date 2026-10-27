@@ -2,7 +2,7 @@
 
 ## 10/27/2026
 
-- Put the selected session on a faint grey-blue card across the full width, and dimmed the hover bar well below the selection's, so the two are easy to tell apart.
+- Put the selected session on a faint grey-blue card the height of its bar, fading out to the right into the terminal's reported background, and dimmed the hover bar well below the selection's, so the two are easy to tell apart.
 - Marked sessions with a bar in a one-column gutter on the left, through the blank row that closes each, with a `◗` at the row itself: bright green-cyan for the selection, the same dimmed and greyed for the pointer or cursor. Lines are no longer recoloured.
 - Dropped the coloured background behind the selection, which made its text hard to read. Server and display names are now green, apart from the pink headings, indented like panes with a `➤` beside the selected one and a dim one beside the pointer's.
 - Replaced the `blink` row with a `✶` at the end of the selected display.

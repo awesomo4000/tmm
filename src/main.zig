@@ -19,7 +19,7 @@ pub const panic = std.debug.FullPanic(struct {
 pub const std_options: std.Options = .{ .log_level = .err };
 const new_button_col = 11; // "sessions" plus three spaces
 const new_button_text = "[new]";
-const Event = union(enum) { key_press: vaxis.Key, mouse: vaxis.Mouse, focus_out, winsize: vaxis.Winsize, snapshot: *backend.Snapshot };
+const Event = union(enum) { key_press: vaxis.Key, mouse: vaxis.Mouse, focus_out, color_report: vaxis.Cell.Color.Report, winsize: vaxis.Winsize, snapshot: *backend.Snapshot };
 const Editor = struct {
     id: []const u8,
     key: []const u8,
@@ -148,6 +148,8 @@ pub fn main(init: std.process.Init) !void {
     try vx.enterAltScreen(tty.writer());
     try vx.queryTerminal(tty.writer(), .fromSeconds(1));
     try vx.setMouseMode(tty.writer(), true);
+    // The background the selected session's card fades into.
+    try vx.queryColor(tty.writer(), .bg);
     var shared: backend.Shared = .{};
     var task = try io.concurrent(runWorker, .{ io, a, init.minimal.environ, opts, &shared, &loop });
     var control_task = try io.concurrent(backend.controlWorker, .{ io, a, opts, &shared });
@@ -278,6 +280,9 @@ pub fn main(init: std.process.Init) !void {
             // losing focus is the next best sign the pointer went elsewhere.
             .focus_out => if (mouse_cursor) {
                 cursor = null;
+            },
+            .color_report => |report| if (report.kind == .bg) {
+                terminal_bg = report.value;
             },
             .mouse => |mouse| {
                 mouse_cursor = true;
@@ -611,15 +616,14 @@ pub fn main(init: std.process.Init) !void {
             };
             if (bars[c] != .selected_wide) bars[c] = .hover_wide;
         };
-        // The selected session sits on a faint card, side to side, from
-        // its name through its last pane, under the bars.
+        // The selected session sits on a faint card the height of its bar,
+        // from its name through the blank row after it, fading out to the
+        // right, under the bars.
         for (rows, 0..) |row, r| if (row.active and row.action != null and row.action.? == .session) {
-            var card = r;
-            while (card < rows.len and (card == r or !(rows[card].action != null and rows[card].action.? == .session)) and
-                !(rows[card].text.len == 0 and !rows[card].heading)) : (card += 1)
-            {
+            const group = groupAround(rows, r);
+            for (group.first..group.last + 1) |card| {
                 if (card < offset or card - offset >= visible) continue;
-                shade(vx.window(), card - offset + top, card_rgb);
+                shade(vx.window(), card - offset + top);
             }
         };
         for (bars, 0..) |b, r| {
@@ -820,15 +824,19 @@ const bar_rgb: aurora.RGB = .{ 72, 214, 176 };
 const hover_rgb: aurora.RGB = .{ 58, 96, 90 };
 /// Behind the selected session: a grey-blue barely off the dark.
 const card_rgb: aurora.RGB = .{ 36, 41, 54 };
-/// `rgb` behind every cell of `row`, blank ones included.
-fn shade(win: vaxis.Window, row: usize, rgb: aurora.RGB) void {
+/// The terminal's own background, as it reports it; until it does, a dark
+/// grey close to most.
+var terminal_bg: aurora.RGB = .{ 30, 30, 34 };
+/// The card behind every cell of `row`, fading from its colour at the left
+/// into the terminal's background at the right edge.
+fn shade(win: vaxis.Window, row: usize) void {
     if (row >= win.height) return;
     var x: u16 = 0;
     while (x < win.width) : (x += 1) {
         var cell = win.readCell(x, @intCast(row)) orelse continue;
         // A cleared cell is drawn by erasing, which would drop the shade.
         cell.default = false;
-        cell.style.bg = .{ .rgb = rgb };
+        cell.style.bg = .{ .rgb = aurora.mix(card_rgb, terminal_bg, x, win.width -| 1) };
         win.writeCell(x, @intCast(row), cell);
     }
 }

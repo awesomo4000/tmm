@@ -4,7 +4,8 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 """Bars in the gutter mark sessions, wider at the row itself: a bright one
-stays with the selected session, which also sits on a faint card, and a dim
+stays with the selected session, which also sits on a faint card fading to
+the right, and a dim
 one follows the pointer and goes when the pane loses focus. A lone display
 is selected without being asked for, marked `➤` and ending in the blink mark.
 
@@ -15,7 +16,8 @@ Two tmm runs against one disposable server:
   display, appears.
 - The second starts with that display already attached and selects it at once.
   Its row carries `➤` and no bar. Its session has the bright bar, wide at its
-  current pane, and the card behind its rows side to side. Then the pointer
+  current pane, and the card behind it through the blank row that closes
+  it. Then the pointer
   hovers a pane of another session: the dim bar runs from that session's name
   through the blank row below it, wide at the pane, with no card, and the
   selected session keeps its bright one. A focus-out report (what a terminal
@@ -162,16 +164,20 @@ def main():
                                             for l in second.display.lines())):
                 failures.append('the selected display was not marked: %r'
                                 % second.display.lines())
-            # The selected session sits on a faint card, side to side; the
-            # blank row after it does not.
+            # The selected session sits on a faint card the height of its
+            # bar, through the blank row after it, fading out to the right.
             def carded(r):
-                return all(second.display.background(r, c) == CARD for c in range(0, COLS))
+                left = second.display.background(r, 0)
+                right = second.display.background(r, COLS - 1)
+                return left == CARD and right not in (None, CARD) and sum(right[1:]) < sum(CARD[1:])
             alpha_row = second.row_of('▼ alpha')
-            if alpha_row is None or not second.until(lambda: carded(alpha_row) and carded(alpha_row + 1)):
-                failures.append('the selected session was not on its card: %r'
-                                % (second.fill('▼ alpha'),))
-            elif carded(alpha_row + 2):
-                failures.append('the card ran past the session into the blank row')
+            if alpha_row is None or not second.until(lambda: all(carded(alpha_row + d) for d in (0, 1, 2))):
+                failures.append('the selected session was not on its fading card: %r'
+                                % ([(second.display.background(alpha_row + d, 0),
+                                     second.display.background(alpha_row + d, COLS - 1)) for d in (0, 1, 2)]
+                                   if alpha_row is not None else None,))
+            elif second.display.background(alpha_row + 3, 0) is not None:
+                failures.append('the card ran into the next session')
             display = second.row_of('➤ ')
             if display is None or second.display.colour(display, 1) != BRIGHT \
                     or second.display.grid[display][0] != ' ':
