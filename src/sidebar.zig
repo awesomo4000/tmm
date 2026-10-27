@@ -6,6 +6,7 @@ const std = @import("std");
 const m = @import("model.zig");
 const backend = @import("backend.zig");
 const reported_opt = @import("reported.zig");
+const palette = @import("palette.zig");
 const tmux = @import("libtmux");
 pub const Server = struct { name: []const u8, options: tmux.ServerOptions };
 pub const Action = union(enum) { server: usize, display: usize, session: usize, fold: usize, pane: usize, new_session, blink };
@@ -220,16 +221,16 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
 /// colour wherever its row is.
 pub fn processColor(name: []const u8) [3]u8 {
     const agents = .{
-        .{ "claude", .{ 204, 122, 88 } },
-        .{ "codex", .{ 120, 168, 186 } },
-        .{ "gemini", .{ 128, 150, 222 } },
-        .{ "opencode", .{ 176, 156, 210 } },
-        .{ "aider", .{ 150, 186, 120 } },
-        .{ "omp", .{ 196, 172, 118 } },
-        .{ "pi", .{ 196, 172, 118 } },
+        .{ "claude", palette.claude_name },
+        .{ "codex", palette.codex_name },
+        .{ "gemini", palette.gemini_name },
+        .{ "opencode", palette.opencode_name },
+        .{ "aider", palette.aider_name },
+        .{ "omp", palette.pi_name },
+        .{ "pi", palette.pi_name },
     };
     inline for (agents) |agent| if (std.mem.eql(u8, name, agent[0])) return agent[1];
-    return .{ 176, 182, 200 };
+    return palette.process_name;
 }
 
 /// Where a session's panes are, which by habit is one directory: the one most

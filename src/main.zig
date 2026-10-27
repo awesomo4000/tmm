@@ -9,6 +9,7 @@ const m = @import("model.zig");
 const sidebar = @import("sidebar.zig");
 const backend = @import("backend.zig");
 const aurora = @import("aurora.zig");
+const palette = @import("palette.zig");
 const banner = @import("banner.zig");
 pub const panic = std.debug.FullPanic(struct {
     fn call(message: []const u8, address: ?usize) noreturn {
@@ -570,14 +571,14 @@ pub fn main(init: std.process.Init) !void {
                 // Servers and displays in green, well away from the pink of
                 // the headings above them; the blink mark in gold.
                 const end = win.gwidth(m.display(fa, row.text) catch row.text);
-                paint(win, i + top, 0, end, entry_rgb);
-                if (std.mem.endsWith(u8, row.text, sidebar.blink_mark)) paint(win, i + top, end -| 1, end, blink_rgb);
+                paint(win, i + top, 0, end, palette.entry_name);
+                if (std.mem.endsWith(u8, row.text, sidebar.blink_mark)) paint(win, i + top, end -| 1, end, palette.blink_mark);
                 // The arrow is the entry's whole selection mark, in the
                 // bar's colour; the pointer's entry gets it dimmed.
                 if (row.active) {
-                    paint(win, i + top, 0, 1, bar_rgb);
+                    paint(win, i + top, 0, 1, palette.selected_bar);
                 } else if (highlighted) {
-                    win.writeCell(0, @intCast(i + top), .{ .char = .{ .grapheme = sidebar.entry_mark, .width = 1 }, .style = .{ .fg = .{ .rgb = hover_rgb } } });
+                    win.writeCell(0, @intCast(i + top), .{ .char = .{ .grapheme = sidebar.entry_mark, .width = 1 }, .style = .{ .fg = .{ .rgb = palette.hover_bar } } });
                 }
             } else if (row.active and row.color == 7 and row.name_rgb == null) {
                 tint(win, i + top, 0, win.width, .lift);
@@ -814,28 +815,21 @@ fn paintSymbols(win: vaxis.Window, row: usize, symbol: []const u8, color: u8) vo
         win.writeCell(x, @intCast(row), cell);
     }
 }
-/// Lay a background of the field, `percent` strong, under `row`.
 /// Columns kept clear on the left for the hover bar, which marks the row
 /// the pointer or cursor is on the way a card's edge does.
 const gutter: u16 = 1;
-/// The selection's bar, a green-cyan that no heading or name is drawn in,
-/// and the hover's, the same green greyed and dimmed.
-const bar_rgb: aurora.RGB = .{ 72, 214, 176 };
-const hover_rgb: aurora.RGB = .{ 58, 96, 90 };
-/// Behind the selected session: a dark blue-teal barely off the background.
-const card_rgb: aurora.RGB = .{ 20, 28, 33 };
 /// Columns at the right left as the plain background.
 const card_margin = 0;
 /// The terminal's own background, as it reports it; until it does, a near
 /// black, so the card fades out against a dark theme without an edge.
-var terminal_bg: aurora.RGB = .{ 20, 21, 21 };
+var terminal_bg: aurora.RGB = palette.assumed_background;
 /// The card behind `row`, fading from its colour at the left toward the
 /// terminal's background at the right edge. Cells in the margin past the
 /// fade are left alone, so they are the background exactly even when the
 /// terminal never said what it is.
 fn shade(win: vaxis.Window, row: usize) void {
     if (row >= win.height) return;
-    const start = card_rgb;
+    const start = palette.session_card;
     const span = @max(win.width -| card_margin, 1);
     var x: u16 = 0;
     while (x < span) : (x += 1) {
@@ -852,10 +846,6 @@ fn shade(win: vaxis.Window, row: usize) void {
         win.writeCell(x, @intCast(row), cell);
     }
 }
-/// Server and display names.
-const entry_rgb: aurora.RGB = .{ 150, 206, 128 };
-/// The blink mark, warm so it reads as something to press.
-const blink_rgb: aurora.RGB = .{ 232, 198, 104 };
 /// A server or display row.
 fn isEntry(row: sidebar.Row) bool {
     const action = row.action orelse return false;
@@ -865,7 +855,7 @@ const Bar = enum { none, hover, hover_wide, selected, selected_wide };
 fn drawBar(win: vaxis.Window, row: usize, bar: Bar) void {
     if (row >= win.height) return;
     const wide = bar == .hover_wide or bar == .selected_wide;
-    const colour = if (bar == .selected or bar == .selected_wide) bar_rgb else hover_rgb;
+    const colour = if (bar == .selected or bar == .selected_wide) palette.selected_bar else palette.hover_bar;
     // Over whatever background the row has, so a card runs behind it.
     const under = if (win.readCell(0, @intCast(row))) |cell| cell.style.bg else .default;
     win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = if (wide) "◗" else "▌", .width = 1 }, .style = .{ .fg = .{ .rgb = colour }, .bg = under } });

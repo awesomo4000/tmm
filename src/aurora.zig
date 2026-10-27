@@ -10,17 +10,16 @@
 //! background and `lift` raises it toward white.
 
 const std = @import("std");
+const palette = @import("palette.zig");
 
-pub const RGB = [3]u8;
+pub const RGB = palette.RGB;
 
-const top_left: RGB = .{ 244, 55, 151 };
-const top_right: RGB = .{ 111, 85, 240 };
-const bottom_left: RGB = .{ 174, 65, 209 };
-const bottom_right: RGB = .{ 49, 179, 144 };
-/// What an inactive colour fades toward, and what a background tint starts
-/// from: near the dark terminal background the field is drawn over.
-const shade: RGB = .{ 30, 30, 34 };
-const white: RGB = .{ 255, 255, 255 };
+const top_left = palette.field_top_left;
+const top_right = palette.field_top_right;
+const bottom_left = palette.field_bottom_left;
+const bottom_right = palette.field_bottom_right;
+const shade = palette.field_shade;
+const white = palette.field_lift;
 
 pub fn mix(a: RGB, b: RGB, amount: u32, span: u32) RGB {
     const total = @max(1, span);
@@ -42,9 +41,8 @@ pub fn at(width: u16, height: u16, x: u16, y: u16) RGB {
 /// The cool end of the field on its own, blue at the top to teal at the
 /// bottom, for names that have to stand apart from the purple the rest of a
 /// row is drawn in. It ends at the bottom-right corner.
-const cool_top: RGB = .{ 92, 150, 245 };
 pub fn cool(height: u16, y: u16) RGB {
-    return mix(cool_top, bottom_right, y, @max(height, 1) - 1);
+    return mix(palette.session_name_top, bottom_right, y, @max(height, 1) - 1);
 }
 
 /// The same hue, mostly faded out, for what is not current.
