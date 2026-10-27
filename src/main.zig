@@ -868,7 +868,7 @@ fn drawBar(win: vaxis.Window, row: usize, bar: Bar) void {
     const colour = if (bar == .selected or bar == .selected_wide) bar_rgb else hover_rgb;
     // Over whatever background the row has, so a card runs behind it.
     const under = if (win.readCell(0, @intCast(row))) |cell| cell.style.bg else .default;
-    win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = if (wide) "◗" else "▎", .width = 1 }, .style = .{ .fg = .{ .rgb = colour }, .bg = under } });
+    win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = if (wide) "◗" else "▌", .width = 1 }, .style = .{ .fg = .{ .rgb = colour }, .bg = under } });
 }
 /// The rows that belong with row `c`: the run of non-blank rows around it
 /// and the blank row that closes it.

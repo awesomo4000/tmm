@@ -48,7 +48,7 @@ ROWS, COLS = 40, 60
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'zig-out/bin/tmm'
 TMUX = shutil.which('tmux') or 'tmux'
-BAR, WIDE = '▎', '◗'
+BAR, WIDE = '▌', '◗'
 BRIGHT, DIM = ('rgb', 72, 214, 176), ('rgb', 58, 96, 90)
 CARD = ('rgb', 20, 28, 33)
 
