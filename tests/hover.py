@@ -50,7 +50,7 @@ BINARY = ROOT / 'zig-out/bin/tmm'
 TMUX = shutil.which('tmux') or 'tmux'
 BAR, WIDE = '▎', '◗'
 BRIGHT, DIM = ('rgb', 72, 214, 176), ('rgb', 58, 96, 90)
-CARD = ('rgb', 40, 46, 53)
+CARD = ('rgb', 20, 28, 33)
 
 
 def spawn(argv, rows, cols):
@@ -172,7 +172,14 @@ def main():
                 # Faded out completely some columns short of the edge.
                 tail = [second.display.background(r, c) for c in range(COLS - 6, COLS)]
                 return (left == CARD and middle not in (None, CARD)
-                        and sum(middle[1:]) < sum(CARD[1:]) and tail == [None] * 6)
+                        and sum(middle[1:]) < sum(CARD[1:]) and tail == [None] * 6
+                        and last_shaded_is_background(r))
+
+            def last_shaded_is_background(r):
+                # The last shaded column is within a step of the background
+                # tmm assumes when the terminal does not say, so no edge shows.
+                last = second.display.background(r, COLS - 7)
+                return last is not None and all(abs(a - b) <= 1 for a, b in zip(last[1:], (20, 21, 21)))
             alpha_row = second.row_of('▼ alpha')
             if alpha_row is None or not second.until(lambda: all(carded(alpha_row + d) for d in (0, 1, 2))):
                 failures.append('the selected session was not on its fading card: %r'

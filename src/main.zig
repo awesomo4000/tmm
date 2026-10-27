@@ -822,22 +822,20 @@ const gutter: u16 = 1;
 /// and the hover's, the same green greyed and dimmed.
 const bar_rgb: aurora.RGB = .{ 72, 214, 176 };
 const hover_rgb: aurora.RGB = .{ 58, 96, 90 };
-/// Behind the selected session: a steel blue-teal laid thinly over the
-/// terminal's background, so it starts barely off the dark.
-const card_tint: aurora.RGB = .{ 80, 110, 130 };
-const card_alpha = 52; // of 255
+/// Behind the selected session: a dark blue-teal barely off the background.
+const card_rgb: aurora.RGB = .{ 20, 28, 33 };
 /// Columns at the right the card has fully faded out before.
 const card_margin = 6;
-/// The terminal's own background, as it reports it; until it does, a dark
-/// grey close to most.
-var terminal_bg: aurora.RGB = .{ 30, 30, 34 };
+/// The terminal's own background, as it reports it; until it does, a near
+/// black, so the card fades out against a dark theme without an edge.
+var terminal_bg: aurora.RGB = .{ 20, 21, 21 };
 /// The card behind `row`, fading from its colour at the left into the
 /// terminal's background some columns short of the right edge. Past that
 /// the cells are left alone, so they are the background exactly even when
 /// the terminal never said what it is.
 fn shade(win: vaxis.Window, row: usize) void {
     if (row >= win.height) return;
-    const start = aurora.mix(terminal_bg, card_tint, card_alpha, 255);
+    const start = card_rgb;
     const span = @max(win.width -| card_margin, 1);
     var x: u16 = 0;
     while (x < span) : (x += 1) {
