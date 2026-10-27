@@ -11,6 +11,9 @@ that order to begin with:
 
 - Dragging gamma's name up onto alpha puts gamma first, and the drag does not
   also count as a click, which would open the rename field.
+- Dragging by a pane row moves its whole session the same way, and is not
+  also a click on the pane: with no display attached, that click would say
+  to select one.
 - A drag that Escape interrupts puts the session back where it was.
 - Shift-J moves the session under the cursor down one place, and Shift-K
   back up.
@@ -108,8 +111,9 @@ def main():
             os.write(fd, b'\x1b[<%d;%d;%d%s' % (button, col, row, final))
             pump(0.05)
 
-        def drag(name, onto, escape=False):
-            start, end = row_of(name), row_of(onto)
+        def drag(name, onto, escape=False, by_pane=False):
+            # A session's first pane is the row under its name.
+            start, end = row_of(name) + (1 if by_pane else 0), row_of(onto)
             mouse(0, start, b'M')
             step = -1 if end < start else 1
             for row in range(start + step, end + step, step):
@@ -128,6 +132,16 @@ def main():
             pump(0.3)
             if any('Enter save' in l for l in display.lines()):
                 failures.append('the drag also opened the rename field')
+
+            drag('beta', 'gamma', by_pane=True)
+            if not until(lambda: listed() == ['beta', 'gamma', 'alpha']):
+                failures.append('dragging by a pane did not move its session: %r' % listed())
+            pump(0.3)
+            if any('Select a display first' in l for l in display.lines()):
+                failures.append('the drag by a pane also clicked the pane')
+            drag('beta', 'alpha')
+            if not until(lambda: listed() == ['gamma', 'alpha', 'beta']):
+                failures.append('dragging beta back below alpha failed: %r' % listed())
 
             drag('beta', 'gamma', escape=True)
             pump(0.3)

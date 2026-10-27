@@ -202,6 +202,9 @@ def main():
             os.write(ui_fd, b'\x1b[<0;3;%dM\x1b[<32;3;%dM\x1b[<0;3;%dm' % (beta_agent, elsewhere, elsewhere))
             settle()
             assert sessions()[first] == 'alpha'
+            # Pressing a pane and moving off it drags its session, here to the
+            # top of the list, so the pane's row has to be found again.
+            beta_agent = row_of('fake-codex')
             os.write(ui_fd, b'\x1b[<0;3;%dM' % beta_agent)
             pump()  # hold through refresh: a snapshot landing mid-press must not lose it
             os.write(ui_fd, b'\x1b[<0;3;%dm' % beta_agent)
@@ -215,7 +218,8 @@ def main():
             click(row_of('fake-codex'))
             until(lambda: where(first) == agent, 'the agent click to navigate back')
             split = tmux('split-window', '-d', '-t', agent, '-P', '-F', '#{pane_id}', '-c', root).strip()
-            until(lambda: screens[ui_fd].lines()[row_of('fake-codex')].strip() != '', 'the new split to be listed')
+            # Past the gutter, which may hold a bar on an otherwise blank row.
+            until(lambda: screens[ui_fd].lines()[row_of('fake-codex')][1:].strip() != '', 'the new split to be listed')
             marker = len(terminal_output[ui_fd])
             click(row_of('fake-codex') + 1)  # the new split, listed after its window's agent
             until(lambda: where(first) == split, 'the split click to navigate')

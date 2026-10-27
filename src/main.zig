@@ -310,13 +310,17 @@ pub fn main(init: std.process.Init) !void {
                         if (pressed) |p| a.free(p);
                         pressed = if (index) |i| try a.dupe(u8, rows[i].key) else null;
                         cursor = index;
-                        // A press on a session's name may turn into a drag;
-                        // the fold arrow beside it only ever folds.
+                        // A press anywhere in a session's rows, its name or a
+                        // pane, may turn into a drag of that session; the fold
+                        // arrow beside the name only ever folds.
                         if (drag) |d| a.free(d.id);
                         drag = null;
-                        if (index) |i| if (rows[i].action) |chosen| if (chosen == .session and mouse.col >= sidebar.fold_width) if (snapshot) |s| {
-                            const id = s.sessions[chosen.session].id;
-                            drag = .{ .id = try a.dupe(u8, id), .row = mouse.row, .from = order.indexOf(id) orelse 0 };
+                        if (index) |i| if (rows[i].action) |chosen| if (snapshot) |s| {
+                            const grabs = (chosen == .session and mouse.col >= sidebar.fold_width) or chosen == .pane;
+                            if (grabs) if (sessionOf(rows, i)) |held| {
+                                const id = s.sessions[held].id;
+                                drag = .{ .id = try a.dupe(u8, id), .row = mouse.row, .from = order.indexOf(id) orelse 0 };
+                            };
                         };
                     }
                     if (mouse.type == .drag) if (drag) |*d| {

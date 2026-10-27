@@ -2,7 +2,7 @@
 
 ## 10/27/2026
 
-- Let sessions be reordered by dragging a name, or with `J`/`K`, for the life of the running tmm. A new session goes to the bottom; Escape cancels a drag.
+- Let sessions be reordered by dragging a name or any of its panes, or with `J`/`K`, for the life of the running tmm. A new session goes to the bottom; Escape cancels a drag.
 - Started the session bar at the first pane, leaving the session's name clear; a folded session has none.
 - Drew the half circle as the Powerline rounded cap, U+E0B4, which meets the bar and fills the row's height.
 - Drew the session bar unbroken down the whole group, with a half circle growing out of it at the current pane, and at the pane under the pointer, in place of the `▸`.
