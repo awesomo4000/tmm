@@ -64,6 +64,10 @@ pub const entry_name = sage;
 /// The blink mark, warm so it reads as something to press.
 pub const blink_mark = goldenrod;
 
+/// The key bindings panel, and the keys in it.
+pub const help_panel = midnight_teal;
+pub const help_key = sage;
+
 /// Process names: one per agent, muted so the status symbols stay the
 /// loudest thing on a row, and a soft slate for everything else.
 pub const claude_name = terracotta;

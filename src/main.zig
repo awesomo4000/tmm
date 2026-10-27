@@ -53,6 +53,7 @@ const help =
     \\Run beside an ordinary tmux client. Select a display before navigating.
     \\Mouse: hover highlights, click selects, wheel browses without selecting.
     \\Sessions: j/k or arrows to browse, Enter to switch the selected display.
+    \\1-9 and 0 switch it to the first ten sessions as listed. ? lists the keys.
     \\Click a server, display, session, or agent. b blinks the display. q exits.
     \\--dump prints a read-only JSON snapshot without opening the terminal UI.
     \\
@@ -200,6 +201,8 @@ pub fn main(init: std.process.Init) !void {
     // A session being dragged to a new place in the list.
     var drag: ?Drag = null;
     defer if (drag) |d| a.free(d.id);
+    // The key bindings panel, which `?` opens over the bottom of the list.
+    var show_keys = false;
     var editor: ?Editor = null;
     defer if (editor) |*e| e.deinit(a);
     var error_text: ?[]const u8 = null;
@@ -403,6 +406,15 @@ pub fn main(init: std.process.Init) !void {
                     if (d.moved) order.moveTo(d.id, d.from);
                     a.free(d.id);
                     drag = null;
+                };
+                if (key.matches('?', .{}) or key.matches('/', .{ .shift = true })) show_keys = !show_keys;
+                if (key.matches(vaxis.Key.escape, .{})) show_keys = false;
+                // 1 to 9, then 0 for the tenth: the selected display goes to
+                // that session, counting as the list stands, folded or not.
+                for ("1234567890", 0..) |digit, n| if (key.matches(digit, .{})) if (snapshot) |s| {
+                    const listed = try order.arrange(a, s.sessions);
+                    defer a.free(listed);
+                    if (n < listed.len) action = .{ .session = listed[n] };
                 };
                 if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) break;
                 // Shift-J and Shift-K move the cursor's session down and up.
@@ -698,7 +710,8 @@ pub fn main(init: std.process.Init) !void {
         if (win.height >= 1) draw(win, fa, win.height - 1, if (editor) |edit|
             if (edit.pending) "saving..." else "Enter save  Esc cancel"
         else
-            "j/k move  J/K reorder  space fold  q quit", .{ .fg = .{ .index = 8 } });
+            "j/k move  1-0 session  ? keys  q quit", .{ .fg = .{ .index = 8 } });
+        if (show_keys) drawHelp(win, fa);
 
         // Wait out the rest of the frame budget, and hand over the moment
         // input arrives: a frame rendered late is invisible, and the key
@@ -876,6 +889,38 @@ fn paintSymbols(win: vaxis.Window, row: usize, symbol: []const u8, color: u8) vo
         const glyph = cell.char.grapheme;
         if (std.mem.eql(u8, glyph, "✓")) cell.style.fg = .{ .index = 2 } else if (std.mem.eql(u8, glyph, symbol)) cell.style.fg = .{ .index = color } else continue;
         win.writeCell(x, @intCast(row), cell);
+    }
+}
+/// What `?` lists, key then what it does.
+const bindings = [_][2][]const u8{
+    .{ "j k  ↓ ↑", "move" },
+    .{ "J K", "move the session down, up" },
+    .{ "1-9 0", "switch to session 1 to 10" },
+    .{ "Enter", "switch to it, or select" },
+    .{ "space", "fold the session" },
+    .{ "b", "blink the display" },
+    .{ "?  Esc", "close this" },
+    .{ "q", "quit" },
+    .{ "click", "select; a name renames" },
+    .{ "drag", "move a session" },
+};
+/// The bindings in a panel across the bottom of the list, above the footer,
+/// over whatever rows are there.
+fn drawHelp(win: vaxis.Window, a: std.mem.Allocator) void {
+    const height: u16 = bindings.len + 1;
+    if (win.height < height + 3) return;
+    const first = win.height - 2 - height;
+    var row: u16 = first;
+    while (row < first + height) : (row += 1) {
+        var x: u16 = 0;
+        while (x < win.width) : (x += 1) win.writeCell(x, row, .{ .style = .{ .bg = .{ .rgb = palette.help_panel } } });
+    }
+    draw(win, a, first, "keys", .{ .bold = true, .bg = .{ .rgb = palette.help_panel } });
+    tint(win, first, 0, 4, .full);
+    for (bindings, 0..) |binding, i| {
+        const y = first + 1 + i;
+        draw(win, a, y, binding[0], .{ .fg = .{ .rgb = palette.help_key }, .bg = .{ .rgb = palette.help_panel } });
+        if (win.width > 11) draw(win.child(.{ .x_off = 11 }), a, y, binding[1], .{ .bg = .{ .rgb = palette.help_panel } });
     }
 }
 const Drag = struct {
