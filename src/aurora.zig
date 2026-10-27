@@ -39,6 +39,14 @@ pub fn at(width: u16, height: u16, x: u16, y: u16) RGB {
     return mix(upper, lower, y, down);
 }
 
+/// The cool end of the field on its own, blue at the top to teal at the
+/// bottom, for names that have to stand apart from the purple the rest of a
+/// row is drawn in. Not compost's; it borrows the bottom-right corner.
+const cool_top: RGB = .{ 92, 150, 245 };
+pub fn cool(height: u16, y: u16) RGB {
+    return mix(cool_top, bottom_right, y, @max(height, 1) - 1);
+}
+
 /// Compost's unfocused border: the same hue, mostly faded out.
 pub fn dim(c: RGB) RGB {
     return mix(shade, c, 60, 100);

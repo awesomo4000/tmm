@@ -98,10 +98,14 @@ def main():
                 os.write(fd, b'\x1b[<0;2;%d%s' % (row + 1, final))
                 pump(0.2)
 
+        def shown(name):
+            """A session row, which carries the session's directory after it."""
+            return any(l == name or l.startswith(name + ' ') for l in rows())
+
         def painted(text):
             """The foreground colour of the first letter of the name in a row."""
             for r, line in enumerate(display.lines()):
-                if line.strip() == text:
+                if line.strip() == text or line.strip().startswith(text + ' '):
                     return display.colour(r, line.index(text) + len('[+] '))
             return 'not drawn'
 
@@ -116,7 +120,7 @@ def main():
                                 '%r' % (display.colour(0, 0),))
             for name in ('finished', 'waiting'):
                 click_fold(name)
-            if not until(lambda: '[+] finished' in rows() and '[+] waiting' in rows()):
+            if not until(lambda: shown('[+] finished') and shown('[+] waiting')):
                 failures.append('the sessions did not fold: %r' % rows())
             if any('claude' in l for l in rows()):
                 failures.append('a folded session still drew its panes: %r' % rows())
@@ -131,7 +135,7 @@ def main():
                                 'drawn in its own colour: %r' % (waiting,))
 
             click_fold('finished')
-            if not until(lambda: '[-] finished' in rows()
+            if not until(lambda: shown('[-] finished')
                          and any('claude' in l for l in rows())):
                 failures.append('the session did not open again: %r' % rows())
         finally:

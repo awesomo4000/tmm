@@ -24,6 +24,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run.addArgs(args);
     b.step("run", "Run tmm").dependOn(&run.step);
     const test_mod = b.createModule(.{ .root_source_file = b.path("src/model.zig"), .target = target, .optimize = optimize });
+    test_mod.addImport("libtmux", b.dependency("libtmux", .{}).module("libtmux"));
     test_mod.addImport("vaxis", b.dependency("vaxis", .{ .target = target, .optimize = optimize }).module("vaxis"));
     const tests = b.addTest(.{ .root_module = test_mod });
     b.step("test", "Test record parsing and target identity").dependOn(&b.addRunArtifact(tests).step);

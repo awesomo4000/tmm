@@ -286,4 +286,5 @@ test {
     _ = @import("reconcile.zig");
     _ = @import("state.zig");
     _ = @import("aurora.zig");
+    _ = @import("sidebar.zig");
 }

@@ -61,6 +61,10 @@ pub const Row = struct {
     /// Drawn dim after the text, for what is useful but not the point: a
     /// pane's directory.
     detail: []const u8 = "",
+    /// The status glyph inside `text`, drawn alone in `symbol_color` so the
+    /// name beside it can stay readable when the state is a dim one.
+    symbol: []const u8 = "",
+    symbol_color: u8 = 7,
     /// A folded session holding a finished result nobody has looked at, so
     /// its name says so in place of the rows it hides.
     done: bool = false,
@@ -110,12 +114,14 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
                 if (client.same(t.client) and std.mem.eql(u8, client.session, session.id)) active = true;
             };
             const fold = folded.contains(session.id);
+            const where = sessionDirectory(s.panes, session.id);
             const session_row = list.items.len;
             try list.append(a, .{
                 .text = try std.fmt.allocPrint(a, "{s} {s}", .{ if (fold) "[+]" else "[-]", session.name }),
                 .key = try std.fmt.allocPrint(a, "session:{s}", .{session.id}),
                 .action = .{ .session = i },
                 .active = active,
+                .detail = try tilde(a, home, where),
             });
             for (s.panes, 0..) |pane, pane_index| {
                 if (!std.mem.eql(u8, pane.session, session.id)) continue;
@@ -168,15 +174,65 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
                 else
                     try std.fmt.allocPrint(a, "{s}   {s}", .{ marker, if (pane.command.len > 0) pane.command else "shell" });
                 const pane_key = try std.fmt.allocPrint(a, "pane:{s}:{s}", .{ pane.session, pane.id });
-                var path = pane.cwd;
-                if (home) |h| if (h.len > 0 and std.mem.startsWith(u8, path, h) and (path.len == h.len or path[h.len] == '/')) {
-                    path = try std.fmt.allocPrint(a, "~{s}", .{path[h.len..]});
-                };
-                try list.append(a, .{ .text = text, .detail = path, .key = pane_key, .action = .{ .pane = pane_index }, .color = if (is_agent) state.color else 7, .active = pane_active });
+                // Only a pane that has wandered off says where it is; the rest
+                // are where the session row says.
+                const path = if (std.mem.eql(u8, pane.cwd, where)) "" else try tilde(a, home, pane.cwd);
+                try list.append(a, .{
+                    .text = text,
+                    .detail = path,
+                    .key = pane_key,
+                    .action = .{ .pane = pane_index },
+                    // A dim state dims its symbol, not the name: a row of idle
+                    // agents has to stay readable.
+                    .color = if (is_agent and state.color != 8) state.color else 7,
+                    .symbol = if (is_agent) state.symbol else "",
+                    .symbol_color = state.color,
+                    .active = pane_active,
+                });
             }
         }
     }
     return list.toOwnedSlice(a);
+}
+
+/// Where a session's panes are, which by habit is one directory: the one most
+/// of them share, the first pane's on a tie. tmux's own session path is not
+/// it, because that is only where the session was created.
+fn sessionDirectory(panes: []const m.Pane, session: []const u8) []const u8 {
+    var best: []const u8 = "";
+    var best_count: usize = 0;
+    for (panes, 0..) |pane, i| {
+        if (!std.mem.eql(u8, pane.session, session)) continue;
+        var count: usize = 0;
+        for (panes[i..]) |other| {
+            if (std.mem.eql(u8, other.session, session) and std.mem.eql(u8, other.cwd, pane.cwd)) count += 1;
+        }
+        if (count > best_count) {
+            best = pane.cwd;
+            best_count = count;
+        }
+    }
+    return best;
+}
+
+/// A path with the home directory written as `~`.
+fn tilde(a: std.mem.Allocator, home: ?[]const u8, path: []const u8) ![]const u8 {
+    if (home) |h| if (h.len > 0 and std.mem.startsWith(u8, path, h) and (path.len == h.len or path[h.len] == '/')) {
+        return std.fmt.allocPrint(a, "~{s}", .{path[h.len..]});
+    };
+    return path;
+}
+
+test "a session's directory is the one most of its panes share" {
+    const pane: m.Pane = .{ .session = "$1", .window = "@1", .id = "%1", .cwd = "/a", .command = "", .agent = "", .state = "", .status = "" };
+    var b = pane;
+    b.cwd = "/b";
+    var other = pane;
+    other.session = "$2";
+    other.cwd = "/c";
+    try std.testing.expectEqualStrings("/b", sessionDirectory(&.{ pane, b, other, b }, "$1"));
+    try std.testing.expectEqualStrings("/a", sessionDirectory(&.{ pane, b }, "$1"));
+    try std.testing.expectEqualStrings("/c", sessionDirectory(&.{ pane, other }, "$2"));
 }
 
 /// Discover sockets only in tmux's conventional per-user directory. Custom

@@ -526,10 +526,15 @@ pub fn main(init: std.process.Init) !void {
             const is_session = row.action != null and row.action.? == .session;
             if (row.heading) {
                 tint(win, i + 2, 0, win.width, .full);
-            } else if (!row.done and row.color == 7 and (row.active or is_session)) {
-                const end = if (is_session) win.gwidth(m.display(fa, row.text) catch row.text) else win.width;
-                tint(win, i + 2, 0, end, if (row.active) .lift else .dim);
+            } else if (is_session and !row.done) {
+                // Session names in the cool end of the field, so they stand
+                // apart from the purple directories beside them.
+                const end = win.gwidth(m.display(fa, row.text) catch row.text);
+                tint(win, i + 2, 0, end, if (row.active) .cool_lift else .cool);
+            } else if (row.active and row.color == 7) {
+                tint(win, i + 2, 0, win.width, .lift);
             }
+            if (row.symbol.len > 0) paintSymbols(win, i + 2, row.symbol, row.symbol_color);
             // The selection bar is the field washed over the dark, spanning
             // the clickable column like the flat bar it replaces.
             if (row.action != null and (highlighted or row.active)) wash(win, i + 2, 0, column_width, if (highlighted) 30 else 16);
@@ -619,7 +624,7 @@ fn fieldWidth(win: vaxis.Window) u16 {
 }
 /// Recolour the text already drawn in `row` from the aurora field. Blank
 /// cells are recoloured too, which is harmless: they draw nothing.
-fn tint(win: vaxis.Window, row: usize, from: u16, to: u16, how: enum { full, dim, lift }) void {
+fn tint(win: vaxis.Window, row: usize, from: u16, to: u16, how: enum { full, dim, lift, cool, cool_lift }) void {
     const down = fieldHeight(win);
     if (row >= win.height) return;
     var x = from;
@@ -630,7 +635,22 @@ fn tint(win: vaxis.Window, row: usize, from: u16, to: u16, how: enum { full, dim
             .full => field,
             .dim => aurora.dim(field),
             .lift => aurora.lift(field),
+            .cool => aurora.cool(down, @min(@as(u16, @intCast(row)), down -| 1)),
+            .cool_lift => aurora.lift(aurora.cool(down, @min(@as(u16, @intCast(row)), down -| 1))),
         } };
+        win.writeCell(x, @intCast(row), cell);
+    }
+}
+/// Colour a pane row's status glyphs on their own: its state symbol, and the
+/// check an unread completion adds before it. They sit in the first few
+/// cells, ahead of the name.
+fn paintSymbols(win: vaxis.Window, row: usize, symbol: []const u8, color: u8) void {
+    if (row >= win.height) return;
+    var x: u16 = 0;
+    while (x < @min(8, win.width)) : (x += 1) {
+        var cell = win.readCell(x, @intCast(row)) orelse continue;
+        const glyph = cell.char.grapheme;
+        if (std.mem.eql(u8, glyph, "✓")) cell.style.fg = .{ .index = 2 } else if (std.mem.eql(u8, glyph, symbol)) cell.style.fg = .{ .index = color } else continue;
         win.writeCell(x, @intCast(row), cell);
     }
 }
