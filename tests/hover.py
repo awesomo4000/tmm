@@ -170,15 +170,15 @@ def main():
                 left = second.display.background(r, 0)
                 middle = second.display.background(r, COLS // 2)
                 # Faded out completely some columns short of the edge.
-                tail = [second.display.background(r, c) for c in range(COLS - 6, COLS)]
+                tail = [second.display.background(r, c) for c in range(COLS - 3, COLS)]
                 return (left == CARD and middle not in (None, CARD)
-                        and sum(middle[1:]) < sum(CARD[1:]) and tail == [None] * 6
+                        and sum(middle[1:]) < sum(CARD[1:]) and tail == [None] * 3
                         and last_shaded_is_background(r))
 
             def last_shaded_is_background(r):
                 # The last shaded column is within a step of the background
                 # tmm assumes when the terminal does not say, so no edge shows.
-                last = second.display.background(r, COLS - 7)
+                last = second.display.background(r, COLS - 4)
                 return last is not None and all(abs(a - b) <= 1 for a, b in zip(last[1:], (20, 21, 21)))
             alpha_row = second.row_of('▼ alpha')
             if alpha_row is None or not second.until(lambda: all(carded(alpha_row + d) for d in (0, 1, 2))):

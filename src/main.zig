@@ -825,7 +825,7 @@ const hover_rgb: aurora.RGB = .{ 58, 96, 90 };
 /// Behind the selected session: a dark blue-teal barely off the background.
 const card_rgb: aurora.RGB = .{ 20, 28, 33 };
 /// Columns at the right the card has fully faded out before.
-const card_margin = 6;
+const card_margin = 3;
 /// The terminal's own background, as it reports it; until it does, a near
 /// black, so the card fades out against a dark theme without an edge.
 var terminal_bg: aurora.RGB = .{ 20, 21, 21 };
@@ -842,7 +842,11 @@ fn shade(win: vaxis.Window, row: usize) void {
         var cell = win.readCell(x, @intCast(row)) orelse continue;
         // A cleared cell is drawn by erasing, which would drop the shade.
         cell.default = false;
-        cell.style.bg = .{ .rgb = aurora.mix(start, terminal_bg, x, span) };
+        // Smoothstep: the colour holds near the left, drops through the
+        // middle, and eases into the background with no visible end.
+        const t: u64 = @as(u64, x) * 1000 / span;
+        const eased: u32 = @intCast(t * t * (3000 - 2 * t) / 1_000_000);
+        cell.style.bg = .{ .rgb = aurora.mix(start, terminal_bg, eased, 1000) };
         win.writeCell(x, @intCast(row), cell);
     }
 }
