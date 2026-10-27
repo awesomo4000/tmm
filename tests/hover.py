@@ -18,7 +18,7 @@ Two tmm runs against one disposable server:
   Its row carries `➤` and no bar. Its session has the bright bar with a half
   circle at its current pane, and the card behind it through the blank row
   that closes it. Then the pointer hovers a pane of another session: the dim
-  bar runs from that session's name through the blank row below it, with a
+  bar runs from that session's first pane through the blank row below it, with a
   half circle at the pane, with no card, and the
   selected session keeps its bright one. A focus-out report (what a terminal
   sends when the pane loses focus) must take the dim bar away.
@@ -203,7 +203,8 @@ def main():
                         for r in range(top, top + count)]
 
             alpha = second.row_of('▼ alpha')
-            selected = [(BAR, False, BRIGHT), (BAR, True, BRIGHT), (BAR, False, BRIGHT)]
+            # No bar beside the session's name; it starts at the panes.
+            selected = [(' ', False, None), (BAR, True, BRIGHT), (BAR, False, BRIGHT)]
             if alpha is None or not second.until(lambda: bars(alpha, 3) == selected):
                 failures.append('the selected session did not keep the bright bar: %r'
                                 % (bars(alpha, 3) if alpha is not None else None,))
@@ -215,7 +216,7 @@ def main():
                 os.write(second.fd, b'\x1b[<35;6;%dM' % (row + 2))
                 # The blank row above beta closes alpha's group, so it is
                 # alpha's bright bar, not the hover's.
-                hovered = [(BAR, False, BRIGHT), (BAR, False, DIM), (BAR, True, DIM), (BAR, False, DIM)]
+                hovered = [(BAR, False, BRIGHT), (' ', False, None), (BAR, True, DIM), (BAR, False, DIM)]
                 if not second.until(lambda: bars(row - 1, 4) == hovered):
                     failures.append('hover did not run the dim bar from the session through '
                                     'the blank row below it: %r' % bars(row - 1, 4))

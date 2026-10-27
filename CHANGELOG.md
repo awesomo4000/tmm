@@ -2,6 +2,7 @@
 
 ## 10/27/2026
 
+- Started the session bar at the first pane, leaving the session's name clear; a folded session has none.
 - Drew the half circle as the Powerline rounded cap, U+E0B4, which meets the bar and fills the row's height.
 - Drew the session bar unbroken down the whole group, with a half circle growing out of it at the current pane, and at the pane under the pointer, in place of the `▸`.
 - Gathered every direct colour into `src/palette.zig`, named by look and then by job; the drawing code asks only for the job.

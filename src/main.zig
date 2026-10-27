@@ -629,6 +629,11 @@ pub fn main(init: std.process.Init) !void {
         };
         for (bars, 0..) |b, r| {
             if (b == .none or r < offset or r - offset >= visible) continue;
+            // The bar starts below the session's name, beside its panes; a
+            // folded session, with no panes showing, has none.
+            const is_session = rows[r].action != null and rows[r].action.? == .session;
+            const after_session = r > 0 and rows[r - 1].action != null and rows[r - 1].action.? == .session;
+            if (is_session or (after_session and rows[r].text.len == 0)) continue;
             drawBar(vx.window(), r - offset + top, b, rows[r].action != null and rows[r].action.? == .pane);
         }
         if (win.height >= 2) draw(win, fa, win.height - 2, error_text orelse "", .{ .fg = .{ .index = 1 } });
