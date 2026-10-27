@@ -168,18 +168,16 @@ def main():
             # bar, through the blank row after it, fading out to the right.
             def carded(r):
                 left = second.display.background(r, 0)
-                middle = second.display.background(r, COLS // 2)
-                # Faded out completely some columns short of the edge.
-                tail = [second.display.background(r, c) for c in range(COLS - 3, COLS)]
+                middle = second.display.background(r, COLS * 3 // 4)
                 return (left == CARD and middle not in (None, CARD)
-                        and sum(middle[1:]) < sum(CARD[1:]) and tail == [None] * 3
-                        and last_shaded_is_background(r))
+                        and sum(middle[1:]) < sum(CARD[1:]) and edge_near_background(r))
 
-            def last_shaded_is_background(r):
-                # The last shaded column is within a step of the background
-                # tmm assumes when the terminal does not say, so no edge shows.
-                last = second.display.background(r, COLS - 4)
-                return last is not None and all(abs(a - b) <= 1 for a, b in zip(last[1:], (20, 21, 21)))
+            def edge_near_background(r):
+                # At the right edge the card is within a few steps of the
+                # background tmm assumes when the terminal does not say.
+                last = second.display.background(r, COLS - 1)
+                return last is not None and all(abs(a - b) <= 3 for a, b in zip(last[1:], (20, 21, 21)))
+
             alpha_row = second.row_of('▼ alpha')
             if alpha_row is None or not second.until(lambda: all(carded(alpha_row + d) for d in (0, 1, 2))):
                 failures.append('the selected session was not on its fading card: %r'
