@@ -2,6 +2,11 @@
 
 ## 10/27/2026
 
+- Drew the name at the top in block letters coloured from the aurora field, with ten letterings to choose from by `TMM_BANNER` while one is picked.
+- Gave each agent its own flat name colour, Claude a muted orange and Codex a soft steel blue, and other processes a soft slate rather than white.
+- Put a blank row before each session, and made the fold marks arrows: `▼` open, `▶` folded.
+- Cut a directory too wide for the sidebar from the left, as `…/name`, so the part that names it stays visible.
+- Repaired `tests/integration.py`, which clicked hard-coded rows and had been broken since the sidebar was compacted, unnoticed because it was not in `mise run test`. It now aims at rows by what they say, and it is in the suite.
 - Wrote a session's directory once, after its name, instead of after every pane. It is the directory most of the session's panes share; a pane shows its own only when it is somewhere else.
 - Drew session names from the blue and teal end of the field, so they stand apart from the purple directories, and stopped dimming an idle agent's name: only its `○` is grey now.
 - Coloured the sidebar from the field compost draws its borders with, so tmm reads as part of the frame it sits in. The title and headings sweep pink to violet; session names and directories take the field faded; the current server, display and session take it lifted; selection and hover are a faint wash of it. Agent status colours are unchanged.

@@ -29,6 +29,7 @@ run = [
   "python3 tests/claude_hook.py",
   "python3 tests/reported_lifetime.py",
   "python3 tests/fold.py",
+  "python3 tests/integration.py",
 ]
 
 [tasks.clean-tests]

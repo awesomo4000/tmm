@@ -7,6 +7,7 @@
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
 import pty
 import select
@@ -16,9 +17,12 @@ import struct
 import subprocess
 import tempfile
 import termios
+import sys
 import time
 
 BINARY = Path(__file__).resolve().parents[1] / 'zig-out/bin/tmm'
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from screen import Screen  # noqa: E402
 
 
 def main():
@@ -27,6 +31,10 @@ def main():
         other = root + '/other'
         children = []
         terminal_output = {}
+        # What each terminal shows, so a click can aim at a row by what it
+        # says. Hard-coded row numbers broke on every layout change. Larger
+        # than any size the test sets, so nothing wraps.
+        screens = {}
         ui_fd = -1
 
         def command(sock, *args):
@@ -55,6 +63,7 @@ def main():
                     except OSError:
                         continue
                     terminal_output.setdefault(fd, bytearray()).extend(data)
+                    screens.setdefault(fd, Screen(48, 120)).feed(data)
                     if b'\x1b[c' in data or b'\x1b[0c' in data:
                         os.write(fd, b'\x1b[?1;2c')
                     if b'\x1b[5n' in data:
@@ -84,6 +93,22 @@ def main():
                 if name == client:
                     return pane
             raise AssertionError(('client not attached', client))
+
+        def row_of(match, after=None):
+            """The 1-based row whose text satisfies `match`, a substring or a
+            predicate, optionally only below the row `after` names."""
+            test = match if callable(match) else (lambda line: match in line)
+            lines = screens[ui_fd].lines()
+            start = 0
+            if after is not None:
+                start = row_of(after) if not isinstance(after, int) else after
+            for r in range(start, len(lines)):
+                if test(lines[r]):
+                    return r + 1
+            raise AssertionError(('no row shows', match, lines))
+
+        def first_word(word):
+            return lambda line: line.split()[:1] == [word]
 
         def click(row, col=3):
             os.write(ui_fd, f'\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m'.encode())
@@ -124,25 +149,27 @@ def main():
             second = next(c['name'] for c in initial['clients'] if c['pid'] == str(second_pid))
             ui_pid, ui_fd = terminal([str(BINARY), '-S', socket, '--client', first])
             pump(2)
-            assert b'tmm : tmux micro manager' in terminal_output[ui_fd]
+            assert b'tmux micro manager' in re.sub(rb'\x1b\[[0-9;:]*m', b'', bytes(terminal_output[ui_fd]))
             assert b'fake-codex' in terminal_output[ui_fd]
             # Both displays, both sessions, and all their panes are visible together.
-            click(11)  # blink selected display
+            click(row_of(first_word('blink')))  # blink selected display
             pump(1)
             assert b'tmm display:' in terminal_output[first_fd]
             assert b'tmm display:' not in terminal_output[second_fd]
             # Hover and cancelled clicks do not navigate.
+            beta_agent = row_of('fake-codex')
+            elsewhere = row_of(first_word('servers'))
             for _ in range(20):
-                os.write(ui_fd, b'\x1b[<35;3;24M' * 100)  # motion burst over beta agent
+                os.write(ui_fd, b'\x1b[<35;3;%dM' % beta_agent * 100)  # motion burst over beta agent
                 pump(0.02)  # drain output while sending, as a real terminal does
             pump()
             assert sessions() == {first: 'alpha', second: 'alpha'}
-            os.write(ui_fd, b'\x1b[<0;3;24M\x1b[<32;3;15M\x1b[<0;3;15m')
+            os.write(ui_fd, b'\x1b[<0;3;%dM\x1b[<32;3;%dM\x1b[<0;3;%dm' % (beta_agent, elsewhere, elsewhere))
             pump()
             assert sessions()[first] == 'alpha'
-            os.write(ui_fd, b'\x1b[<0;3;24M')
+            os.write(ui_fd, b'\x1b[<0;3;%dM' % beta_agent)
             pump()  # hold through refresh
-            os.write(ui_fd, b'\x1b[<0;3;24m')
+            os.write(ui_fd, b'\x1b[<0;3;%dm' % beta_agent)
             pump(1.2)
             assert sessions() == {first: 'beta', second: 'alpha'}, sessions()
             shown = where(first)
@@ -150,17 +177,17 @@ def main():
             # Ordinary shell panes are also listed and navigate to their exact pane.
             shell_pane = next(p for p in initial['panes'] if not p['agent'])
             assert shell_pane['command'].encode() in terminal_output[ui_fd]
-            click(23)  # the pane directory is part of the clickable entry
+            click(row_of(first_word(shell_pane['command']), after=lambda l: ' beta' in l))
             pump(1.2)
             assert sessions() == {first: 'beta', second: 'alpha'}
             assert where(first) == shell_pane['id']
-            click(24)
+            click(row_of('fake-codex'))
             pump(1.2)
             assert where(first) == agent
             split = tmux('split-window', '-d', '-t', agent, '-P', '-F', '#{pane_id}', '-c', root).strip()
             pump(1.2)
             marker = len(terminal_output[ui_fd])
-            click(27)  # directory beneath the new split's row
+            click(row_of('fake-codex') + 1)  # the new split, listed after its window's agent
             pump(1.2)
             assert where(first) == split
             assert sessions()[second] == 'alpha'
@@ -169,7 +196,7 @@ def main():
             tmux('select-pane', '-t', agent)
             pump(1.2)
             assert '▸'.encode() in terminal_output[ui_fd][marker:], 'current-pane marker did not follow native navigation'
-            click(24)
+            click(row_of('fake-codex'))
             pump(1.2)
             assert where(first) == agent
             tmux('kill-pane', '-t', split)
@@ -181,18 +208,21 @@ def main():
             pump(1.2)
             live_pane = next(p for p in snapshot()['panes'] if p['id'] == agent)
             assert live_pane['cwd'] == os.path.realpath(pane_dir)
-            assert b'pane-current-directory' in terminal_output[ui_fd]
+            # Whole, though the path is wider than the sidebar: a long
+            # directory gives up its start, never the name at its end.
+            assert '…' in screens[ui_fd].text() and 'pane-current-directory' in screens[ui_fd].text(), screens[ui_fd].text()
 
             # Native navigation is reflected, then session click navigates back.
             tmux('switch-client', '-c', first, '-t', '=alpha')
             pump()
-            click(20)  # clicking the beta name opens the inline editor
+            beta_name = row_of(lambda l: l.split()[1:2] == ['beta'])
+            click(beta_name)  # clicking the beta name opens the inline editor
             os.write(ui_fd, b'qjk')  # ordinary text, not sidebar shortcuts
             pump()
             os.write(ui_fd, b'\x1b')
             pump()
             assert {s['name'] for s in snapshot()['sessions']} == {'alpha', 'beta'}
-            click(20)
+            click(beta_name)
             os.write(ui_fd, b'alpha\r')  # duplicate name must fail without losing the editor
             pump(1.2)
             assert {s['name'] for s in snapshot()['sessions']} == {'alpha', 'beta'}
@@ -236,7 +266,7 @@ def main():
             pump(1.8)
             assert '✓'.encode() in terminal_output[ui_fd][marker:], ('completion was not displayed', repr(terminal_output[ui_fd][marker:]), next(p for p in snapshot()['panes'] if p['id'] == agent))
             marker = len(terminal_output[ui_fd])
-            click(24)
+            click(row_of(lambda l: 'codex' in l.split()))
             pump()
             assert '○'.encode() in terminal_output[ui_fd][marker:], 'completion was not acknowledged'
             # Claude activity often omits the interrupt hint. Exercise capture,
@@ -254,7 +284,7 @@ def main():
             pump(1.8)
             assert '✓'.encode() in terminal_output[ui_fd][marker:], 'Claude completion was not displayed'
             marker = len(terminal_output[ui_fd])
-            click(24)
+            click(row_of(lambda l: 'claude' in l.split()))
             pump()
             assert '○'.encode() in terminal_output[ui_fd][marker:], 'Claude completion was not acknowledged'
             # The heading itself is not the new-session button. Creation uses
@@ -265,14 +295,15 @@ def main():
             source_cwd = next(p['cwd'] for p in snapshot()['panes'] if p['id'] == source_pane)
             source_windows = tmux('list-windows', '-t', '=beta renamed é', '-F', '#{window_id}')
             marker = len(terminal_output[ui_fd])
-            click(13)
+            heading = row_of(first_word('sessions'))
+            click(heading)
             assert b'Enter save' not in terminal_output[ui_fd][marker:]
-            click(13, 14)
+            click(heading, 14)
             os.write(ui_fd, b'cancelled-new-session')
             os.write(ui_fd, b'\x1b')
             pump()
             assert len(snapshot()['sessions']) == 2
-            click(13, 14)
+            click(heading, 14)
             os.write(ui_fd, b'alpha\r')
             pump(1.2)
             assert len(snapshot()['sessions']) == 2
@@ -303,7 +334,7 @@ def main():
             command(other, '-f', '/dev/null', 'new-session', '-d', '-s', 'elsewhere', '-c', root)
             ui_pid, ui_fd = terminal([str(BINARY), '-S', socket, '--server-path', other])
             pump(2)
-            click(6)  # second server
+            click(row_of(first_word('other')))  # second server
             pump()
             assert b'elsewhere' in terminal_output[ui_fd]
             assert sessions() == {second: 'renamed|é'}

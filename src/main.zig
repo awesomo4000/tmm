@@ -9,6 +9,7 @@ const m = @import("model.zig");
 const sidebar = @import("sidebar.zig");
 const backend = @import("backend.zig");
 const aurora = @import("aurora.zig");
+const banner = @import("banner.zig");
 pub const panic = std.debug.FullPanic(struct {
     fn call(message: []const u8, address: ?usize) noreturn {
         vaxis.recover();
@@ -466,7 +467,12 @@ pub fn main(init: std.process.Init) !void {
         sidebar_width = win.width;
         sidebar_height = win.height;
         column_width = @min(win.width, natural);
-        const visible: usize = win.height -| 4;
+        // The banner, then a blank row, then the list; the plain title when
+        // the banner is wider than the window.
+        const chosen = banner.named(init.environ_map.get("TMM_BANNER"));
+        const title = if (bannerWidth(win, chosen) <= win.width) chosen else banner.plain;
+        top = @intCast(title.lines.len + 1);
+        const visible: usize = win.height -| (top + 2);
         offset = @min(offset, rows.len -| visible);
         if (reveal) if (cursor) |c| {
             if (c < offset) offset = c;
@@ -474,32 +480,31 @@ pub fn main(init: std.process.Init) !void {
         };
         win.clear();
         win.hideCursor();
-        field_rows = @intCast(@min(rows.len -| offset, visible) + 2);
+        field_rows = @intCast(@min(rows.len -| offset, visible) + top);
         field_cols = column_width;
-        draw(win, fa, 0, "tmm : tmux micro manager", .{ .bold = true });
-        tint(win, 0, 0, win.width, .full);
+        drawBanner(win, fa, title);
         for (rows[offset..], 0..) |row, i| {
             if (i >= visible) break;
             const highlighted = cursor != null and row.action != null and std.mem.eql(u8, rows[cursor.?].key, row.key);
             if (editor) |*edit| if (std.mem.eql(u8, edit.key, row.key)) {
-                draw(win, fa, i + 2, "[", .{ .fg = .{ .index = 14 } });
+                draw(win, fa, i + top, "[", .{ .fg = .{ .index = 14 } });
                 if (win.width >= 3) {
-                    const field = win.child(.{ .x_off = 1, .y_off = @intCast(i + 2), .width = win.width - 2, .height = 1 });
+                    const field = win.child(.{ .x_off = 1, .y_off = @intCast(i + top), .width = win.width - 2, .height = 1 });
                     edit.input.drawWithStyle(field, .{ .fg = .{ .index = 14 }, .ul_style = .single });
-                    win.writeCell(win.width - 1, @intCast(i + 2), .{ .char = .{ .grapheme = "]" }, .style = .{ .fg = .{ .index = 14 } } });
+                    win.writeCell(win.width - 1, @intCast(i + top), .{ .char = .{ .grapheme = "]" }, .style = .{ .fg = .{ .index = 14 } } });
                 }
                 continue;
             };
             if (row.action != null and row.action.? == .new_session) {
                 const heading_win = win.child(.{ .width = @min(win.width, new_button_col) });
-                draw(heading_win, fa, i + 2, row.text, .{ .bold = true });
-                tint(win, i + 2, 0, new_button_col, .full);
+                draw(heading_win, fa, i + top, row.text, .{ .bold = true });
+                tint(win, i + top, 0, new_button_col, .full);
                 const button = win.child(.{ .x_off = @min(win.width, new_button_col), .width = @min(win.width -| new_button_col, new_button_text.len) });
-                draw(button, fa, i + 2, new_button_text, .{
+                draw(button, fa, i + top, new_button_text, .{
                     .fg = .{ .index = if (highlighted) 7 else 8 },
                     .bold = highlighted,
                 });
-                if (highlighted) wash(win, i + 2, new_button_col, new_button_col + new_button_text.len, 30);
+                if (highlighted) wash(win, i + top, new_button_col, new_button_col + new_button_text.len, 30);
                 continue;
             }
             const background: vaxis.Cell.Color = .default;
@@ -511,12 +516,13 @@ pub fn main(init: std.process.Init) !void {
                 .fg = .{ .index = color },
                 .bold = (highlighted and !mouse_cursor) or row.active or row.heading or row.done,
             };
-            draw(win, fa, i + 2, row.text, text_style);
+            draw(win, fa, i + top, row.text, text_style);
             if (row.detail.len > 0) {
                 const after = win.gwidth(m.display(fa, row.text) catch row.text) +| 1;
                 if (after < win.width) {
-                    draw(win.child(.{ .x_off = after }), fa, i + 2, row.detail, .{ .bg = background, .fg = .{ .index = 8 } });
-                    tint(win, i + 2, after, win.width, .dim);
+                    const fits = tail(win, fa, m.display(fa, row.detail) catch row.detail, win.width - after);
+                    draw(win.child(.{ .x_off = after }), fa, i + top, fits, .{ .bg = background, .fg = .{ .index = 8 } });
+                    tint(win, i + top, after, win.width, .dim);
                 }
             }
             // Names that are not status take their colour from the field:
@@ -525,19 +531,23 @@ pub fn main(init: std.process.Init) !void {
             // colours keep their meaning and are left alone.
             const is_session = row.action != null and row.action.? == .session;
             if (row.heading) {
-                tint(win, i + 2, 0, win.width, .full);
+                tint(win, i + top, 0, win.width, .full);
             } else if (is_session and !row.done) {
                 // Session names in the cool end of the field, so they stand
                 // apart from the purple directories beside them.
                 const end = win.gwidth(m.display(fa, row.text) catch row.text);
-                tint(win, i + 2, 0, end, if (row.active) .cool_lift else .cool);
-            } else if (row.active and row.color == 7) {
-                tint(win, i + 2, 0, win.width, .lift);
+                tint(win, i + top, 0, end, if (row.active) .cool_lift else .cool);
+            } else if (row.active and row.color == 7 and row.name_rgb == null) {
+                tint(win, i + top, 0, win.width, .lift);
             }
-            if (row.symbol.len > 0) paintSymbols(win, i + 2, row.symbol, row.symbol_color);
+            if (row.symbol.len > 0) paintSymbols(win, i + top, row.symbol, row.symbol_color);
+            if (row.name_rgb) |rgb| if (std.mem.indexOf(u8, row.text, row.name)) |at| {
+                const from = win.gwidth(m.display(fa, row.text[0..at]) catch row.text[0..at]);
+                paint(win, i + top, from, from + win.gwidth(m.display(fa, row.name) catch row.name), rgb);
+            };
             // The selection bar is the field washed over the dark, spanning
             // the clickable column like the flat bar it replaces.
-            if (row.action != null and (highlighted or row.active)) wash(win, i + 2, 0, column_width, if (highlighted) 30 else 16);
+            if (row.action != null and (highlighted or row.active)) wash(win, i + top, 0, column_width, if (highlighted) 30 else 16);
         }
         if (win.height >= 2) draw(win, fa, win.height - 2, error_text orelse "", .{ .fg = .{ .index = 1 } });
         if (win.height >= 1) draw(win, fa, win.height - 1, if (editor) |edit|
@@ -568,8 +578,8 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn mouseHit(rows: []const sidebar.Row, offset: usize, mouse: vaxis.Mouse, width: u16, height: u16, column_width: u16) ?usize {
-    if (mouse.row < 2 or mouse.row >= @as(i32, height) - 2 or mouse.col < 0 or mouse.col >= @min(width, column_width)) return null;
-    const i = offset + @as(usize, @intCast(mouse.row - 2));
+    if (mouse.row < top or mouse.row >= @as(i32, height) - 2 or mouse.col < 0 or mouse.col >= @min(width, column_width)) return null;
+    const i = offset + @as(usize, @intCast(mouse.row - @as(i16, @intCast(top))));
     if (i >= rows.len or rows[i].action == null) return null;
     if (rows[i].action.? == .new_session and (mouse.col < new_button_col or mouse.col >= new_button_col + new_button_text.len)) return null;
     return i;
@@ -608,6 +618,69 @@ fn drain(a: std.mem.Allocator, loop: *vaxis.Loop(Event)) void {
 fn runWorker(io: std.Io, a: std.mem.Allocator, environ: std.process.Environ, opts: tmux.ServerOptions, shared: *backend.Shared, loop: *vaxis.Loop(Event)) void {
     backend.worker(io, a, environ, opts, shared, loop);
 }
+/// The row the list starts on: below the banner and one blank row. Set each
+/// frame; mouse hits are resolved against the last frame's value.
+var top: u16 = 2;
+
+fn bannerWidth(win: vaxis.Window, title: banner.Banner) u16 {
+    var widest: u16 = 0;
+    for (title.lines) |line| widest = @max(widest, win.gwidth(line));
+    return widest;
+}
+
+/// The banner in the full aurora field, stretched over the banner alone so
+/// even a small one sweeps every corner, and the subtitle beside its last
+/// row, faded, when there is room.
+fn drawBanner(win: vaxis.Window, a: std.mem.Allocator, title: banner.Banner) void {
+    const width = bannerWidth(win, title);
+    const height: u16 = @intCast(title.lines.len);
+    for (title.lines, 0..) |line, y| {
+        draw(win, a, y, line, .{ .bold = true });
+        var x: u16 = 0;
+        while (x < @min(width, win.width)) : (x += 1) {
+            var cell = win.readCell(x, @intCast(y)) orelse continue;
+            cell.style.fg = .{ .rgb = aurora.at(width, height, x, @intCast(y)) };
+            win.writeCell(x, @intCast(y), cell);
+        }
+    }
+    if (title.lines.len == 1) return;
+    const subtitle = "tmux micro manager";
+    const at = width + 2;
+    if (at + subtitle.len > win.width) return;
+    const last: u16 = height - 1;
+    draw(win.child(.{ .x_off = at }), a, last, subtitle, .{});
+    var x: u16 = at;
+    while (x < at + subtitle.len) : (x += 1) {
+        var cell = win.readCell(x, last) orelse continue;
+        cell.style.fg = .{ .rgb = aurora.dim(aurora.at(@intCast(at + subtitle.len), height, x, last)) };
+        win.writeCell(x, last, cell);
+    }
+}
+
+/// `text` cut to `width` columns from the left, with `…` where the cut was:
+/// the end of a path is the part that says which directory it is.
+fn tail(win: vaxis.Window, a: std.mem.Allocator, text: []const u8, width: u16) []const u8 {
+    if (win.gwidth(text) <= width) return text;
+    if (width < 2) return "";
+    var start: usize = 0;
+    while (start < text.len) {
+        start += std.unicode.utf8ByteSequenceLength(text[start]) catch 1;
+        if (win.gwidth(text[start..]) + 1 <= width) break;
+    }
+    return std.fmt.allocPrint(a, "…{s}", .{text[start..]}) catch text[start..];
+}
+
+/// Colour cells `from` to `to` of `row` one flat colour.
+fn paint(win: vaxis.Window, row: usize, from: u16, to: u16, rgb: [3]u8) void {
+    if (row >= win.height) return;
+    var x = from;
+    while (x < @min(to, win.width)) : (x += 1) {
+        var cell = win.readCell(x, @intCast(row)) orelse continue;
+        cell.style.fg = .{ .rgb = rgb };
+        win.writeCell(x, @intCast(row), cell);
+    }
+}
+
 /// How far down the field runs: over the list as drawn rather than the whole
 /// window, so a short list in a tall window still sweeps from pink to teal
 /// instead of staying at the pink end. Set each frame before any tint. A

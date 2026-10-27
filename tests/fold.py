@@ -7,7 +7,7 @@
 
 Also checks that the accents take compost's border colours.
 
-Clicking `[-]` folds a session to its name; clicking `[+]` opens it again.
+Clicking `▼` folds a session to its name; clicking `▶` opens it again.
 Folded, the name turns green when a pane in it shows a check, because that is
 the one thing the hidden rows would have told a person. A session whose agent
 is merely blocked does not.
@@ -106,11 +106,11 @@ def main():
             """The foreground colour of the first letter of the name in a row."""
             for r, line in enumerate(display.lines()):
                 if line.strip() == text or line.strip().startswith(text + ' '):
-                    return display.colour(r, line.index(text) + len('[+] '))
+                    return display.colour(r, line.index(text) + len('▶ '))
             return 'not drawn'
 
         try:
-            if not until(lambda: any('[-] finished' in l for l in rows())
+            if not until(lambda: any('▼ finished' in l for l in rows())
                          and sum(l.startswith('  ') for l in rows()) >= 2):
                 failures.append('the sessions never drew open: %r' % rows())
             # The title starts at compost's top-left border colour, which is
@@ -120,22 +120,22 @@ def main():
                                 '%r' % (display.colour(0, 0),))
             for name in ('finished', 'waiting'):
                 click_fold(name)
-            if not until(lambda: shown('[+] finished') and shown('[+] waiting')):
+            if not until(lambda: shown('▶ finished') and shown('▶ waiting')):
                 failures.append('the sessions did not fold: %r' % rows())
             if any('claude' in l for l in rows()):
                 failures.append('a folded session still drew its panes: %r' % rows())
-            if painted('[+] finished') != GREEN:
+            if painted('▶ finished') != GREEN:
                 failures.append('a folded session with a finished agent was not '
-                                'green: %r' % (painted('[+] finished'),))
+                                'green: %r' % (painted('▶ finished'),))
             # Drawn, and in some other colour: a name that was never found
             # must not pass as "not green".
-            waiting = painted('[+] waiting')
+            waiting = painted('▶ waiting')
             if waiting == GREEN or waiting == 'not drawn':
                 failures.append('a folded session with a blocked agent was not '
                                 'drawn in its own colour: %r' % (waiting,))
 
             click_fold('finished')
-            if not until(lambda: shown('[-] finished')
+            if not until(lambda: shown('▼ finished')
                          and any('claude' in l for l in rows())):
                 failures.append('the session did not open again: %r' % rows())
         finally:

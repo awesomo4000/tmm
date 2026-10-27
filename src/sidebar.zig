@@ -10,9 +10,9 @@ const tmux = @import("libtmux");
 pub const Server = struct { name: []const u8, options: tmux.ServerOptions };
 pub const Action = union(enum) { server: usize, display: usize, session: usize, fold: usize, pane: usize, new_session, blink };
 
-/// Columns the fold mark takes at the start of a session row; a click inside
-/// it folds rather than selects.
-pub const fold_width = 3;
+/// Columns the fold arrow and the space after it take at the start of a
+/// session row; a click inside them folds rather than selects.
+pub const fold_width = 2;
 
 /// What a program in a pane said about itself (OSC 7501, carried to tmm as
 /// the `@tmm_status` pane option), as opposed to what reading its screen
@@ -65,6 +65,10 @@ pub const Row = struct {
     /// name beside it can stay readable when the state is a dim one.
     symbol: []const u8 = "",
     symbol_color: u8 = 7,
+    /// The process name inside `text`, drawn alone in `name_rgb`: a colour
+    /// per agent, so which program a row is reads at a glance.
+    name: []const u8 = "",
+    name_rgb: ?[3]u8 = null,
     /// A folded session holding a finished result nobody has looked at, so
     /// its name says so in place of the rows it hides.
     done: bool = false,
@@ -115,9 +119,10 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
             };
             const fold = folded.contains(session.id);
             const where = sessionDirectory(s.panes, session.id);
+            try list.append(a, .{ .text = "" });
             const session_row = list.items.len;
             try list.append(a, .{
-                .text = try std.fmt.allocPrint(a, "{s} {s}", .{ if (fold) "[+]" else "[-]", session.name }),
+                .text = try std.fmt.allocPrint(a, "{s} {s}", .{ if (fold) "▶" else "▼", session.name }),
                 .key = try std.fmt.allocPrint(a, "session:{s}", .{session.id}),
                 .action = .{ .session = i },
                 .active = active,
@@ -187,12 +192,32 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
                     .color = if (is_agent and state.color != 8) state.color else 7,
                     .symbol = if (is_agent) state.symbol else "",
                     .symbol_color = state.color,
+                    .name = name,
+                    .name_rgb = processColor(name),
                     .active = pane_active,
                 });
             }
         }
     }
     return list.toOwnedSlice(a);
+}
+
+/// A process name's colour: one per agent, muted so the status symbols stay
+/// the loudest thing on a row, and a soft slate for everything else rather
+/// than plain white. Flat colours, never the gradient, so a name is the same
+/// colour wherever its row is.
+pub fn processColor(name: []const u8) [3]u8 {
+    const agents = .{
+        .{ "claude", .{ 204, 122, 88 } },
+        .{ "codex", .{ 120, 168, 186 } },
+        .{ "gemini", .{ 128, 150, 222 } },
+        .{ "opencode", .{ 176, 156, 210 } },
+        .{ "aider", .{ 150, 186, 120 } },
+        .{ "omp", .{ 196, 172, 118 } },
+        .{ "pi", .{ 196, 172, 118 } },
+    };
+    inline for (agents) |agent| if (std.mem.eql(u8, name, agent[0])) return agent[1];
+    return .{ 176, 182, 200 };
 }
 
 /// Where a session's panes are, which by habit is one directory: the one most

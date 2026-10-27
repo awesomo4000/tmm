@@ -37,7 +37,7 @@ with tempfile.TemporaryDirectory(prefix='recon-') as root:
                 if b'\x1b[c' in r or b'\x1b[0c' in r: os.write(fd,b'\x1b[?1;2c')
                 if b'\x1b[5n' in r: os.write(fd,b'\x1b[0n')
     pump(2.0)
-    assert b'tmm : tmux micro manager' in re.sub(rb'\x1b\[[0-9;:]*m', b'', bytes(out)), 'tmm did not render'
+    assert b'tmux micro manager' in re.sub(rb'\x1b\[[0-9;:]*m', b'', bytes(out)), 'tmm did not render'
     # Churn: the operations the incremental model must track.
     ops=[]
     for i in range(3):
