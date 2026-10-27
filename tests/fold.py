@@ -82,7 +82,8 @@ def main():
                         os.write(fd, b'\x1b[0n')
 
         def rows():
-            return [l.rstrip() for l in display.lines() if l.strip()]
+            # Column 0 is the hover gutter, which holds the bar or nothing.
+            return [l[1:].rstrip() for l in display.lines() if l[1:].strip()]
 
         def until(predicate, limit=15):
             deadline = time.monotonic() + limit
@@ -105,7 +106,8 @@ def main():
         def painted(text):
             """The foreground colour of the first letter of the name in a row."""
             for r, line in enumerate(display.lines()):
-                if line.strip() == text or line.strip().startswith(text + ' '):
+                body = line[1:].strip()
+                if body == text or body.startswith(text + ' '):
                     return display.colour(r, line.index(text) + len('▶ '))
             return 'not drawn'
 
@@ -115,9 +117,9 @@ def main():
                 failures.append('the sessions never drew open: %r' % rows())
             # The title starts at the field's top-left corner, so the
             # gradient is actually drawn and not a flat fallback.
-            if display.colour(0, 0) != ('rgb', 244, 55, 151):
+            if display.colour(0, 1) != ('rgb', 244, 55, 151):
                 failures.append('the title did not start at the aurora corner: '
-                                '%r' % (display.colour(0, 0),))
+                                '%r' % (display.colour(0, 1),))
             for name in ('finished', 'waiting'):
                 click_fold(name)
             if not until(lambda: shown('▶ finished') and shown('▶ waiting')):

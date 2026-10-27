@@ -2,7 +2,8 @@
 
 ## 10/27/2026
 
-- Drew the hover and keyboard cursor as a flat grey bar, and the selection as the colour field, so the two no longer look alike.
+- Marked the hover and keyboard cursor with a bar in a one-column gutter on the left, coloured from the field at that row, instead of recolouring the line, so it no longer looks like the selection.
+- Renamed the message for a selected display that went away from "Target disconnected" to "Display disconnected".
 - Cleared the hover when the sidebar loses focus. Leaving the pane without a click still leaves it lit: nothing tells a pane the pointer has gone.
 - Selected the display when it is the only one attached and none has been chosen, at launch or when the first one attaches.
 - Picked the banner lettering at random on each launch, leaving out the one-line fallback. `TMM_BANNER` still asks for one by name.

@@ -177,7 +177,7 @@ pub fn main(init: std.process.Init) !void {
     var column_width: u16 = 0;
     // The sidebar's own box, kept across iterations because mouse events are
     // resolved against the previous frame's geometry.
-    var sidebar_width: u16 = vx.window().width;
+    var sidebar_width: u16 = vx.window().width -| gutter;
     var sidebar_height: u16 = vx.window().height;
     var pressed: ?[]const u8 = null;
     defer if (pressed) |p| a.free(p);
@@ -211,14 +211,14 @@ pub fn main(init: std.process.Init) !void {
         else => {},
     };
     while (true) {
-        var event = pending_event orelse try loop.nextEvent();
+        var event = intoBody(pending_event orelse try loop.nextEvent());
         pending_event = null;
         // Motion is replaceable; clicks, keys, resizes, and snapshots keep order.
         // Bound each batch so a continuous motion stream cannot starve rendering.
         if (event == .mouse and event.mouse.type == .motion) {
             for (0..512) |_| {
                 const next = try loop.tryEvent() orelse break;
-                if (next == .mouse and next.mouse.type == .motion) event = next else {
+                if (next == .mouse and next.mouse.type == .motion) event = intoBody(next) else {
                     pending_event = next;
                     break;
                 }
@@ -474,7 +474,7 @@ pub fn main(init: std.process.Init) !void {
             cursor = i;
             break;
         };
-        const win = vx.window();
+        const win = vx.window().child(.{ .x_off = gutter });
         // The widest row decides the clickable column, so a click to the right
         // of every row's text selects nothing rather than the row beside it.
         var natural: u16 = new_button_col + new_button_text.len;
@@ -497,7 +497,7 @@ pub fn main(init: std.process.Init) !void {
             if (c < offset) offset = c;
             if (c >= offset + visible) offset = c + 1 -| visible;
         };
-        win.clear();
+        vx.window().clear();
         win.hideCursor();
         field_rows = @intCast(@min(rows.len -| offset, visible) + top);
         field_cols = column_width;
@@ -523,17 +523,16 @@ pub fn main(init: std.process.Init) !void {
                     .fg = .{ .index = if (highlighted) 7 else 8 },
                     .bold = highlighted,
                 });
-                if (highlighted) fill(win, i + top, new_button_col, new_button_col + new_button_text.len, hover_bg);
                 continue;
             }
             const background: vaxis.Cell.Color = .default;
             // A folded session with a finished result is green whatever
             // else it is: that is the one thing the fold has to show.
-            const color: u8 = if (row.done) (if (highlighted) 10 else 2) else if (row.active or (highlighted and !mouse_cursor)) 14 else if (highlighted) (if (row.color < 8) row.color + 8 else 7) else row.color;
+            const color: u8 = if (row.done) 2 else if (row.active) 14 else row.color;
             const text_style: vaxis.Cell.Style = .{
                 .bg = background,
                 .fg = .{ .index = color },
-                .bold = (highlighted and !mouse_cursor) or row.active or row.heading or row.done,
+                .bold = row.active or row.heading or row.done,
             };
             draw(win, fa, i + top, row.text, text_style);
             if (row.detail.len > 0) {
@@ -563,12 +562,12 @@ pub fn main(init: std.process.Init) !void {
                 const from = win.gwidth(m.display(fa, row.text[0..at]) catch row.text[0..at]);
                 paint(win, i + top, from, from + win.gwidth(m.display(fa, row.name) catch row.name), rgb);
             };
-            // What is selected wears the field washed over the dark; what
-            // the pointer or cursor is on wears a flat grey, so the two
-            // never read as the same thing. Both span the clickable column.
-            if (row.action != null) {
-                if (highlighted) fill(win, i + top, 0, column_width, hover_bg) else if (row.active) wash(win, i + top, 0, column_width, 30);
-            }
+            // What is selected wears the field washed over the dark,
+            // spanning the clickable column. What the pointer or cursor is
+            // on gets a bar in the gutter instead, so the line itself is
+            // never recoloured by passing over it.
+            if (row.action != null and row.active) wash(win, i + top, 0, column_width, 30);
+            if (highlighted) hoverBar(vx.window(), i + top);
         }
         if (win.height >= 2) draw(win, fa, win.height - 2, error_text orelse "", .{ .fg = .{ .index = 1 } });
         if (win.height >= 1) draw(win, fa, win.height - 1, if (editor) |edit|
@@ -599,7 +598,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn mouseHit(rows: []const sidebar.Row, offset: usize, mouse: vaxis.Mouse, width: u16, height: u16, column_width: u16) ?usize {
-    if (mouse.row < top or mouse.row >= @as(i32, height) - 2 or mouse.col < 0 or mouse.col >= @min(width, column_width)) return null;
+    if (mouse.row < top or mouse.row >= @as(i32, height) - 2 or mouse.col < -@as(i16, @intCast(gutter)) or mouse.col >= @min(width, column_width)) return null;
     const i = offset + @as(usize, @intCast(mouse.row - @as(i16, @intCast(top))));
     if (i >= rows.len or rows[i].action == null) return null;
     if (rows[i].action.? == .new_session and (mouse.col < new_button_col or mouse.col >= new_button_col + new_button_text.len)) return null;
@@ -755,16 +754,23 @@ fn paintSymbols(win: vaxis.Window, row: usize, symbol: []const u8, color: u8) vo
     }
 }
 /// Lay a background of the field, `percent` strong, under `row`.
-/// The hover and cursor bar: neutral, so it never passes for a selection.
-const hover_bg: aurora.RGB = .{ 56, 58, 68 };
-fn fill(win: vaxis.Window, row: usize, from: u16, to: u16, rgb: aurora.RGB) void {
+/// Columns kept clear on the left for the hover bar, which marks the row
+/// the pointer or cursor is on the way a card's edge does.
+const gutter: u16 = 1;
+/// The bar: one flat colour per row, taken from the field's left edge so it
+/// moves along the gradient with the pointer.
+fn hoverBar(win: vaxis.Window, row: usize) void {
     if (row >= win.height) return;
-    var x = from;
-    while (x < @min(to, win.width)) : (x += 1) {
-        var cell = win.readCell(x, @intCast(row)) orelse continue;
-        cell.style.bg = .{ .rgb = rgb };
-        win.writeCell(x, @intCast(row), cell);
-    }
+    const down = fieldHeight(win);
+    const colour = aurora.lift(aurora.at(fieldWidth(win), down, 0, @min(@as(u16, @intCast(row)), down -| 1)));
+    win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = "▎", .width = 1 }, .style = .{ .fg = .{ .rgb = colour } } });
+}
+/// Mouse columns as the list sees them, so column 0 is the list's first
+/// column and the gutter is -1.
+fn intoBody(event: Event) Event {
+    var shifted = event;
+    if (shifted == .mouse) shifted.mouse.col -= @intCast(gutter);
+    return shifted;
 }
 fn wash(win: vaxis.Window, row: usize, from: u16, to: u16, percent: u32) void {
     if (row >= win.height) return;

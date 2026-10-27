@@ -275,7 +275,7 @@ pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Reque
             break;
         };
         if (!found) {
-            snapshot.failure = "Target disconnected. Select a display explicitly.";
+            snapshot.failure = "Display disconnected. Select another display.";
         } else {
             if (t.pane) |pane| {
                 const data = try queryRead(server, &.{ "list-panes", "-s", "-t", t.session.?, "-F", m.format(&.{ "pane_id", "window_id" }) });

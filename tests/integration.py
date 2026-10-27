@@ -108,9 +108,11 @@ def main():
             raise AssertionError(('no row shows', match, lines))
 
         def first_word(word):
-            return lambda line: line.split()[:1] == [word]
+            return lambda line: line.lstrip('▎').split()[:1] == [word]
 
-        def click(row, col=3):
+        # Column 4 is past the hover gutter and a session's fold arrow, so a
+        # click lands on the name.
+        def click(row, col=4):
             os.write(ui_fd, f'\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m'.encode())
             pump(0.05)
 
@@ -144,7 +146,7 @@ def main():
             tmm saw happen, so waits on the states leading up to one read the
             sidebar, not a separate --dump that may have sampled the pane at
             a different moment."""
-            return next(([t for t in l.split() if t != '▸'] for l in screens[ui_fd].lines() if name in l.split()), [])
+            return next(([t for t in l.lstrip('▎').split() if t != '▸'] for l in screens[ui_fd].lines() if name in l.lstrip('▎').split()), [])
 
         def agent_state():
             return next(p for p in snapshot()['panes'] if p['id'] == agent)
@@ -344,7 +346,7 @@ def main():
             tmux('detach-client', '-t', first)
             until(lambda: first not in sessions(), 'the detach')
             os.write(ui_fd, b'jj\r')
-            until(lambda: b'Target disconnected' in terminal_output[ui_fd], 'the disconnected target to be reported')
+            until(lambda: b'Display disconnected' in terminal_output[ui_fd], 'the disconnected display to be reported')
             assert sessions() == {second: 'renamed|é'}
             close_ui(ui_pid, ui_fd)
             # Switching servers clears the old display target and its requests.
