@@ -73,16 +73,18 @@ pub const Row = struct {
     /// its name says so in place of the rows it hides.
     done: bool = false,
 };
+/// Beside the selected server and display.
+pub const entry_mark = "➤";
 /// Ends the selected display's row; clicking it blinks that display.
 pub const blink_mark = "✶";
 
 pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snapshot: ?*backend.Snapshot, target: ?backend.Request, label: ?[]const u8, home: ?[]const u8, folded: *const std.StringHashMapUnmanaged(void)) ![]Row {
     var list: std.ArrayList(Row) = .empty;
     try list.append(a, .{ .text = "servers", .heading = true });
-    // Servers and displays are indented like panes, with the same `▸`
-    // beside the selected one.
+    // Servers and displays are indented like panes, with an arrow beside
+    // the selected one.
     for (servers, 0..) |server, i| try list.append(a, .{
-        .text = try std.fmt.allocPrint(a, "{s} {s}", .{ if (i == current) "▸" else " ", server.name }),
+        .text = try std.fmt.allocPrint(a, "{s} {s}", .{ if (i == current) entry_mark else " ", server.name }),
         .key = try std.fmt.allocPrint(a, "server:{d}", .{i}),
         .action = .{ .server = i },
         .active = i == current,
@@ -108,7 +110,7 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
             try list.append(a, .{
                 // The selected display ends in the blink button.
                 .text = try std.fmt.allocPrint(a, "{s} {s} : {s}{s}", .{
-                    if (active) "▸" else " ",
+                    if (active) entry_mark else " ",
                     if (active and label != null) label.? else display_name,
                     name,
                     if (active) " " ++ blink_mark else "",

@@ -6,7 +6,7 @@
 """Bars in the gutter mark whole groups, wider at the row itself: a bright
 one stays with what is selected, a dim one follows the pointer and goes when
 the pane loses focus. Nothing is recoloured behind a line. A lone display is
-selected without being asked for, marked `▸` and ending in the blink mark.
+selected without being asked for, marked `➤` and ending in the blink mark.
 
 Two tmm runs against one disposable server:
 
@@ -14,7 +14,7 @@ Two tmm runs against one disposable server:
   choice, so it is selected: the blink mark, which only shows on a selected
   display, appears.
 - The second starts with that display already attached and selects it at once.
-  Its row carries `▸`, and its session the bright bar, wide at its current
+  Its row carries `➤` and no bar, and its session the bright bar, wide at its current
   pane, with no background behind it. Then the pointer hovers a pane of
   another session: the dim bar runs from that session's name through the
   blank row below it, wide at the pane, and the selected session keeps its
@@ -46,7 +46,7 @@ ROWS, COLS = 40, 60
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'zig-out/bin/tmm'
 TMUX = shutil.which('tmux') or 'tmux'
-BAR, WIDE = '▎', '▌'
+BAR, WIDE = '▎', '◗'
 BRIGHT, DIM = ('rgb', 72, 214, 176), ('rgb', 87, 153, 141)
 
 
@@ -157,13 +157,18 @@ def main():
             if not second.until(lambda: second.shows('✶')):
                 failures.append('the one attached display was not selected at launch: %r'
                                 % second.display.lines())
-            if not second.until(lambda: any(l[1:].startswith('▸ ') and l.endswith(' : alpha ✶')
+            if not second.until(lambda: any(l[1:].startswith('➤ ') and l.endswith(' : alpha ✶')
                                             for l in second.display.lines())):
                 failures.append('the selected display was not marked: %r'
                                 % second.display.lines())
             if second.fill('▼ alpha') is not None:
                 failures.append('the selection recoloured its line: %r'
                                 % (second.fill('▼ alpha'),))
+            display = second.row_of('➤ ')
+            if display is None or second.display.colour(display, 1) != BRIGHT \
+                    or second.display.grid[display][0] != ' ':
+                failures.append('the selected display should have a bright arrow and no bar: %r'
+                                % (second.display.lines()[display] if display is not None else None,))
 
             def bars(top, count):
                 """The gutter from row `top` down, as (glyph, colour) pairs."""

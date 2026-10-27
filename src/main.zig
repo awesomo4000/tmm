@@ -567,6 +567,13 @@ pub fn main(init: std.process.Init) !void {
                 const end = win.gwidth(m.display(fa, row.text) catch row.text);
                 paint(win, i + top, 0, end, entry_rgb);
                 if (std.mem.endsWith(u8, row.text, sidebar.blink_mark)) paint(win, i + top, end -| 1, end, blink_rgb);
+                // The arrow is the entry's whole selection mark, in the
+                // bar's colour; the pointer's entry gets it dimmed.
+                if (row.active) {
+                    paint(win, i + top, 0, 1, bar_rgb);
+                } else if (highlighted) {
+                    win.writeCell(0, @intCast(i + top), .{ .char = .{ .grapheme = sidebar.entry_mark, .width = 1 }, .style = .{ .fg = .{ .rgb = hover_rgb } } });
+                }
             } else if (row.active and row.color == 7 and row.name_rgb == null) {
                 tint(win, i + top, 0, win.width, .lift);
             }
@@ -582,7 +589,8 @@ pub fn main(init: std.process.Init) !void {
         // one. The lines themselves are never recoloured.
         const bars = try fa.alloc(Bar, rows.len);
         @memset(bars, .none);
-        for (rows, 0..) |row, r| if (row.action != null and row.active) {
+        // Servers and displays carry their arrow instead.
+        for (rows, 0..) |row, r| if (row.action != null and row.active and !isEntry(row)) {
             const group = groupAround(rows, r);
             for (bars[group.first .. group.last + 1]) |*b| if (b.* == .none) {
                 b.* = .selected;
@@ -590,13 +598,13 @@ pub fn main(init: std.process.Init) !void {
         };
         // Wide at the last selected row of a group: a session's current
         // pane rather than the session above it.
-        for (rows, 0..) |row, r| if (row.action != null and row.active) {
+        for (rows, 0..) |row, r| if (row.action != null and row.active and !isEntry(row)) {
             const later = for (rows[r + 1 .. groupAround(rows, r).last + 1]) |next| {
                 if (next.action != null and next.active) break true;
             } else false;
             if (!later) bars[r] = .selected_wide;
         };
-        if (cursor) |c| if (c < rows.len) {
+        if (cursor) |c| if (c < rows.len and !isEntry(rows[c])) {
             const group = groupAround(rows, c);
             for (bars[group.first .. group.last + 1]) |*b| if (b.* == .none) {
                 b.* = .hover;
@@ -813,7 +821,7 @@ fn drawBar(win: vaxis.Window, row: usize, bar: Bar) void {
     if (row >= win.height) return;
     const wide = bar == .hover_wide or bar == .selected_wide;
     const colour = if (bar == .selected or bar == .selected_wide) bar_rgb else hover_rgb;
-    win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = if (wide) "▌" else "▎", .width = 1 }, .style = .{ .fg = .{ .rgb = colour } } });
+    win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = if (wide) "◗" else "▎", .width = 1 }, .style = .{ .fg = .{ .rgb = colour } } });
 }
 /// The rows that belong with row `c`: the run of non-blank rows around it
 /// and the blank row that closes it.
