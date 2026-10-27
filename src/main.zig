@@ -19,7 +19,7 @@ pub const panic = std.debug.FullPanic(struct {
 pub const std_options: std.Options = .{ .log_level = .err };
 const new_button_col = 11; // "sessions" plus three spaces
 const new_button_text = "[new]";
-const Event = union(enum) { key_press: vaxis.Key, mouse: vaxis.Mouse, winsize: vaxis.Winsize, snapshot: *backend.Snapshot };
+const Event = union(enum) { key_press: vaxis.Key, mouse: vaxis.Mouse, focus_out, winsize: vaxis.Winsize, snapshot: *backend.Snapshot };
 const Editor = struct {
     id: []const u8,
     key: []const u8,
@@ -263,7 +263,21 @@ pub fn main(init: std.process.Init) !void {
                             error_text = try a.dupe(u8, "Requested display is not attached");
                         }
                     }
+                    // With one display and none chosen yet there is nothing
+                    // to choose: select it, at launch or when it is the first
+                    // to attach. A chosen display that detached stays chosen,
+                    // so the next command reports it gone rather than acting
+                    // on a display nobody picked.
+                    if (target == null and s.clients.len == 1) {
+                        target = try backend.Request.copy(a, s.clients[0], null);
+                        shared.send(io, a, try backend.Request.copy(a, s.clients[0], null));
+                    }
                 }
+            },
+            // The pane hears nothing when the mouse merely leaves it, but
+            // losing focus is the next best sign the pointer went elsewhere.
+            .focus_out => if (mouse_cursor) {
+                cursor = null;
             },
             .mouse => |mouse| {
                 mouse_cursor = true;
@@ -362,7 +376,7 @@ pub fn main(init: std.process.Init) !void {
             },
         }
         // Preserve the highlighted object across topology changes, not its row index.
-        const cursor_key = if (event == .snapshot) old_key else if (cursor) |c| if (c < rows.len) rows[c].key else null else null;
+        const cursor_key = if (event == .snapshot) old_key else if (event == .focus_out) null else if (cursor) |c| if (c < rows.len) rows[c].key else null else null;
         const keep_key = if (cursor_key) |k| try a.dupe(u8, k) else null;
         defer if (keep_key) |k| a.free(k);
         if (action != null and editor != null) {
@@ -509,7 +523,7 @@ pub fn main(init: std.process.Init) !void {
                     .fg = .{ .index = if (highlighted) 7 else 8 },
                     .bold = highlighted,
                 });
-                if (highlighted) wash(win, i + top, new_button_col, new_button_col + new_button_text.len, 30);
+                if (highlighted) fill(win, i + top, new_button_col, new_button_col + new_button_text.len, hover_bg);
                 continue;
             }
             const background: vaxis.Cell.Color = .default;
@@ -549,9 +563,12 @@ pub fn main(init: std.process.Init) !void {
                 const from = win.gwidth(m.display(fa, row.text[0..at]) catch row.text[0..at]);
                 paint(win, i + top, from, from + win.gwidth(m.display(fa, row.name) catch row.name), rgb);
             };
-            // The selection bar is the field washed over the dark, spanning
-            // the clickable column like the flat bar it replaces.
-            if (row.action != null and (highlighted or row.active)) wash(win, i + top, 0, column_width, if (highlighted) 30 else 16);
+            // What is selected wears the field washed over the dark; what
+            // the pointer or cursor is on wears a flat grey, so the two
+            // never read as the same thing. Both span the clickable column.
+            if (row.action != null) {
+                if (highlighted) fill(win, i + top, 0, column_width, hover_bg) else if (row.active) wash(win, i + top, 0, column_width, 30);
+            }
         }
         if (win.height >= 2) draw(win, fa, win.height - 2, error_text orelse "", .{ .fg = .{ .index = 1 } });
         if (win.height >= 1) draw(win, fa, win.height - 1, if (editor) |edit|
@@ -738,6 +755,17 @@ fn paintSymbols(win: vaxis.Window, row: usize, symbol: []const u8, color: u8) vo
     }
 }
 /// Lay a background of the field, `percent` strong, under `row`.
+/// The hover and cursor bar: neutral, so it never passes for a selection.
+const hover_bg: aurora.RGB = .{ 56, 58, 68 };
+fn fill(win: vaxis.Window, row: usize, from: u16, to: u16, rgb: aurora.RGB) void {
+    if (row >= win.height) return;
+    var x = from;
+    while (x < @min(to, win.width)) : (x += 1) {
+        var cell = win.readCell(x, @intCast(row)) orelse continue;
+        cell.style.bg = .{ .rgb = rgb };
+        win.writeCell(x, @intCast(row), cell);
+    }
+}
 fn wash(win: vaxis.Window, row: usize, from: u16, to: u16, percent: u32) void {
     if (row >= win.height) return;
     const down = fieldHeight(win);

@@ -12,9 +12,9 @@ on screen arrives as "F12", "sid", "bar" with the unchanged cells missing.
 Any assertion on rendered text has to replay the cursor.
 
 This handles the subset libvaxis emits: absolute and relative cursor moves,
-erases, text, and the foreground colour of each cell. Other styles are
-discarded; this answers "what does it say, and in which colour", not "what
-does it look like".
+erases, text, and the foreground and background colour of each cell. Other
+styles are discarded; this answers "what does it say, and in which colours",
+not "what does it look like".
 
 A colour is ('index', n) for a palette entry, ('rgb', r, g, b) for a direct
 one, or None for the default. Per cell is the only way to ask, because tmm
@@ -33,8 +33,9 @@ class Screen:
         self.rows, self.cols = rows, cols
         self.grid = [[' '] * cols for _ in range(rows)]
         self.colours = [[None] * cols for _ in range(rows)]
+        self.backgrounds = [[None] * cols for _ in range(rows)]
         self.row = self.col = 0
-        self.fg = None
+        self.fg = self.bg = None
         # The tail of the last feed when it ended inside an escape sequence or
         # a UTF-8 character. Output arrives in whatever chunks the reads
         # return, and a sequence split across two of them otherwise lands on
@@ -43,6 +44,9 @@ class Screen:
 
     def colour(self, row, col):
         return self.colours[row][col]
+
+    def background(self, row, col):
+        return self.backgrounds[row][col]
 
     def line(self, row):
         return ''.join(self.grid[row]).rstrip()
@@ -68,6 +72,7 @@ class Screen:
         if 0 <= self.row < self.rows and 0 <= self.col < self.cols:
             self.grid[self.row][self.col] = ch
             self.colours[self.row][self.col] = self.fg
+            self.backgrounds[self.row][self.col] = self.bg
         self.col += 1
 
     def feed(self, data: bytes):
@@ -133,21 +138,33 @@ class Screen:
         i = 0
         while i < len(args):
             p = args[i]
-            if p == 0 or p == 39:
+            if p == 0:
+                self.fg = self.bg = None
+            elif p == 39:
                 self.fg = None
+            elif p == 49:
+                self.bg = None
             elif 30 <= p <= 37:
                 self.fg = ('index', p - 30)
+            elif 40 <= p <= 47:
+                self.bg = ('index', p - 40)
             elif 90 <= p <= 97:
                 self.fg = ('index', p - 82)
+            elif 100 <= p <= 107:
+                self.bg = ('index', p - 92)
             elif p in (38, 48) and i + 1 < len(args):
+                colour = None
                 if args[i + 1] == 5 and i + 2 < len(args):
-                    if p == 38:
-                        self.fg = ('index', args[i + 2])
+                    colour = ('index', args[i + 2])
                     i += 2
                 elif args[i + 1] == 2 and i + 4 < len(args):
-                    if p == 38:
-                        self.fg = ('rgb', *args[i + 2:i + 5])
+                    colour = ('rgb', *args[i + 2:i + 5])
                     i += 4
+                if colour is not None:
+                    if p == 38:
+                        self.fg = colour
+                    else:
+                        self.bg = colour
             i += 1
 
     def _csi(self, params: bytes, final: bytes):
@@ -187,10 +204,12 @@ class Screen:
                 for c in range(self.col, self.cols):
                     self.grid[self.row][c] = ' '
                     self.colours[self.row][c] = None
+                    self.backgrounds[self.row][c] = None
                 start = self.row + 1
             for r in range(max(0, start), self.rows):
                 self.grid[r] = [' '] * self.cols
                 self.colours[r] = [None] * self.cols
+                self.backgrounds[r] = [None] * self.cols
         elif final == ord('K'):
             if 0 <= self.row < self.rows:
                 mode = arg(0, 0)
@@ -199,3 +218,4 @@ class Screen:
                 for c in range(max(0, first), min(self.cols, last)):
                     self.grid[self.row][c] = ' '
                     self.colours[self.row][c] = None
+                    self.backgrounds[self.row][c] = None

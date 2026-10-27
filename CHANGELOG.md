@@ -2,6 +2,9 @@
 
 ## 10/27/2026
 
+- Drew the hover and keyboard cursor as a flat grey bar, and the selection as the colour field, so the two no longer look alike.
+- Cleared the hover when the sidebar loses focus. Leaving the pane without a click still leaves it lit: nothing tells a pane the pointer has gone.
+- Selected the display when it is the only one attached and none has been chosen, at launch or when the first one attaches.
 - Picked the banner lettering at random on each launch, leaving out the one-line fallback. `TMM_BANNER` still asks for one by name.
 - Set the subtitle to the right of the banner as `tmux` over `µmanager`, the `t` above the `µ`, centred on the banner's height. The one-line title reads `tmm : tmux µmanager`.
 - Cut the test suite from about 130 s to about 15 s. The end-to-end tests now run side by side through `tests/run.py`, and `integration.py` and `follow.py` wait for the condition they check instead of sleeping a fixed time after every step: 66 s to 15 s, and 19 s to 10 s. Converting them exposed a wait that only passed because of its sleep: a completion needs the sidebar's own tmm to have seen the agent working, and the test was asking a separate `--dump`.
