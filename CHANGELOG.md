@@ -2,6 +2,8 @@
 
 ## 10/27/2026
 
+- Cut the test suite from about 130 s to about 15 s. The end-to-end tests now run side by side through `tests/run.py`, and `integration.py` and `follow.py` wait for the condition they check instead of sleeping a fixed time after every step: 66 s to 15 s, and 19 s to 10 s. Converting them exposed a wait that only passed because of its sleep: a completion needs the sidebar's own tmm to have seen the agent working, and the test was asking a separate `--dump`.
+- Made `mise run test` build tmm before the end-to-end tests. It ran `zig build test` only, so they drove whatever binary was built last.
 - Drew the name at the top in block letters coloured from the aurora field, with ten letterings to choose from by `TMM_BANNER` while one is picked.
 - Gave each agent its own flat name colour, Claude a muted orange and Codex a soft steel blue, and other processes a soft slate rather than white.
 - Put a blank row before each session, and made the fold marks arrows: `▼` open, `▶` folded.

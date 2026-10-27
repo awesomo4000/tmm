@@ -112,14 +112,49 @@ def main():
 
         def click(row, col=3):
             os.write(ui_fd, f'\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m'.encode())
-            pump()
+            pump(0.05)
+
+        def until(predicate, what, limit=10):
+            """Pump until `predicate` holds, failing with `what` if it never
+            does. Every wait for something to happen is one of these rather
+            than a fixed sleep: a fixed sleep is the slowest refresh ever seen
+            paid on every step, and still a flake on a slower machine."""
+            deadline = time.monotonic() + limit
+            while True:
+                pump(0.03)
+                try:
+                    if predicate():
+                        return
+                except (AssertionError, StopIteration, KeyError, subprocess.SubprocessError):
+                    pass
+                if time.monotonic() > deadline:
+                    raise AssertionError(('timed out waiting for', what, screens.get(ui_fd, Screen(1, 1)).text()))
+
+        def settle():
+            """A wait for something *not* to happen, which no predicate can
+            end early. Long enough for tmm to act on input -- it answers a
+            click well inside this -- and no longer."""
+            pump(0.3)
+
+        def shows(text):
+            return text in screens[ui_fd].text()
+
+        def ui_row(name):
+            """The sidebar's own row for an agent. A completion is what *this*
+            tmm saw happen, so waits on the states leading up to one read the
+            sidebar, not a separate --dump that may have sampled the pane at
+            a different moment."""
+            return next(([t for t in l.split() if t != '▸'] for l in screens[ui_fd].lines() if name in l.split()), [])
+
+        def agent_state():
+            return next(p for p in snapshot()['panes'] if p['id'] == agent)
 
         def close_ui(pid, fd):
             os.write(fd, b'q')
             done = 0
             deadline = time.monotonic() + 5
             while done == 0 and time.monotonic() < deadline:
-                pump(0.2)
+                pump(0.02)
                 done, status = os.waitpid(pid, os.WNOHANG)
             assert done == pid, ('UI did not exit', repr(terminal_output[fd][-3000:]))
             assert os.waitstatus_to_exitcode(status) == 0, terminal_output[fd][-4000:]
@@ -140,109 +175,94 @@ def main():
             tmux('set-option', '-p', '-t', agent, '@agent_state', 'done:456')
             first_pid, first_fd = terminal(['tmux', '-S', socket, 'attach-session', '-t', 'alpha'])
             second_pid, second_fd = terminal(['tmux', '-S', socket, 'attach-session', '-t', 'alpha'])
-            pump()
+            until(lambda: len(snapshot()['clients']) == 2, 'both displays attached')
             initial = snapshot()
-            assert len(initial['clients']) == 2
             assert any(s['path'] == strange for s in initial['sessions'])
             assert any(p['status'] == 'é|done\nnext\tline' for p in initial['panes'])
             first = next(c['name'] for c in initial['clients'] if c['pid'] == str(first_pid))
             second = next(c['name'] for c in initial['clients'] if c['pid'] == str(second_pid))
             ui_pid, ui_fd = terminal([str(BINARY), '-S', socket, '--client', first])
-            pump(2)
-            assert b'tmux micro manager' in re.sub(rb'\x1b\[[0-9;:]*m', b'', bytes(terminal_output[ui_fd]))
-            assert b'fake-codex' in terminal_output[ui_fd]
+            until(lambda: shows('tmux micro manager') and shows('fake-codex') and shows('blink'), 'the sidebar')
             # Both displays, both sessions, and all their panes are visible together.
             click(row_of(first_word('blink')))  # blink selected display
-            pump(1)
-            assert b'tmm display:' in terminal_output[first_fd]
-            assert b'tmm display:' not in terminal_output[second_fd]
+            until(lambda: b'tmm display:' in terminal_output.get(first_fd, b''), 'the blink on the selected display')
+            assert b'tmm display:' not in terminal_output.get(second_fd, b'')
             # Hover and cancelled clicks do not navigate.
             beta_agent = row_of('fake-codex')
             elsewhere = row_of(first_word('servers'))
             for _ in range(20):
                 os.write(ui_fd, b'\x1b[<35;3;%dM' % beta_agent * 100)  # motion burst over beta agent
                 pump(0.02)  # drain output while sending, as a real terminal does
-            pump()
+            settle()
             assert sessions() == {first: 'alpha', second: 'alpha'}
             os.write(ui_fd, b'\x1b[<0;3;%dM\x1b[<32;3;%dM\x1b[<0;3;%dm' % (beta_agent, elsewhere, elsewhere))
-            pump()
+            settle()
             assert sessions()[first] == 'alpha'
             os.write(ui_fd, b'\x1b[<0;3;%dM' % beta_agent)
-            pump()  # hold through refresh
+            pump()  # hold through refresh: a snapshot landing mid-press must not lose it
             os.write(ui_fd, b'\x1b[<0;3;%dm' % beta_agent)
-            pump(1.2)
-            assert sessions() == {first: 'beta', second: 'alpha'}, sessions()
-            shown = where(first)
-            assert shown == agent, (shown, agent)
+            until(lambda: sessions() == {first: 'beta', second: 'alpha'} and where(first) == agent, 'the agent click to navigate')
             # Ordinary shell panes are also listed and navigate to their exact pane.
             shell_pane = next(p for p in initial['panes'] if not p['agent'])
             assert shell_pane['command'].encode() in terminal_output[ui_fd]
             click(row_of(first_word(shell_pane['command']), after=lambda l: ' beta' in l))
-            pump(1.2)
+            until(lambda: where(first) == shell_pane['id'], 'the shell pane click to navigate')
             assert sessions() == {first: 'beta', second: 'alpha'}
-            assert where(first) == shell_pane['id']
             click(row_of('fake-codex'))
-            pump(1.2)
-            assert where(first) == agent
+            until(lambda: where(first) == agent, 'the agent click to navigate back')
             split = tmux('split-window', '-d', '-t', agent, '-P', '-F', '#{pane_id}', '-c', root).strip()
-            pump(1.2)
+            until(lambda: screens[ui_fd].lines()[row_of('fake-codex')].strip() != '', 'the new split to be listed')
             marker = len(terminal_output[ui_fd])
             click(row_of('fake-codex') + 1)  # the new split, listed after its window's agent
-            pump(1.2)
-            assert where(first) == split
+            until(lambda: where(first) == split, 'the split click to navigate')
             assert sessions()[second] == 'alpha'
-            assert '▸'.encode() in terminal_output[ui_fd][marker:], 'current-pane marker did not move on click'
+            until(lambda: '▸'.encode() in terminal_output[ui_fd][marker:], 'the current-pane marker to move on click')
             marker = len(terminal_output[ui_fd])
             tmux('select-pane', '-t', agent)
-            pump(1.2)
-            assert '▸'.encode() in terminal_output[ui_fd][marker:], 'current-pane marker did not follow native navigation'
+            until(lambda: '▸'.encode() in terminal_output[ui_fd][marker:], 'the current-pane marker to follow native navigation')
             click(row_of('fake-codex'))
-            pump(1.2)
-            assert where(first) == agent
+            until(lambda: where(first) == agent, 'the agent click to navigate')
             tmux('kill-pane', '-t', split)
-            pump()
             pane_dir = root + '/pane-current-directory'
             os.mkdir(pane_dir)
             tmux('send-keys', '-t', agent, '-l', 'cd ' + shlex.quote(pane_dir))
             tmux('send-keys', '-t', agent, 'Enter')
-            pump(1.2)
-            live_pane = next(p for p in snapshot()['panes'] if p['id'] == agent)
-            assert live_pane['cwd'] == os.path.realpath(pane_dir)
             # Whole, though the path is wider than the sidebar: a long
             # directory gives up its start, never the name at its end.
-            assert '…' in screens[ui_fd].text() and 'pane-current-directory' in screens[ui_fd].text(), screens[ui_fd].text()
+            until(lambda: shows('…') and shows('pane-current-directory'), 'the new directory, cut from the left')
+            assert agent_state()['cwd'] == os.path.realpath(pane_dir)
 
             # Native navigation is reflected, then session click navigates back.
             tmux('switch-client', '-c', first, '-t', '=alpha')
-            pump()
+            until(lambda: sessions()[first] == 'alpha', 'native navigation')
             beta_name = row_of(lambda l: l.split()[1:2] == ['beta'])
             click(beta_name)  # clicking the beta name opens the inline editor
+            until(lambda: shows('Enter save'), 'the inline editor')
             os.write(ui_fd, b'qjk')  # ordinary text, not sidebar shortcuts
-            pump()
             os.write(ui_fd, b'\x1b')
-            pump()
+            until(lambda: shows('j/k move'), 'the editor to close')
             assert {s['name'] for s in snapshot()['sessions']} == {'alpha', 'beta'}
             click(beta_name)
+            until(lambda: shows('Enter save'), 'the inline editor')
             os.write(ui_fd, b'alpha\r')  # duplicate name must fail without losing the editor
-            pump(1.2)
+            until(lambda: shows('Enter save') and not shows('saving...'), 'the duplicate to be refused')
             assert {s['name'] for s in snapshot()['sessions']} == {'alpha', 'beta'}
             os.write(ui_fd, b'\x15beta renamed \xc3\xa9\r')
-            pump(1.2)
-            assert {s['name'] for s in snapshot()['sessions']} == {'alpha', 'beta renamed é'}
+            until(lambda: {s['name'] for s in snapshot()['sessions']} == {'alpha', 'beta renamed é'}, 'the rename')
+            until(lambda: shows('j/k move'), 'the editor to close after saving')
             assert sessions()[first] == 'alpha'  # renaming does not switch displays
             os.write(ui_fd, b'\r')  # keyboard activation still navigates the session
-            pump()
-            assert sessions()[first] == 'beta renamed é'
+            until(lambda: sessions()[first] == 'beta renamed é', 'Enter to navigate')
             # Small sidebar scrolls without activating entries.
             fcntl.ioctl(ui_fd, termios.TIOCSWINSZ, struct.pack('HHHH', 15, 32, 0, 0))
             os.kill(ui_pid, signal.SIGWINCH)
-            pump()
+            settle()
             os.write(ui_fd, b'\x1b[<65;3;8M')
-            pump()
+            settle()
             assert sessions()[first] == 'beta renamed é'
             fcntl.ioctl(ui_fd, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 60, 0, 0))
             os.kill(ui_pid, signal.SIGWINCH)
-            pump()
+            settle()
             # A harmless fake agent screen exercises real capture + receipt tracking.
             screen_file = Path(root) / 'screen.txt'
             screen_program = Path(root) / 'screen.py'
@@ -252,41 +272,38 @@ def main():
             tmux('set-option', '-p', '-t', agent, '@agent_hint', 'codex')
             tmux('set-option', '-pu', '-t', agent, '@agent_state')
             tmux('respawn-pane', '-k', '-t', agent, 'python3', str(screen_program), str(screen_file))
-            pump(1.5)
-            assert next(p for p in snapshot()['panes'] if p['id'] == agent)['state'] == 'idle'
+            until(lambda: agent_state()['state'] == 'idle', 'the idle codex screen')
             screen_file.write_text('• Working (2s • esc to interrupt)\n' + idle_screen)
-            pump(1.2)
-            detected = next(p for p in snapshot()['panes'] if p['id'] == agent)
-            assert detected['state'] == 'working' and detected['status_source'] == 'screen', detected
+            until(lambda: agent_state()['state'] == 'working', 'the working codex screen')
+            # The completion rule needs this tmm to have seen working; blocked
+            # does not count (src/status.zig, Track.observe).
+            until(lambda: ui_row('codex')[:1] == ['●'], 'the sidebar to show codex working')
+            assert agent_state()['status_source'] == 'screen', agent_state()
             screen_file.write_text('Press enter to confirm or esc to cancel\n')
-            pump()
-            assert next(p for p in snapshot()['panes'] if p['id'] == agent)['state'] == 'blocked'
+            until(lambda: agent_state()['state'] == 'blocked', 'the blocked codex screen')
+            until(lambda: ui_row('codex')[:1] == ['!'], 'the sidebar to show codex blocked')
             marker = len(terminal_output[ui_fd])
             screen_file.write_text(idle_screen)
-            pump(1.8)
-            assert '✓'.encode() in terminal_output[ui_fd][marker:], ('completion was not displayed', repr(terminal_output[ui_fd][marker:]), next(p for p in snapshot()['panes'] if p['id'] == agent))
+            until(lambda: '✓'.encode() in terminal_output[ui_fd][marker:], 'the codex completion')
             marker = len(terminal_output[ui_fd])
             click(row_of(lambda l: 'codex' in l.split()))
-            pump()
-            assert '○'.encode() in terminal_output[ui_fd][marker:], 'completion was not acknowledged'
+            until(lambda: '○'.encode() in terminal_output[ui_fd][marker:], 'the codex completion to be acknowledged')
             # Claude activity often omits the interrupt hint. Exercise capture,
             # polling, completion, and acknowledgement for that screen shape.
             tmux('set-option', '-p', '-t', agent, '@agent_hint', 'claude')
             claude_idle = '────────────────\n❯ \n────────────────\nshift+tab to cycle\n'
             screen_file.write_text(claude_idle)
-            pump(1.2)
+            until(lambda: agent_state()['agent'] == 'claude' and agent_state()['state'] == 'idle', 'the idle claude screen')
             screen_file.write_text('✶ Thinking… (2s · ↓ 12 tokens)\n' + claude_idle)
-            pump(1.2)
-            detected = next(p for p in snapshot()['panes'] if p['id'] == agent)
-            assert detected['state'] == 'working' and detected['status_rule'] == 'claude-activity-line', detected
+            until(lambda: agent_state()['state'] == 'working', 'the working claude screen')
+            until(lambda: ui_row('claude')[:1] == ['●'], 'the sidebar to show claude working')
+            assert agent_state()['status_rule'] == 'claude-activity-line', agent_state()
             marker = len(terminal_output[ui_fd])
             screen_file.write_text('✻ Cogitated for 1s\n' + claude_idle)
-            pump(1.8)
-            assert '✓'.encode() in terminal_output[ui_fd][marker:], 'Claude completion was not displayed'
+            until(lambda: '✓'.encode() in terminal_output[ui_fd][marker:], 'the claude completion')
             marker = len(terminal_output[ui_fd])
             click(row_of(lambda l: 'claude' in l.split()))
-            pump()
-            assert '○'.encode() in terminal_output[ui_fd][marker:], 'Claude completion was not acknowledged'
+            until(lambda: '○'.encode() in terminal_output[ui_fd][marker:], 'the claude completion to be acknowledged')
             # The heading itself is not the new-session button. Creation uses
             # an inline field, supports cancellation and duplicate-name retry,
             # and switches only the selected display into an independent session.
@@ -294,21 +311,24 @@ def main():
             source_pane = where(first)
             source_cwd = next(p['cwd'] for p in snapshot()['panes'] if p['id'] == source_pane)
             source_windows = tmux('list-windows', '-t', '=beta renamed é', '-F', '#{window_id}')
-            marker = len(terminal_output[ui_fd])
             heading = row_of(first_word('sessions'))
             click(heading)
-            assert b'Enter save' not in terminal_output[ui_fd][marker:]
+            settle()
+            assert not shows('Enter save')
             click(heading, 14)
+            until(lambda: shows('Enter save'), 'the new-session field')
             os.write(ui_fd, b'cancelled-new-session')
             os.write(ui_fd, b'\x1b')
-            pump()
+            until(lambda: shows('j/k move'), 'the new-session field to close')
             assert len(snapshot()['sessions']) == 2
             click(heading, 14)
+            until(lambda: shows('Enter save'), 'the new-session field')
             os.write(ui_fd, b'alpha\r')
-            pump(1.2)
+            until(lambda: shows('Enter save') and not shows('saving...'), 'the duplicate to be refused')
             assert len(snapshot()['sessions']) == 2
             os.write(ui_fd, b'\x15zz new session\r')
-            pump(1.2)
+            until(lambda: any(s['name'] == 'zz new session' for s in snapshot()['sessions']), 'the new session')
+            until(lambda: sessions()[first] == 'zz new session', 'the display to follow the new session')
             created = next(s for s in snapshot()['sessions'] if s['name'] == 'zz new session')
             created_panes = [p for p in snapshot()['panes'] if p['session'] == created['id']]
             assert len(created_panes) == 1 and created_panes[0]['cwd'] == source_cwd
@@ -318,39 +338,32 @@ def main():
             assert not tmux('display-message', '-p', '-t', created['id'], '#{session_group}').strip()
             tmux('switch-client', '-c', first, '-t', '=beta renamed é')
             tmux('kill-session', '-t', created['id'])
-            pump()
             tmux('rename-session', '-t', 'alpha', 'renamed|é')
             tmux('split-window', '-d', '-t', 'renamed|é', '-c', root)
-            pump()
-            assert len(snapshot()['panes']) == 4
+            until(lambda: len(snapshot()['panes']) == 4 and shows('renamed|é'), 'the rename and split to show')
             tmux('detach-client', '-t', first)
-            pump()
+            until(lambda: first not in sessions(), 'the detach')
             os.write(ui_fd, b'jj\r')
-            pump()
+            until(lambda: b'Target disconnected' in terminal_output[ui_fd], 'the disconnected target to be reported')
             assert sessions() == {second: 'renamed|é'}
-            assert b'Target disconnected' in terminal_output[ui_fd]
             close_ui(ui_pid, ui_fd)
             # Switching servers clears the old display target and its requests.
             command(other, '-f', '/dev/null', 'new-session', '-d', '-s', 'elsewhere', '-c', root)
             ui_pid, ui_fd = terminal([str(BINARY), '-S', socket, '--server-path', other])
-            pump(2)
+            until(lambda: row_of(first_word('other')), 'the second server')
             click(row_of(first_word('other')))  # second server
-            pump()
-            assert b'elsewhere' in terminal_output[ui_fd]
+            until(lambda: shows('elsewhere'), 'the second server sessions')
             assert sessions() == {second: 'renamed|é'}
             command(other, 'kill-server')
-            pump()
             fcntl.ioctl(ui_fd, termios.TIOCSWINSZ, struct.pack('HHHH', 41, 100, 0, 0))
             os.kill(ui_pid, signal.SIGWINCH)
-            pump()
-            output = terminal_output[ui_fd]
             # Which error surfaces is a race: tmux usually prints its own
             # diagnostic before the socket is noticed to be gone, and
             # otherwise the write fails first with no diagnostic to read.
-            assert (b'no server running' in output
-                    or b'error connecting to' in output
-                    or b'Server connection lost' in output), output[-2000:]
-            assert b'elsewhere' in output
+            until(lambda: (b'no server running' in terminal_output[ui_fd]
+                           or b'error connecting to' in terminal_output[ui_fd]
+                           or b'Server connection lost' in terminal_output[ui_fd]), 'the lost server to be reported')
+            assert shows('elsewhere') or b'elsewhere' in terminal_output[ui_fd]
             close_ui(ui_pid, ui_fd)
             # Exit at different points in the polling cycle. Cancellation may
             # be consumed inside a query; the explicit stop flag must still win.

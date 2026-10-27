@@ -104,12 +104,12 @@ def main():
                         return i
                 if time.monotonic() >= deadline:
                     raise AssertionError(('row not on screen', label, screen.lines()))
-                pump(0.3)
+                pump(0.05)
 
         def settle(expect_row, what, limit=8):
             deadline = time.monotonic() + limit
             while time.monotonic() < deadline:
-                pump(0.3)
+                pump(0.05)
                 if marker_rows() == [expect_row]:
                     return
             raise AssertionError((what, 'marker at', marker_rows(),
@@ -128,10 +128,12 @@ def main():
             tmux('set-option', '-p', '-t', beta_second, '@agent_hint', 'in-beta-two')
 
             terminal(['tmux', '-S', socket, 'attach-session', '-t', 'alpha'])
-            pump(1.5)
+            deadline = time.monotonic() + 10
+            while not tmux('list-clients', '-F', '#{client_name}').strip():
+                assert time.monotonic() < deadline, 'the display never attached'
+                pump(0.05)
             client = tmux('list-clients', '-F', '#{client_name}').strip()
             _, ui_fd = terminal([str(BINARY), '-S', socket, '--client', client])
-            pump(3)
 
             # Starting point: the display is on alpha, and so is the marker.
             assert where(client) == tmux('list-panes', '-t', 'alpha', '-F',
@@ -141,7 +143,9 @@ def main():
             # 1. A switch driven from tmm: clicking a pane in another session.
             target = row_of('in-beta-one')
             os.write(ui_fd, f'\x1b[<0;3;{target + 1}M\x1b[<0;3;{target + 1}m'.encode())
-            pump(1.5)
+            deadline = time.monotonic() + 10
+            while where(client) != beta_first and time.monotonic() < deadline:
+                pump(0.05)
             assert where(client) == beta_first, (where(client), beta_first)
             settle(row_of('in-beta-one'), 'marker after clicking a pane in tmm')
 
@@ -155,7 +159,7 @@ def main():
             split = tmux('split-window', '-d', '-t', beta_second, '-P', '-F',
                          '#{pane_id}', '-c', root).strip()
             tmux('set-option', '-p', '-t', split, '@agent_hint', 'in-split')
-            pump(1.5)
+            row_of('in-split')
             tmux('select-pane', '-t', split)
             assert where(client) == split, (where(client), split)
             settle(row_of('in-split'), 'marker after native select-pane')
@@ -199,14 +203,16 @@ def main():
             def wait_glyph(want, what, limit=10):
                 deadline = time.monotonic() + limit
                 while time.monotonic() < deadline:
-                    pump(0.3)
+                    pump(0.05)
                     if glyph() == want:
                         return
                 raise AssertionError((what, 'glyph is', glyph(),
                                       'expected', want, screen.lines()))
 
             # Give the first verdict time to land and its capture budget time
-            # to run out, which is the state the freeze showed up in.
+            # to run out, which is the state the freeze showed up in. A fixed
+            # wait on purpose: three samples at the 500 ms heartbeat, plus
+            # margin. Nothing on screen says the budget is spent.
             wait_glyph('\u25cb', 'agent in another session never got a verdict')
             pump(2.0)
             fake.write_text('\u2022 Working (2s \u2022 esc to interrupt)\n' + quiet)
