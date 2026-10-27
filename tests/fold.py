@@ -5,13 +5,15 @@
 
 """A folded session hides its panes and still says when one has finished.
 
+Also checks that the accents take compost's border colours.
+
 Clicking `[-]` folds a session to its name; clicking `[+]` opens it again.
 Folded, the name turns green when a pane in it shows a check, because that is
 the one thing the hidden rows would have told a person. A session whose agent
 is merely blocked does not.
 
-The screen model keeps no colour, so the colour is read from the bytes tmm
-wrote for the name.
+The colour is read per cell from the screen model, at the name's first
+letter.
 
 Only disposable tmux sockets and files under /tmp are mutated.
 """
@@ -19,7 +21,6 @@ import fcntl
 import os
 from pathlib import Path
 import pty
-import re
 import select
 import shutil
 import signal
@@ -37,7 +38,7 @@ ROWS, COLS = 40, 60
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'zig-out/bin/tmm'
 TMUX = shutil.which('tmux') or 'tmux'
-GREEN = b'\x1b[32m'
+GREEN = ('index', 2)
 
 
 def main():
@@ -65,7 +66,6 @@ def main():
             os.execvp(str(BINARY), [str(BINARY), '-S', socket])
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', ROWS, COLS, 0, 0))
         display = Screen(ROWS, COLS)
-        raw = bytearray()
 
         def pump(duration):
             until_ = time.monotonic() + duration
@@ -76,7 +76,6 @@ def main():
                     except OSError:
                         return
                     display.feed(data)
-                    raw.extend(data)
                     if b'\x1b[c' in data or b'\x1b[0c' in data:
                         os.write(fd, b'\x1b[?1;2c')
                     if b'\x1b[5n' in data:
@@ -100,32 +99,36 @@ def main():
                 pump(0.2)
 
         def painted(text):
-            """The foreground colour in force where `text` was last written."""
-            at = raw.rfind(text)
-            colours = re.findall(rb'\x1b\[(?:3[0-79]|9[0-7])m', bytes(raw[:max(at, 0)]))
-            return colours[-1] if at >= 0 and colours else b''
+            """The foreground colour of the first letter of the name in a row."""
+            for r, line in enumerate(display.lines()):
+                if line.strip() == text:
+                    return display.colour(r, line.index(text) + len('[+] '))
+            return 'not drawn'
 
         try:
             if not until(lambda: any('[-] finished' in l for l in rows())
                          and sum(l.startswith('  ') for l in rows()) >= 2):
                 failures.append('the sessions never drew open: %r' % rows())
+            # The title starts at compost's top-left border colour, which is
+            # what ties tmm's accents to the frame it sits in.
+            if display.colour(0, 0) != ('rgb', 244, 55, 151):
+                failures.append('the title did not start at the aurora corner: '
+                                '%r' % (display.colour(0, 0),))
             for name in ('finished', 'waiting'):
                 click_fold(name)
             if not until(lambda: '[+] finished' in rows() and '[+] waiting' in rows()):
                 failures.append('the sessions did not fold: %r' % rows())
             if any('claude' in l for l in rows()):
                 failures.append('a folded session still drew its panes: %r' % rows())
-            # Repaint both names from scratch, so the bytes below are this
-            # frame's and not left over from before the fold.
-            raw.clear()
-            fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', ROWS, COLS - 1, 0, 0))
-            os.kill(pid, signal.SIGWINCH)
-            until(lambda: b'[+] finished' in raw and b'[+] waiting' in raw, 5)
-            if GREEN not in painted(b'[+] finished'):
+            if painted('[+] finished') != GREEN:
                 failures.append('a folded session with a finished agent was not '
-                                'green: %r' % painted(b'[+] finished'))
-            if GREEN in painted(b'[+] waiting'):
-                failures.append('a folded session with a blocked agent was green: %r' % painted(b'[+] waiting'))
+                                'green: %r' % (painted('[+] finished'),))
+            # Drawn, and in some other colour: a name that was never found
+            # must not pass as "not green".
+            waiting = painted('[+] waiting')
+            if waiting == GREEN or waiting == 'not drawn':
+                failures.append('a folded session with a blocked agent was not '
+                                'drawn in its own colour: %r' % (waiting,))
 
             click_fold('finished')
             if not until(lambda: '[-] finished' in rows()

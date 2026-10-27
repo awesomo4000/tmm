@@ -1,5 +1,10 @@
 # Changelog
 
+## 10/27/2026
+
+- Coloured the sidebar from the field compost draws its borders with, so tmm reads as part of the frame it sits in. The title and headings sweep pink to violet; session names and directories take the field faded; the current server, display and session take it lifted; selection and hover are a faint wash of it. Agent status colours are unchanged.
+- Fixed the test screen model. A colour escape split across two reads was drawn as text, which per-cell colour made common, and every relative cursor move and erase was ignored because the final byte was compared as `bytes` against an `int`.
+
 ## 10/26/2026
 
 - Made the sidebar compact. Each pane is one row, its directory dimmed after the name rather than on a line of its own, and the blank rows after every heading, between a session and its panes, and after each session are gone; one blank row is left between sections. Headings are bold without the underline.

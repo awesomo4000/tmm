@@ -8,6 +8,7 @@ const tmux = @import("libtmux");
 const m = @import("model.zig");
 const sidebar = @import("sidebar.zig");
 const backend = @import("backend.zig");
+const aurora = @import("aurora.zig");
 pub const panic = std.debug.FullPanic(struct {
     fn call(message: []const u8, address: ?usize) noreturn {
         vaxis.recover();
@@ -473,7 +474,10 @@ pub fn main(init: std.process.Init) !void {
         };
         win.clear();
         win.hideCursor();
-        draw(win, fa, 0, "tmm : tmux micro manager", .{ .bold = true, .fg = .{ .index = 6 } });
+        field_rows = @intCast(@min(rows.len -| offset, visible) + 2);
+        field_cols = column_width;
+        draw(win, fa, 0, "tmm : tmux micro manager", .{ .bold = true });
+        tint(win, 0, 0, win.width, .full);
         for (rows[offset..], 0..) |row, i| {
             if (i >= visible) break;
             const highlighted = cursor != null and row.action != null and std.mem.eql(u8, rows[cursor.?].key, row.key);
@@ -489,24 +493,16 @@ pub fn main(init: std.process.Init) !void {
             if (row.action != null and row.action.? == .new_session) {
                 const heading_win = win.child(.{ .width = @min(win.width, new_button_col) });
                 draw(heading_win, fa, i + 2, row.text, .{ .bold = true });
+                tint(win, i + 2, 0, new_button_col, .full);
                 const button = win.child(.{ .x_off = @min(win.width, new_button_col), .width = @min(win.width -| new_button_col, new_button_text.len) });
                 draw(button, fa, i + 2, new_button_text, .{
-                    .bg = if (highlighted) .{ .rgb = .{ 38, 43, 49 } } else .default,
                     .fg = .{ .index = if (highlighted) 7 else 8 },
                     .bold = highlighted,
                 });
+                if (highlighted) wash(win, i + 2, new_button_col, new_button_col + new_button_text.len, 30);
                 continue;
             }
-            const background: vaxis.Cell.Color = if (highlighted)
-                .{ .rgb = .{ 38, 43, 49 } }
-            else if (row.active)
-                .{ .rgb = .{ 27, 35, 43 } }
-            else
-                .default;
-            if (row.action != null) {
-                const rectangle = win.child(.{ .y_off = @intCast(i + 2), .width = column_width, .height = 1 });
-                rectangle.fill(.{ .style = .{ .bg = background } });
-            }
+            const background: vaxis.Cell.Color = .default;
             // A folded session with a finished result is green whatever
             // else it is: that is the one thing the fold has to show.
             const color: u8 = if (row.done) (if (highlighted) 10 else 2) else if (row.active or (highlighted and !mouse_cursor)) 14 else if (highlighted) (if (row.color < 8) row.color + 8 else 7) else row.color;
@@ -518,8 +514,25 @@ pub fn main(init: std.process.Init) !void {
             draw(win, fa, i + 2, row.text, text_style);
             if (row.detail.len > 0) {
                 const after = win.gwidth(m.display(fa, row.text) catch row.text) +| 1;
-                if (after < win.width) draw(win.child(.{ .x_off = after }), fa, i + 2, row.detail, .{ .bg = background, .fg = .{ .index = 8 } });
+                if (after < win.width) {
+                    draw(win.child(.{ .x_off = after }), fa, i + 2, row.detail, .{ .bg = background, .fg = .{ .index = 8 } });
+                    tint(win, i + 2, after, win.width, .dim);
+                }
             }
+            // Names that are not status take their colour from the field:
+            // a session dimmed, as compost draws an unfocused border, and
+            // whatever is current lifted, as it draws a hovered one. Status
+            // colours keep their meaning and are left alone.
+            const is_session = row.action != null and row.action.? == .session;
+            if (row.heading) {
+                tint(win, i + 2, 0, win.width, .full);
+            } else if (!row.done and row.color == 7 and (row.active or is_session)) {
+                const end = if (is_session) win.gwidth(m.display(fa, row.text) catch row.text) else win.width;
+                tint(win, i + 2, 0, end, if (row.active) .lift else .dim);
+            }
+            // The selection bar is the field washed over the dark, spanning
+            // the clickable column like the flat bar it replaces.
+            if (row.action != null and (highlighted or row.active)) wash(win, i + 2, 0, column_width, if (highlighted) 30 else 16);
         }
         if (win.height >= 2) draw(win, fa, win.height - 2, error_text orelse "", .{ .fg = .{ .index = 1 } });
         if (win.height >= 1) draw(win, fa, win.height - 1, if (editor) |edit|
@@ -589,6 +602,48 @@ fn drain(a: std.mem.Allocator, loop: *vaxis.Loop(Event)) void {
 }
 fn runWorker(io: std.Io, a: std.mem.Allocator, environ: std.process.Environ, opts: tmux.ServerOptions, shared: *backend.Shared, loop: *vaxis.Loop(Event)) void {
     backend.worker(io, a, environ, opts, shared, loop);
+}
+/// How far down the field runs: over the list as drawn rather than the whole
+/// window, so a short list in a tall window still sweeps from pink to teal
+/// instead of staying at the pink end. Set each frame before any tint. A
+/// cell past the end takes the far edge's colour.
+var field_rows: u16 = 0;
+/// Likewise across: the widest row, not the window, which is usually wider
+/// than anything in it.
+var field_cols: u16 = 0;
+fn fieldHeight(win: vaxis.Window) u16 {
+    return if (field_rows == 0) win.height else @min(field_rows, win.height);
+}
+fn fieldWidth(win: vaxis.Window) u16 {
+    return if (field_cols == 0) win.width else @min(field_cols, win.width);
+}
+/// Recolour the text already drawn in `row` from the aurora field. Blank
+/// cells are recoloured too, which is harmless: they draw nothing.
+fn tint(win: vaxis.Window, row: usize, from: u16, to: u16, how: enum { full, dim, lift }) void {
+    const down = fieldHeight(win);
+    if (row >= win.height) return;
+    var x = from;
+    while (x < @min(to, win.width)) : (x += 1) {
+        var cell = win.readCell(x, @intCast(row)) orelse continue;
+        const field = aurora.at(fieldWidth(win), down, @min(x, fieldWidth(win) -| 1), @min(@as(u16, @intCast(row)), down -| 1));
+        cell.style.fg = .{ .rgb = switch (how) {
+            .full => field,
+            .dim => aurora.dim(field),
+            .lift => aurora.lift(field),
+        } };
+        win.writeCell(x, @intCast(row), cell);
+    }
+}
+/// Lay a background of the field, `percent` strong, under `row`.
+fn wash(win: vaxis.Window, row: usize, from: u16, to: u16, percent: u32) void {
+    if (row >= win.height) return;
+    const down = fieldHeight(win);
+    var x = from;
+    while (x < @min(to, win.width)) : (x += 1) {
+        var cell = win.readCell(x, @intCast(row)) orelse continue;
+        cell.style.bg = .{ .rgb = aurora.wash(aurora.at(fieldWidth(win), down, @min(x, fieldWidth(win) -| 1), @min(@as(u16, @intCast(row)), down -| 1)), percent) };
+        win.writeCell(x, @intCast(row), cell);
+    }
 }
 fn draw(win: vaxis.Window, a: std.mem.Allocator, row: usize, text: []const u8, style: vaxis.Cell.Style) void {
     if (row >= win.height) return;

@@ -12,6 +12,7 @@ changing how much each pass asks tmux.
 Expect a few passes at the full count while panes settle (the sample budget in
 backend.zig), then a floor of the structural queries alone.
 """
+import re
 import fcntl, os, pty, select, shutil, signal, struct, subprocess, sys, tempfile, termios, time
 from pathlib import Path
 # Found rather than spelled out: a path to one checkout runs nowhere else,
@@ -41,7 +42,7 @@ with tempfile.TemporaryDirectory(prefix='qm-') as root:
     try: os.waitpid(pid,os.WNOHANG)
     except ChildProcessError: pass
     subprocess.call([TMUX,'-S',sock,'kill-server'],stderr=subprocess.DEVNULL)
-    assert b'tmm : tmux micro manager' in out, 'did not render'
+    assert b'tmm : tmux micro manager' in re.sub(rb'\x1b\[[0-9;:]*m', b'', bytes(out)), 'did not render'
     counts=[int(l) for l in open(qlog).read().split() if l.strip().isdigit()]
     # counts are cumulative per Connection, which is recreated each collect
     print('collects: %d' % len(counts))

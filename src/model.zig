@@ -285,4 +285,5 @@ test {
     _ = @import("control.zig");
     _ = @import("reconcile.zig");
     _ = @import("state.zig");
+    _ = @import("aurora.zig");
 }

@@ -12,19 +12,37 @@ on screen arrives as "F12", "sid", "bar" with the unchanged cells missing.
 Any assertion on rendered text has to replay the cursor.
 
 This handles the subset libvaxis emits: absolute and relative cursor moves,
-erases, and text. Styles are discarded; this answers "what does it say", not
-"what does it look like".
+erases, text, and the foreground colour of each cell. Other styles are
+discarded; this answers "what does it say, and in which colour", not "what
+does it look like".
+
+A colour is ('index', n) for a palette entry, ('rgb', r, g, b) for a direct
+one, or None for the default. Per cell is the only way to ask, because tmm
+recolours text one cell at a time, so the bytes of a word are interleaved
+with colour changes and a raw search for the word finds nothing.
 """
 import re
 
 PARAMS = re.compile(rb'^([0-9;:?<>=!]*)([ -/]*)([@-~])')
+# A CSI with no final byte yet: what PARAMS would match, stopped short.
+INCOMPLETE = re.compile(rb'[0-9;:?<>=!]*[ -/]*')
 
 
 class Screen:
     def __init__(self, rows, cols):
         self.rows, self.cols = rows, cols
         self.grid = [[' '] * cols for _ in range(rows)]
+        self.colours = [[None] * cols for _ in range(rows)]
         self.row = self.col = 0
+        self.fg = None
+        # The tail of the last feed when it ended inside an escape sequence or
+        # a UTF-8 character. Output arrives in whatever chunks the reads
+        # return, and a sequence split across two of them otherwise lands on
+        # screen as text.
+        self.pending = b''
+
+    def colour(self, row, col):
+        return self.colours[row][col]
 
     def line(self, row):
         return ''.join(self.grid[row]).rstrip()
@@ -49,14 +67,21 @@ class Screen:
             self.row += 1
         if 0 <= self.row < self.rows and 0 <= self.col < self.cols:
             self.grid[self.row][self.col] = ch
+            self.colours[self.row][self.col] = self.fg
         self.col += 1
 
     def feed(self, data: bytes):
+        data = self.pending + data
+        self.pending = b''
         i, n = 0, len(data)
         while i < n:
             b = data[i]
             if b == 0x1b:
-                i += self._escape(data[i:])
+                used = self._escape(data[i:])
+                if used is None:
+                    self.pending = data[i:]
+                    return self
+                i += used
                 continue
             i += 1
             if b == 0x0d:
@@ -76,18 +101,22 @@ class Screen:
             else:
                 # One UTF-8 sequence is one cell for everything tmm draws.
                 width = 2 if b < 0xe0 else 3 if b < 0xf0 else 4
+                if i - 1 + width > n:
+                    self.pending = data[i - 1:]
+                    return self
                 self._put(data[i - 1:i - 1 + width].decode('utf-8', 'replace'))
                 i += width - 1
         return self
 
-    def _escape(self, data: bytes) -> int:
+    def _escape(self, data: bytes):
+        """Bytes used by the sequence at the start, or None if it is cut off."""
         if len(data) < 2:
-            return len(data)
+            return None
         kind = data[1]
         if kind == ord('['):
             match = PARAMS.match(data[2:])
             if not match:
-                return 2
+                return None if INCOMPLETE.fullmatch(data[2:]) else 2
             self._csi(match.group(1), match.group(3))
             return 2 + match.end()
         if kind in (ord(']'), ord('_'), ord('P'), ord('^'), ord('X')):
@@ -96,10 +125,39 @@ class Screen:
             st = data.find(b'\x1b\\', 2)
             if st != -1 and (end == -1 or st < end):
                 return st + 2
-            return end + 1 if end != -1 else len(data)
+            return end + 1 if end != -1 else None
         return 2
 
+    def _sgr(self, params: bytes):
+        args = [int(p) if p.isdigit() else 0 for p in re.split(rb'[;:]', params)] if params else [0]
+        i = 0
+        while i < len(args):
+            p = args[i]
+            if p == 0 or p == 39:
+                self.fg = None
+            elif 30 <= p <= 37:
+                self.fg = ('index', p - 30)
+            elif 90 <= p <= 97:
+                self.fg = ('index', p - 82)
+            elif p in (38, 48) and i + 1 < len(args):
+                if args[i + 1] == 5 and i + 2 < len(args):
+                    if p == 38:
+                        self.fg = ('index', args[i + 2])
+                    i += 2
+                elif args[i + 1] == 2 and i + 4 < len(args):
+                    if p == 38:
+                        self.fg = ('rgb', *args[i + 2:i + 5])
+                    i += 4
+            i += 1
+
     def _csi(self, params: bytes, final: bytes):
+        # One byte, compared as an int below. Kept as bytes, every
+        # `final == ord(...)` was false, so relative moves and erases were
+        # silently ignored and only absolute moves worked.
+        final = final[0]
+        if final == ord('m') and not params.startswith(b'?'):
+            self._sgr(params)
+            return
         if params.startswith(b'?') or b':' in params:
             return
         text = params.decode('ascii', 'replace')
@@ -128,9 +186,11 @@ class Screen:
             if mode != 2 and 0 <= self.row < self.rows:
                 for c in range(self.col, self.cols):
                     self.grid[self.row][c] = ' '
+                    self.colours[self.row][c] = None
                 start = self.row + 1
             for r in range(max(0, start), self.rows):
                 self.grid[r] = [' '] * self.cols
+                self.colours[r] = [None] * self.cols
         elif final == ord('K'):
             if 0 <= self.row < self.rows:
                 mode = arg(0, 0)
@@ -138,3 +198,4 @@ class Screen:
                 last = self.cols if mode in (0, 2) else self.col + 1
                 for c in range(max(0, first), min(self.cols, last)):
                     self.grid[self.row][c] = ' '
+                    self.colours[self.row][c] = None
