@@ -822,21 +822,29 @@ const gutter: u16 = 1;
 /// and the hover's, the same green greyed and dimmed.
 const bar_rgb: aurora.RGB = .{ 72, 214, 176 };
 const hover_rgb: aurora.RGB = .{ 58, 96, 90 };
-/// Behind the selected session: a grey-blue barely off the dark.
-const card_rgb: aurora.RGB = .{ 36, 41, 54 };
+/// Behind the selected session: a steel blue-teal laid thinly over the
+/// terminal's background, so it starts barely off the dark.
+const card_tint: aurora.RGB = .{ 80, 110, 130 };
+const card_alpha = 52; // of 255
+/// Columns at the right the card has fully faded out before.
+const card_margin = 6;
 /// The terminal's own background, as it reports it; until it does, a dark
 /// grey close to most.
 var terminal_bg: aurora.RGB = .{ 30, 30, 34 };
-/// The card behind every cell of `row`, fading from its colour at the left
-/// into the terminal's background at the right edge.
+/// The card behind `row`, fading from its colour at the left into the
+/// terminal's background some columns short of the right edge. Past that
+/// the cells are left alone, so they are the background exactly even when
+/// the terminal never said what it is.
 fn shade(win: vaxis.Window, row: usize) void {
     if (row >= win.height) return;
+    const start = aurora.mix(terminal_bg, card_tint, card_alpha, 255);
+    const span = @max(win.width -| card_margin, 1);
     var x: u16 = 0;
-    while (x < win.width) : (x += 1) {
+    while (x < span) : (x += 1) {
         var cell = win.readCell(x, @intCast(row)) orelse continue;
         // A cleared cell is drawn by erasing, which would drop the shade.
         cell.default = false;
-        cell.style.bg = .{ .rgb = aurora.mix(card_rgb, terminal_bg, x, win.width -| 1) };
+        cell.style.bg = .{ .rgb = aurora.mix(start, terminal_bg, x, span) };
         win.writeCell(x, @intCast(row), cell);
     }
 }

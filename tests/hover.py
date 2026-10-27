@@ -50,7 +50,7 @@ BINARY = ROOT / 'zig-out/bin/tmm'
 TMUX = shutil.which('tmux') or 'tmux'
 BAR, WIDE = '▎', '◗'
 BRIGHT, DIM = ('rgb', 72, 214, 176), ('rgb', 58, 96, 90)
-CARD = ('rgb', 36, 41, 54)
+CARD = ('rgb', 40, 46, 53)
 
 
 def spawn(argv, rows, cols):
@@ -168,12 +168,16 @@ def main():
             # bar, through the blank row after it, fading out to the right.
             def carded(r):
                 left = second.display.background(r, 0)
-                right = second.display.background(r, COLS - 1)
-                return left == CARD and right not in (None, CARD) and sum(right[1:]) < sum(CARD[1:])
+                middle = second.display.background(r, COLS // 2)
+                # Faded out completely some columns short of the edge.
+                tail = [second.display.background(r, c) for c in range(COLS - 6, COLS)]
+                return (left == CARD and middle not in (None, CARD)
+                        and sum(middle[1:]) < sum(CARD[1:]) and tail == [None] * 6)
             alpha_row = second.row_of('▼ alpha')
             if alpha_row is None or not second.until(lambda: all(carded(alpha_row + d) for d in (0, 1, 2))):
                 failures.append('the selected session was not on its fading card: %r'
                                 % ([(second.display.background(alpha_row + d, 0),
+                                     second.display.background(alpha_row + d, COLS // 2),
                                      second.display.background(alpha_row + d, COLS - 1)) for d in (0, 1, 2)]
                                    if alpha_row is not None else None,))
             elif second.display.background(alpha_row + 3, 0) is not None:
