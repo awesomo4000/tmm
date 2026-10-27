@@ -42,7 +42,7 @@ with tempfile.TemporaryDirectory(prefix='qm-') as root:
     try: os.waitpid(pid,os.WNOHANG)
     except ChildProcessError: pass
     subprocess.call([TMUX,'-S',sock,'kill-server'],stderr=subprocess.DEVNULL)
-    assert b'tmux micro manager' in re.sub(rb'\x1b\[[0-9;:]*m', b'', bytes(out)), 'did not render'
+    assert 'µmanager'.encode() in re.sub(rb'\x1b\[[0-9;:]*m', b'', bytes(out)), 'did not render'
     counts=[int(l) for l in open(qlog).read().split() if l.strip().isdigit()]
     # counts are cumulative per Connection, which is recreated each collect
     print('collects: %d' % len(counts))

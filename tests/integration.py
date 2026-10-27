@@ -182,7 +182,7 @@ def main():
             first = next(c['name'] for c in initial['clients'] if c['pid'] == str(first_pid))
             second = next(c['name'] for c in initial['clients'] if c['pid'] == str(second_pid))
             ui_pid, ui_fd = terminal([str(BINARY), '-S', socket, '--client', first])
-            until(lambda: shows('tmux micro manager') and shows('fake-codex') and shows('blink'), 'the sidebar')
+            until(lambda: shows('µmanager') and shows('fake-codex') and shows('blink'), 'the sidebar')
             # Both displays, both sessions, and all their panes are visible together.
             click(row_of(first_word('blink')))  # blink selected display
             until(lambda: b'tmm display:' in terminal_output.get(first_fd, b''), 'the blink on the selected display')

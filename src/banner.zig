@@ -21,7 +21,7 @@ pub const all = [_]Banner{
     .{ .name = "double", .lines = &.{ "═╔╝╔╔ ╔╔ ", " ║ ║║║║║║", " ╝ ╝╝╝╝╝╝" } },
     .{ .name = "pipes", .lines = &.{ "╋┏┳┓┏┳┓", "┗┛┗┗┛┗┗" } },
     .{ .name = "ascii", .lines = &.{ "_|___ __ ", " |_||||||" } },
-    .{ .name = "plain", .lines = &.{"tmm : tmux micro manager"} },
+    .{ .name = "plain", .lines = &.{"tmm : tmux µmanager"} },
 };
 
 pub const plain = all[all.len - 1];

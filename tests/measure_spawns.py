@@ -43,7 +43,7 @@ with tempfile.TemporaryDirectory(prefix='spawnm-') as root:
     time.sleep(0.4)
     try: os.waitpid(pid, os.WNOHANG)
     except ChildProcessError: pass
-    rendered = b'tmux micro manager' in re.sub(rb'\x1b\[[0-9;:]*m', b'', bytes(out))
+    rendered = 'µmanager'.encode() in re.sub(rb'\x1b\[[0-9;:]*m', b'', bytes(out))
     lines = [l for l in open(log).read().splitlines() if l.strip()]
     subprocess.call([REAL, '-S', sock, 'kill-server'],
                     stderr=subprocess.DEVNULL)

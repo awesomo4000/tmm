@@ -628,8 +628,8 @@ fn bannerWidth(win: vaxis.Window, title: banner.Banner) u16 {
 }
 
 /// The banner in the full aurora field, stretched over the banner alone so
-/// even a small one sweeps every corner, and the subtitle beside its last
-/// row, faded, when there is room.
+/// even a small one sweeps every corner, and the subtitle to its right,
+/// faded, when there is room.
 fn drawBanner(win: vaxis.Window, a: std.mem.Allocator, title: banner.Banner) void {
     const width = bannerWidth(win, title);
     const height: u16 = @intCast(title.lines.len);
@@ -643,16 +643,22 @@ fn drawBanner(win: vaxis.Window, a: std.mem.Allocator, title: banner.Banner) voi
         }
     }
     if (title.lines.len == 1) return;
-    const subtitle = "tmux micro manager";
+    // Two lines starting in the same column, so tmux's t sits over the µ,
+    // centred on the banner and a row low when it cannot be exact.
+    const subtitle = [_][]const u8{ "tmux", "µmanager" };
+    const span: u16 = 8;
     const at = width + 2;
-    if (at + subtitle.len > win.width) return;
-    const last: u16 = height - 1;
-    draw(win.child(.{ .x_off = at }), a, last, subtitle, .{});
-    var x: u16 = at;
-    while (x < at + subtitle.len) : (x += 1) {
-        var cell = win.readCell(x, last) orelse continue;
-        cell.style.fg = .{ .rgb = aurora.dim(aurora.at(@intCast(at + subtitle.len), height, x, last)) };
-        win.writeCell(x, last, cell);
+    if (at + span > win.width) return;
+    const first: u16 = (height -| 1) / 2;
+    for (subtitle, 0..) |line, i| {
+        const y: u16 = first + @as(u16, @intCast(i));
+        draw(win.child(.{ .x_off = at }), a, y, line, .{});
+        var x: u16 = at;
+        while (x < at + span) : (x += 1) {
+            var cell = win.readCell(x, y) orelse continue;
+            cell.style.fg = .{ .rgb = aurora.dim(aurora.at(at + span, height, x, y)) };
+            win.writeCell(x, y, cell);
+        }
     }
 }
 
