@@ -11,7 +11,7 @@
 - Repaired `tests/integration.py`, which clicked hard-coded rows and had been broken since the sidebar was compacted, unnoticed because it was not in `mise run test`. It now aims at rows by what they say, and it is in the suite.
 - Wrote a session's directory once, after its name, instead of after every pane. It is the directory most of the session's panes share; a pane shows its own only when it is somewhere else.
 - Drew session names from the blue and teal end of the field, so they stand apart from the purple directories, and stopped dimming an idle agent's name: only its `○` is grey now.
-- Coloured the sidebar from the field compost draws its borders with, so tmm reads as part of the frame it sits in. The title and headings sweep pink to violet; session names and directories take the field faded; the current server, display and session take it lifted; selection and hover are a faint wash of it. Agent status colours are unchanged.
+- Coloured the sidebar from a four-corner colour field. The title and headings sweep pink to violet; session names and directories take the field faded; the current server, display and session take it lifted; selection and hover are a faint wash of it. Agent status colours are unchanged.
 - Fixed the test screen model. A colour escape split across two reads was drawn as text, which per-cell colour made common, and every relative cursor move and erase was ignored because the final byte was compared as `bytes` against an `int`.
 
 ## 10/26/2026

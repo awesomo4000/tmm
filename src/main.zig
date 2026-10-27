@@ -526,9 +526,8 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
             // Names that are not status take their colour from the field:
-            // a session dimmed, as compost draws an unfocused border, and
-            // whatever is current lifted, as it draws a hovered one. Status
-            // colours keep their meaning and are left alone.
+            // a session dimmed, and whatever is current lifted toward
+            // white. Status colours keep their meaning and are left alone.
             const is_session = row.action != null and row.action.? == .session;
             if (row.heading) {
                 tint(win, i + top, 0, win.width, .full);

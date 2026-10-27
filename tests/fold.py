@@ -5,7 +5,7 @@
 
 """A folded session hides its panes and still says when one has finished.
 
-Also checks that the accents take compost's border colours.
+Also checks that the title takes the colour field's top-left corner.
 
 Clicking `▼` folds a session to its name; clicking `▶` opens it again.
 Folded, the name turns green when a pane in it shows a check, because that is
@@ -113,8 +113,8 @@ def main():
             if not until(lambda: any('▼ finished' in l for l in rows())
                          and sum(l.startswith('  ') for l in rows()) >= 2):
                 failures.append('the sessions never drew open: %r' % rows())
-            # The title starts at compost's top-left border colour, which is
-            # what ties tmm's accents to the frame it sits in.
+            # The title starts at the field's top-left corner, so the
+            # gradient is actually drawn and not a flat fallback.
             if display.colour(0, 0) != ('rgb', 244, 55, 151):
                 failures.append('the title did not start at the aurora corner: '
                                 '%r' % (display.colour(0, 0),))
