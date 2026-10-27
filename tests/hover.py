@@ -50,7 +50,7 @@ BINARY = ROOT / 'zig-out/bin/tmm'
 TMUX = shutil.which('tmux') or 'tmux'
 # The bar in the gutter, and the half circle that grows out of it into the
 # next column at a pane's own row.
-BAR, BLOB = '▐', '◗'
+BAR, BLOB = '▐', '\ue0b4'
 BRIGHT, DIM = ('rgb', 72, 214, 176), ('rgb', 58, 96, 90)
 CARD = ('rgb', 20, 28, 33)
 

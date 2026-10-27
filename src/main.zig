@@ -856,12 +856,18 @@ const Bar = enum { none, hover, hover_wide, selected, selected_wide };
 /// group and sits flush against the column beside it. At a pane's own row a
 /// half circle grows out of it into that column, where the pane's `▸` would
 /// be; a session's row keeps its fold arrow there and has the bar alone.
+///
+/// The half circle is the Powerline rounded cap, U+E0B4, from the private
+/// use area: full height and flush with the cell's left edge, so it meets
+/// the bar. Terminals that draw Powerline glyphs themselves show it in any
+/// font; elsewhere it needs a font that carries it.
+const blob = "\u{E0B4}";
 fn drawBar(win: vaxis.Window, row: usize, bar: Bar, pane: bool) void {
     if (row >= win.height) return;
     const wide = bar == .hover_wide or bar == .selected_wide;
     const colour = if (bar == .selected or bar == .selected_wide) palette.selected_bar else palette.hover_bar;
     // Over whatever background the row has, so a card runs behind it.
-    for ([_]u16{ 0, 1 }, [_][]const u8{ "▐", "◗" }) |x, glyph| {
+    for ([_]u16{ 0, 1 }, [_][]const u8{ "▐", blob }) |x, glyph| {
         if (x == 1 and !(wide and pane)) break;
         const under = if (win.readCell(x, @intCast(row))) |cell| cell.style.bg else .default;
         win.writeCell(x, @intCast(row), .{ .char = .{ .grapheme = glyph, .width = 1 }, .style = .{ .fg = .{ .rgb = colour }, .bg = under } });

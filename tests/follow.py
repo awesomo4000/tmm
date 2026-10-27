@@ -36,7 +36,7 @@ BINARY = Path(__file__).resolve().parents[1] / 'zig-out/bin/tmm'
 ROWS, COLS = 40, 60
 # The current pane's mark: the half circle on the selected session's bar,
 # bright. The pointer or cursor gets the same half circle dimmed.
-MARKER = '◗'
+MARKER = '\ue0b4'
 SELECTED = ('rgb', 72, 214, 176)
 
 
