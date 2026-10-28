@@ -15,7 +15,8 @@ display attached to alpha:
 - After gamma is dragged to the top, `1` sends it to gamma and `3` to beta:
   the numbers count the list as arranged, not the server's own order.
 - `j` and `k` step between sessions only, never stopping on a pane, and
-  Enter switches the display to the session they land on.
+  Enter switches the display to the session they land on. With every
+  session folded they still do, and the cursor shows beside the name.
 
 Only disposable tmux sockets and files under /tmp are mutated.
 """
@@ -40,6 +41,7 @@ ROWS, COLS = 40, 60
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'zig-out/bin/tmm'
 TMUX = shutil.which('tmux') or 'tmux'
+HOVER, SELECTED = ('rgb', 58, 96, 90), ('rgb', 72, 214, 176)
 
 
 def main():
@@ -131,6 +133,8 @@ def main():
 
         def drag(name, onto, escape=False, by_pane=False):
             # A session's first pane is the row under its name.
+            # Both rows on screen first: a frame being redrawn can miss one.
+            until(lambda: row_of(name) is not None and row_of(onto) is not None)
             start, end = row_of(name) + (1 if by_pane else 0), row_of(onto)
             mouse(0, start, b'M')
             step = -1 if end < start else 1
@@ -190,6 +194,29 @@ def main():
             os.write(fd, b'k\r')
             if not until(lambda: on() == 'gamma'):
                 failures.append('k and Enter did not go to the previous session: %r' % on())
+
+            # With every session folded, j and k still step between them, and
+            # the cursor shows as the dim bar beside the folded name, since
+            # there are no panes for it to run beside.
+            for name in ('gamma', 'alpha', 'beta'):
+                mouse(0, row_of(name), b'M', col=2)
+                mouse(0, row_of(name), b'm', col=2)
+            until(lambda: all(l[1:].startswith('▶ ') for l in display.lines() if l[1:3] in ('▼ ', '▶ ')))
+            mouse(35, ROWS - 1, b'M', col=COLS - 2)  # the pointer off the list
+
+            def bar(name):
+                r = row_of(name) - 1
+                return display.grid[r][0], display.colour(r, 0) if display.grid[r][0] != ' ' else None
+            # gamma is the display's session, so its folded name keeps the
+            # bright bar; j j puts the cursor on alpha, which shows the dim one.
+            os.write(fd, b'jj')
+            if not until(lambda: bar('alpha') == ('▐', HOVER) and bar('gamma') == ('▐', SELECTED)
+                         and bar('beta') == (' ', None)):
+                failures.append('the cursor on a folded session did not show: %r'
+                                % [bar(n) for n in ('gamma', 'alpha', 'beta')])
+            os.write(fd, b'\r')
+            if not until(lambda: on() == 'alpha' and bar('alpha') == ('▐', SELECTED)):
+                failures.append('Enter on a folded session did not switch to it: %r' % on())
         finally:
             for child in (pid, cpid):
                 for sig in (signal.SIGTERM, signal.SIGKILL):

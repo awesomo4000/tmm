@@ -113,6 +113,8 @@ def main():
 
         def drag(name, onto, escape=False, by_pane=False):
             # A session's first pane is the row under its name.
+            # Both rows on screen first: a frame being redrawn can miss one.
+            until(lambda: row_of(name) is not None and row_of(onto) is not None)
             start, end = row_of(name) + (1 if by_pane else 0), row_of(onto)
             mouse(0, start, b'M')
             step = -1 if end < start else 1

@@ -194,6 +194,9 @@ pub const Connection = struct {
     /// write and a read on an existing connection rather than a fork and exec
     /// of tmux. Null falls back to the subprocess path.
     queries: ?*cmstream.Stream = null,
+    /// Set when the query stream turned out to be dead, so the collector
+    /// can drop it and open a new one.
+    queries_lost: bool = false,
     pub fn init(a: Allocator, io: std.Io, environ: std.process.Environ, opts: tmux.ServerOptions) !Connection {
         return .{ .server = try tmux.Server.init(a, io, environ, opts) };
     }
@@ -212,11 +215,18 @@ fn queryRead(connection: *Connection, args: []const []const u8) ![]u8 {
     connection.query_count += 1;
     const stream = connection.queries orelse return query(connection, args);
     const alloc = connection.server.allocator;
-    const reply = stream.requestArgv(alloc, args) catch |err| switch (err) {
+    const reply = stream.requestArgv(alloc, args) catch |err| {
         // Unquotable argument, or the stream died. Either way the subprocess
-        // path still works, so fall back rather than failing the collect.
-        error.UnquotableArgument, error.StreamEnded => return query(connection, args),
-        else => return err,
+        // path still works, so fall back rather than failing the collect. A
+        // stream opened before the server existed is dead from the start:
+        // its client exited at once, and every write to it fails.
+        if (err == error.UnquotableArgument) return query(connection, args);
+        if (err == error.StreamEnded or lostServer(err) != null) {
+            connection.queries_lost = true;
+            connection.queries = null;
+            return query(connection, args);
+        }
+        return err;
     };
     defer reply.deinit(alloc);
     if (!reply.ok) {
@@ -396,13 +406,7 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
     // Long-lived control client for read-only queries. Opened once: a client
     // per iteration would cost as much as the fork and exec it replaces. Its
     // own notifications are dropped, because controlWorker handles events.
-    const query_stream: ?*cmstream.Stream = cmstream.Stream.open(alloc, io, .{
-        .socket = opts.socket_path,
-        .label = opts.socket_name,
-        .session = null,
-        .tmux_bin = opts.tmux_bin orelse "tmux",
-    }) catch null;
-    if (query_stream) |qs| qs.discard_notifications = true;
+    var query_stream = openQueries(alloc, io, opts);
     defer if (query_stream) |qs| qs.close();
 
     // Incremental model, maintained across iterations from the event queue and
@@ -467,8 +471,16 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
                 s.destroy(alloc);
                 return;
             };
-            return;
+            // Try again rather than give up: the server may simply not be
+            // running yet, and starting it later should bring the list up.
+            // While there is no server the control worker cannot attach, and
+            // posts the wake on its 500 ms cadence instead.
+            shared.wake.wait(io) catch return;
+            continue;
         };
+        // Reopened after one died, which is also how a server started after
+        // tmm gets its fast path back.
+        if (query_stream == null) query_stream = openQueries(alloc, io, opts);
         server.queries = query_stream;
         var rename_failure: ?[]const u8 = null;
         if (rename) |r| {
@@ -509,6 +521,10 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
         if (s.valid) tracker.update(s, target) catch {
             s.failure = "Completion tracking failed";
         };
+        if (server.queries_lost) if (query_stream) |qs| {
+            qs.close();
+            query_stream = null;
+        };
         server.deinit();
         if (target) |*t| if (t.session) |session| {
             alloc.free(session);
@@ -548,6 +564,19 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
         // the degraded path matches the old fixed poll exactly.
         shared.wake.wait(io) catch return;
     }
+}
+
+/// The long-lived control client read-only queries go through. Null when it
+/// cannot be started; queries then run as subprocesses.
+fn openQueries(alloc: Allocator, io: std.Io, opts: tmux.ServerOptions) ?*cmstream.Stream {
+    const stream = cmstream.Stream.open(alloc, io, .{
+        .socket = opts.socket_path,
+        .label = opts.socket_name,
+        .session = null,
+        .tmux_bin = opts.tmux_bin orelse "tmux",
+    }) catch return null;
+    stream.discard_notifications = true;
+    return stream;
 }
 
 /// Report structural divergence between the incremental model and a full query.

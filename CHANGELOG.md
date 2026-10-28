@@ -1,5 +1,10 @@
 # Changelog
 
+## 10/28/2026
+
+- Fixed tmm started before its tmux server never showing the server once it started: the collector gave up after its first failed pass, and the query client opened while there was no server stayed dead. tmm now keeps trying, and reopens that client when it finds it dead.
+- Showed the cursor on a folded session as the bar beside its name, where before it had no mark at all.
+
 ## 10/27/2026
 
 - Made `j`/`k` step between sessions only, so Enter switches to a session without picking a pane, and `q` close the keys panel rather than quit while it is open.
