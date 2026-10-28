@@ -74,6 +74,9 @@ pub const Row = struct {
     /// A folded session holding a finished result nobody has looked at, so
     /// its name says so in place of the rows it hides.
     done: bool = false,
+    /// A session row whose third column is the number key that switches
+    /// to it.
+    number: bool = false,
 };
 /// Beside the selected server and display.
 pub const entry_mark = "➤";
@@ -126,7 +129,7 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
     }
     try list.appendSlice(a, &.{ .{ .text = "" }, .{ .text = "sessions", .heading = true, .key = "new-session", .action = .new_session } });
     if (snapshot) |s| {
-        for (try order.arrange(a, s.sessions)) |i| {
+        for (try order.arrange(a, s.sessions), 0..) |i, listed| {
             const session = s.sessions[i];
             var active = false;
             if (target) |t| for (s.clients) |client| {
@@ -137,7 +140,10 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
             try list.append(a, .{ .text = "" });
             const session_row = list.items.len;
             try list.append(a, .{
-                .text = try std.fmt.allocPrint(a, "{s} {s}", .{ if (fold) "▶" else "▼", session.name }),
+                // The key that switches to it: 1 to 9, then 0 for the tenth,
+                // and a blank past that so the names stay in line.
+                .text = try std.fmt.allocPrint(a, "{s} {s} {s}", .{ if (fold) "▶" else "▼", if (listed < 10) "1234567890"[listed .. listed + 1] else " ", session.name }),
+                .number = listed < 10,
                 .key = try std.fmt.allocPrint(a, "session:{s}", .{session.id}),
                 .action = .{ .session = i },
                 .active = active,

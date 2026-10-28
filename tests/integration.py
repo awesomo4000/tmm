@@ -247,7 +247,8 @@ def main():
             # Native navigation is reflected, then session click navigates back.
             tmux('switch-client', '-c', first, '-t', '=alpha')
             until(lambda: sessions()[first] == 'alpha', 'native navigation')
-            beta_name = row_of(lambda l: l.split()[1:2] == ['beta'])
+            # Arrow, number key, name.
+            beta_name = row_of(lambda l: l.split()[2:3] == ['beta'])
             click(beta_name)  # clicking the beta name opens the inline editor
             until(lambda: shows('Enter save'), 'the inline editor')
             os.write(ui_fd, b'qjk')  # ordinary text, not sidebar shortcuts

@@ -90,20 +90,26 @@ def main():
                     return True
             return False
 
+        def name_in(body):
+            """A session row's name: after the arrow, and after the number key
+            the first ten carry."""
+            words = body[2:].split()
+            return words[1] if words and words[0].isdigit() else words[0]
+
         def listed():
             """Session names top to bottom, past the gutter and fold arrow."""
             names = []
             for line in display.lines():
                 body = line[1:]
                 if body.startswith('▼ ') or body.startswith('▶ '):
-                    names.append(body[2:].split()[0])
+                    names.append(name_in(body))
             return names
 
         def row_of(name):
             """The 1-based screen row of a session's name."""
             for r, line in enumerate(display.lines()):
                 body = line[1:]
-                if (body.startswith('▼ ') or body.startswith('▶ ')) and body[2:].split()[:1] == [name]:
+                if (body.startswith('▼ ') or body.startswith('▶ ')) and name_in(body) == name:
                     return r + 1
             return None
 

@@ -662,6 +662,9 @@ pub fn main(init: std.process.Init) !void {
             } else if (row.active and row.color == 7 and row.name_rgb == null) {
                 tint(win, i + top, 0, win.width, .lift);
             }
+            // After the arrow and its space, in its own quiet colour rather
+            // than the name's.
+            if (row.number) paint(win, i + top, 2, 3, palette.session_number);
             if (row.symbol.len > 0) paintSymbols(win, i + top, row.symbol, row.symbol_color);
             if (row.name_rgb) |rgb| if (std.mem.indexOf(u8, row.text, row.name)) |at| {
                 const from = win.gwidth(m.display(fa, row.text[0..at]) catch row.text[0..at]);

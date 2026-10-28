@@ -2,6 +2,7 @@
 
 ## 10/28/2026
 
+- Showed each of the first ten sessions' number key just after its fold arrow, following the arranged order.
 - Fixed tmm started before its tmux server never showing the server once it started: the collector gave up after its first failed pass, and the query client opened while there was no server stayed dead. tmm now keeps trying, and reopens that client when it finds it dead.
 - Showed the cursor on a folded session as the bar beside its name, where before it had no mark at all.
 

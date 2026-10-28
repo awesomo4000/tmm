@@ -108,11 +108,11 @@ def main():
             for r, line in enumerate(display.lines()):
                 body = line[1:].strip()
                 if body == text or body.startswith(text + ' '):
-                    return display.colour(r, line.index(text) + len('▶ '))
+                    return display.colour(r, line.index(text) + len('▶ 1 '))
             return 'not drawn'
 
         try:
-            if not until(lambda: any('▼ finished' in l for l in rows())
+            if not until(lambda: any('▼ 1 finished' in l for l in rows())
                          and sum(l.startswith('  ') for l in rows()) >= 2):
                 failures.append('the sessions never drew open: %r' % rows())
             # The title starts at the field's top-left corner, so the
@@ -122,22 +122,22 @@ def main():
                                 '%r' % (display.colour(0, 1),))
             for name in ('finished', 'waiting'):
                 click_fold(name)
-            if not until(lambda: shown('▶ finished') and shown('▶ waiting')):
+            if not until(lambda: shown('▶ 1 finished') and shown('▶ 2 waiting')):
                 failures.append('the sessions did not fold: %r' % rows())
             if any('claude' in l for l in rows()):
                 failures.append('a folded session still drew its panes: %r' % rows())
-            if painted('▶ finished') != GREEN:
+            if painted('▶ 1 finished') != GREEN:
                 failures.append('a folded session with a finished agent was not '
-                                'green: %r' % (painted('▶ finished'),))
+                                'green: %r' % (painted('▶ 1 finished'),))
             # Drawn, and in some other colour: a name that was never found
             # must not pass as "not green".
-            waiting = painted('▶ waiting')
+            waiting = painted('▶ 2 waiting')
             if waiting == GREEN or waiting == 'not drawn':
                 failures.append('a folded session with a blocked agent was not '
                                 'drawn in its own colour: %r' % (waiting,))
 
             click_fold('finished')
-            if not until(lambda: shown('▼ finished')
+            if not until(lambda: shown('▼ 1 finished')
                          and any('claude' in l for l in rows())):
                 failures.append('the session did not open again: %r' % rows())
         finally:

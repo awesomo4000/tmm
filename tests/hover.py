@@ -180,7 +180,7 @@ def main():
                 last = second.display.background(r, COLS - 1)
                 return last is not None and all(abs(a - b) <= 3 for a, b in zip(last[1:], (20, 21, 21)))
 
-            alpha_row = second.row_of('▼ alpha')
+            alpha_row = second.row_of('▼ 1 alpha')
             if alpha_row is None or not second.until(lambda: all(carded(alpha_row + d) for d in (0, 1, 2))):
                 failures.append('the selected session was not on its fading card: %r'
                                 % ([(second.display.background(alpha_row + d, 0),
@@ -202,13 +202,13 @@ def main():
                          second.display.colour(r, 0) if second.display.grid[r][0] != ' ' else None)
                         for r in range(top, top + count)]
 
-            alpha = second.row_of('▼ alpha')
+            alpha = second.row_of('▼ 1 alpha')
             # No bar beside the session's name; it starts at the panes.
             selected = [(' ', False, None), (BAR, True, BRIGHT), (BAR, False, BRIGHT)]
             if alpha is None or not second.until(lambda: bars(alpha, 3) == selected):
                 failures.append('the selected session did not keep the bright bar: %r'
                                 % (bars(alpha, 3) if alpha is not None else None,))
-            row = second.row_of('▼ beta')
+            row = second.row_of('▼ 2 beta')
             if row is None:
                 failures.append('the beta session never drew')
             else:
@@ -220,9 +220,9 @@ def main():
                 if not second.until(lambda: bars(row - 1, 4) == hovered):
                     failures.append('hover did not run the dim bar from the session through '
                                     'the blank row below it: %r' % bars(row - 1, 4))
-                if second.fill('▼ beta') is not None:
+                if second.fill('▼ 2 beta') is not None:
                     failures.append('hover recoloured the line: %r'
-                                    % (second.fill('▼ beta'),))
+                                    % (second.fill('▼ 2 beta'),))
                 if bars(alpha, 3) != selected:
                     failures.append('hovering elsewhere changed the selected bar: %r'
                                     % bars(alpha, 3))

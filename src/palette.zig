@@ -31,6 +31,7 @@ pub const lavender: RGB = .{ 176, 156, 210 };
 pub const moss: RGB = .{ 150, 186, 120 };
 pub const sand: RGB = .{ 196, 172, 118 };
 pub const slate: RGB = .{ 176, 182, 200 };
+pub const ash: RGB = .{ 112, 118, 132 };
 
 // Their jobs.
 
@@ -63,6 +64,10 @@ pub const assumed_background = near_black;
 pub const entry_name = sage;
 /// The blink mark, warm so it reads as something to press.
 pub const blink_mark = goldenrod;
+
+/// The number key beside each of the first ten sessions, quiet so the name
+/// stays what reads first.
+pub const session_number = ash;
 
 /// The key bindings panel, and the keys in it.
 pub const help_panel = midnight_teal;

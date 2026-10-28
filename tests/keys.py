@@ -12,8 +12,9 @@ display attached to alpha:
 - `?` opens the panel and `?` closes it again; Escape closes it too, and so
   does `q`, which while the panel is open does not quit.
 - `2` sends the display to beta, the second session listed.
-- After gamma is dragged to the top, `1` sends it to gamma and `3` to beta:
-  the numbers count the list as arranged, not the server's own order.
+- After gamma is dragged to the top, the numbers shown beside the names read
+  1 gamma, 2 alpha, 3 beta, and `1` sends the display to gamma and `3` to
+  beta: they count the list as arranged, not the server's own order.
 - `j` and `k` step between sessions only, never stopping on a pane, and
   Enter switches the display to the session they land on. With every
   session folded they still do, and the cursor shows beside the name.
@@ -42,6 +43,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'zig-out/bin/tmm'
 TMUX = shutil.which('tmux') or 'tmux'
 HOVER, SELECTED = ('rgb', 58, 96, 90), ('rgb', 72, 214, 176)
+ASH = ('rgb', 112, 118, 132)
 
 
 def main():
@@ -110,20 +112,26 @@ def main():
                     return True
             return False
 
+        def name_in(body):
+            """A session row's name: after the arrow, and after the number key
+            the first ten carry."""
+            words = body[2:].split()
+            return words[1] if words and words[0].isdigit() else words[0]
+
         def listed():
             """Session names top to bottom, past the gutter and fold arrow."""
             names = []
             for line in display.lines():
                 body = line[1:]
                 if body.startswith('▼ ') or body.startswith('▶ '):
-                    names.append(body[2:].split()[0])
+                    names.append(name_in(body))
             return names
 
         def row_of(name):
             """The 1-based screen row of a session's name."""
             for r, line in enumerate(display.lines()):
                 body = line[1:]
-                if (body.startswith('▼ ') or body.startswith('▶ ')) and body[2:].split()[:1] == [name]:
+                if (body.startswith('▼ ') or body.startswith('▶ ')) and name_in(body) == name:
                     return r + 1
             return None
 
@@ -178,6 +186,13 @@ def main():
 
             drag('gamma', 'alpha')
             until(lambda: listed() == ['gamma', 'alpha', 'beta'])
+            # The number keys are shown beside the names, in listed order and
+            # their own quiet colour.
+            numbered = [(l[3:4], name_in(l[1:]), display.colour(r, 3))
+                        for r, l in enumerate(display.lines()) if l[1:3] in ('▼ ', '▶ ')]
+            want = [('1', 'gamma', ASH), ('2', 'alpha', ASH), ('3', 'beta', ASH)]
+            if numbered != want:
+                failures.append('the session numbers did not follow the order: %r' % numbered)
             os.write(fd, b'1')
             if not until(lambda: on() == 'gamma'):
                 failures.append('1 did not follow the arranged order to gamma: %r' % on())

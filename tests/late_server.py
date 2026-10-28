@@ -91,7 +91,7 @@ def main():
             subprocess.run([TMUX, '-S', socket, '-f', '/dev/null', 'new-session', '-d',
                             '-s', 'late', '-x', '80', '-y', '24'], capture_output=True, timeout=5)
             client = spawn([TMUX, '-S', socket, 'attach', '-t', 'late'])
-            if not until(lambda: shows('▼ late')):
+            if not until(lambda: shows('▼ 1 late')):
                 failures.append('the session on the late server never appeared: %r'
                                 % display.lines())
             if not until(lambda: any(l[1:].startswith('➤ ') and ': late' in l for l in display.lines())):
