@@ -8,6 +8,7 @@ const m = @import("model.zig");
 const status = @import("status.zig");
 const cmstream = @import("cmstream.zig");
 const control = @import("control.zig");
+const attach = @import("quiet.zig");
 const reported_mod = @import("reported.zig");
 const istate = @import("state.zig");
 const reconcile = @import("reconcile.zig");
@@ -569,10 +570,9 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
 /// The long-lived control client read-only queries go through. Null when it
 /// cannot be started; queries then run as subprocesses.
 fn openQueries(alloc: Allocator, io: std.Io, opts: tmux.ServerOptions) ?*cmstream.Stream {
-    const stream = cmstream.Stream.open(alloc, io, .{
+    const stream = attach.open(alloc, io, .{
         .socket = opts.socket_path,
         .label = opts.socket_name,
-        .session = null,
         .tmux_bin = opts.tmux_bin orelse "tmux",
     }) catch return null;
     stream.discard_notifications = true;
@@ -780,10 +780,9 @@ pub fn heartbeatWorker(io: std.Io, shared: *Shared) void {
 /// the collector parks on a cancellable semaphore wait, not on this loop.
 pub fn controlWorker(io: std.Io, alloc: Allocator, opts: tmux.ServerOptions, shared: *Shared) void {
     while (!shared.stopping.load(.acquire)) {
-        const stream = cmstream.Stream.open(alloc, io, .{
+        const stream = attach.open(alloc, io, .{
             .socket = opts.socket_path,
             .label = opts.socket_name,
-            .session = null,
             .tmux_bin = opts.tmux_bin orelse "tmux",
         }) catch {
             // No control stream: fall back to the historical fixed cadence so

@@ -1,5 +1,9 @@
 # Changelog
 
+## 10/29/2026
+
+- Fixed tmm changing which session a plain `tmux attach` picks. Its control clients used to take the session used last, which a plain attach then passed over, and the attach marked that session as used, so after tmm exited a plain attach went there. They now attach to the least recently used session no terminal is on, and the session that was most recent is marked as used again afterwards.
+
 ## 10/28/2026
 
 - Showed each of the first ten sessions' number key just after its fold arrow, following the arranged order.

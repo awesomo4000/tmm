@@ -283,6 +283,7 @@ test {
     _ = @import("reported.zig");
     _ = @import("status.zig");
     _ = @import("control.zig");
+    _ = @import("quiet.zig");
     _ = @import("reconcile.zig");
     _ = @import("state.zig");
     _ = @import("aurora.zig");
