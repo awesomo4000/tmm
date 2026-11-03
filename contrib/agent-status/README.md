@@ -14,8 +14,8 @@ first. Where none exists, nothing changes.
 
 tmm already reads the record and draws it (`src/reported.zig`,
 `src/sidebar.zig`). What was missing was anything that emits it. These are the
-two pieces: a transport, and one mapping from Claude Code and Codex hook
-events onto it.
+pieces: a transport, one mapping from Claude Code and Codex hook events onto
+it, and an omp extension that does the same from omp's events.
 
 Nothing here is installed by default, and nothing touches your agent config
 unless you run the installer or edit the file yourself.
@@ -45,10 +45,15 @@ unless you run the installer or edit the file yourself.
 
 - **`codex-hooks-snippet.json`** — the same for Codex's `~/.codex/hooks.json`.
 
+- **`omp-status.ts`** — the mapping for omp, as an extension, since omp has
+  no command hooks. It runs inside omp and calls the emitter beside it.
+
 - **`install.sh`** — copies both scripts to `~/.claude/hooks/tmm/`, or with
   `codex` to `~/.codex/hooks/tmm/`, and prints the snippet. It does not edit
   your config; merging is left to you, because a config file has other hooks
-  in it and clobbering those would be worse than a manual step.
+  in it and clobbering those would be worse than a manual step. With `omp` it
+  copies the extension and the emitter to `~/.omp/agent/extensions/tmm/`,
+  which is the whole install: omp loads every extension directory it finds.
 
 ## What this needs to be running
 
@@ -97,6 +102,7 @@ a reliable signal instead, and it rides the same query.
 
     contrib/agent-status/install.sh            # Claude Code
     contrib/agent-status/install.sh codex      # Codex
+    contrib/agent-status/install.sh omp        # omp
 
 For Claude Code, merge `settings-snippet.json` into `~/.claude/settings.json`
 under `hooks`. For Codex, merge what the installer prints into
@@ -104,7 +110,8 @@ under `hooks`. For Codex, merge what the installer prints into
 directory written out, the way Codex's own hooks name their scripts. Either
 way, if an event already has hooks, add this one to its `hooks` array rather
 than replacing it. Codex then holds the new hooks back until they have been
-reviewed, which is done under `/hooks` in codex.
+reviewed, which is done under `/hooks` in codex. omp needs nothing merged;
+it loads the extension the next time it starts.
 
 ## What maps to what
 
@@ -215,10 +222,57 @@ pane on a disposable tmux server, writing down what it was given.
 
 `tests/codex_hook.py` replays those payloads, in the order Codex sent them.
 
+## omp
+
+omp has no hooks that run a command. Its hooks are extensions, TypeScript
+modules it loads into its own process, which subscribe to its events. So the
+omp mapping is an extension, `omp-status.ts`, and runs `tmm-report.sh` for
+each change. Running inside omp, it has the pane environment for free, and
+no terminal question arises: the emitter runs as a child of omp.
+
+The events were measured, not read: omp 18.16 ran in a pane on a disposable
+tmux server with an extension logging every event it was given, through an
+approval granted and one denied, the `ask` tool, Escape, and `/exit`.
+
+| Event | Reported |
+| --- | --- |
+| `agent_start` | `working` |
+| `tool_execution_start` | `working`, with the tool name; at most once a second while already working |
+| `tool_approval_requested` | `blocked`, `kind=permission`, with the tool name |
+| `tool_execution_start` for `ask` | `blocked`, `kind=question` |
+| `tool_approval_resolved`, `tool_execution_end` for `ask` | `working`, once no prompt is left |
+| `agent_end` | `done` |
+| `agent_end`, last message stopped `aborted` | `idle` |
+| `agent_end`, last message stopped `error` | `error`, with the message |
+| `auto_retry_start` | `working` |
+| `auto_retry_end` with `success: false` | `error` |
+| `session_switch` | `clear` |
+| `session_shutdown` | `clear` |
+
+- Only a session with a UI reports. A subagent is a session of its own with
+  no UI, in the same process, and its turn ending would otherwise mark the
+  pane done while the main one works.
+- A denied approval resolves like an approved one, `approved: false`, and the
+  turn goes on: the model is told and answers. Both go back to `working`.
+- Escape sends nothing of its own. The turn ends with `agent_end`, and the
+  last assistant message's `stopReason` of `aborted` is what tells it apart.
+- omp decides to retry an error in its own `agent_end` handler, after the
+  extension has seen it, so `error` comes first and `auto_retry_start` puts it
+  back to `working`.
+- Prompts are counted. Parallel tool calls can each ask, and answering one is
+  not working while another is still up.
+- The clear at `session_shutdown` is waited for. omp exits once the handlers
+  return, and a report still running then would leave the record behind.
+
+The retry rows are from omp's source rather than a measured run, since an
+error cannot be produced on demand. `tests/omp_hook.py` loads the extension
+under bun, the runtime omp is built on, and replays the measured sequences
+through a stand-in for omp's extension API.
+
 ## The other agents
 
-Claude Code and Codex are wired up, because they are the ones that could be
-tested end to end here. The shape transfers: `tmm-report.sh` has nothing agent
+Claude Code, Codex and omp are wired up, because they are the ones that could
+be tested end to end here. The shape transfers: `tmm-report.sh` has nothing agent
 specific in it, so another agent needs only its own mapping from its own
 lifecycle events, and whatever it offers in place of hooks. The two things to
 check first for any of them are the two above — whether its hook has a

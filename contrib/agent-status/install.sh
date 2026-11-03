@@ -8,8 +8,10 @@
 #
 #     install.sh            Claude Code: ~/.claude/hooks/tmm, settings.json
 #     install.sh codex      Codex: ~/.codex/hooks/tmm, hooks.json
+#     install.sh omp        omp: ~/.omp/agent/extensions/tmm, nothing to merge
 #
-# Deliberately does not edit the agent's config. A config file has other hooks
+# omp loads every extension directory it finds, so for it copying is the
+# whole install. For the others this deliberately does not edit the config. A config file has other hooks
 # in it -- and other tools write to it -- so a merge done blind is a good way
 # to lose someone else's hook. Printing the block and letting a person paste it
 # costs one step and cannot destroy anything.
@@ -29,11 +31,33 @@ case "$agent" in
         config=$home_dir/hooks.json
         snippet=$here/codex-hooks-snippet.json
         ;;
+    omp)
+        home_dir=$HOME/.omp/agent
+        ;;
     *)
-        echo "usage: $0 [claude|codex]" >&2
+        echo "usage: $0 [claude|codex|omp]" >&2
         exit 2
         ;;
 esac
+if [ "$agent" = omp ]; then
+    # A directory under extensions/ is loaded through its index.ts, and the
+    # extension finds tmm-report.sh beside itself.
+    dest=${TMM_HOOK_DIR:-$home_dir/extensions/tmm}
+    mkdir -p "$dest"
+    for f in tmm-report.sh omp-status.ts; do
+        [ -f "$here/$f" ] || { echo "missing $here/$f" >&2; exit 1; }
+    done
+    cp "$here/tmm-report.sh" "$dest/tmm-report.sh"
+    chmod +x "$dest/tmm-report.sh"
+    cp "$here/omp-status.ts" "$dest/index.ts"
+    echo "installed to $dest:"
+    echo "  index.ts        (omp-status.ts)"
+    echo "  tmm-report.sh"
+    echo
+    echo "omp loads it the next time it starts; one already running needs a restart."
+    exit 0
+fi
+
 default_dest=$home_dir/hooks/tmm
 dest=${TMM_HOOK_DIR:-$default_dest}
 
