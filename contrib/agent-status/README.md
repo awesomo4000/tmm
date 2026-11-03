@@ -12,9 +12,10 @@ stays unknown, and `error` has no screen it can be recognised from at all. A
 report has none of those failure modes, so where one exists it is believed
 first. Where none exists, nothing changes.
 
-tmm already reads OSC 7501 out of a pane and draws it (`src/surface.zig`,
+tmm already reads the record and draws it (`src/reported.zig`,
 `src/sidebar.zig`). What was missing was anything that emits it. These are the
-two pieces: a transport, and one mapping from Claude Code hook events onto it.
+two pieces: a transport, and one mapping from Claude Code and Codex hook
+events onto it.
 
 Nothing here is installed by default, and nothing touches your agent config
 unless you run the installer or edit the file yourself.
@@ -34,17 +35,20 @@ unless you run the installer or edit the file yourself.
   It does nothing at all outside tmux, so it is safe in a script that runs in
   both places.
 
-- **`claude-status-hook.py`** — the mapping. Reads a Claude Code hook event
-  from stdin and calls the emitter. One script for every event; the event name
-  is in the JSON.
+- **`agent-status-hook.py`** — the mapping. Reads a Claude Code or Codex hook
+  event from stdin and calls the emitter. One script for every event and both
+  agents; the event name is in the JSON, and the argument says which agent,
+  `claude` when there is none.
 
 - **`settings-snippet.json`** — the `hooks` block to merge into your Claude
   Code settings.
 
-- **`install.sh`** — copies both scripts to `~/.claude/hooks/tmm/` and prints
-  the snippet. It does not edit your settings; merging is left to you, because
-  settings files have other hooks in them and clobbering those would be worse
-  than a manual step.
+- **`codex-hooks-snippet.json`** — the same for Codex's `~/.codex/hooks.json`.
+
+- **`install.sh`** — copies both scripts to `~/.claude/hooks/tmm/`, or with
+  `codex` to `~/.codex/hooks/tmm/`, and prints the snippet. It does not edit
+  your config; merging is left to you, because a config file has other hooks
+  in it and clobbering those would be worse than a manual step.
 
 ## What this needs to be running
 
@@ -91,11 +95,16 @@ a reliable signal instead, and it rides the same query.
 
 ## Install
 
-    contrib/agent-status/install.sh
+    contrib/agent-status/install.sh            # Claude Code
+    contrib/agent-status/install.sh codex      # Codex
 
-Then merge `settings-snippet.json` into `~/.claude/settings.json` under
-`hooks`. If you already have hooks on those events, add this one to the
-existing `hooks` array rather than replacing it.
+For Claude Code, merge `settings-snippet.json` into `~/.claude/settings.json`
+under `hooks`. For Codex, merge what the installer prints into
+`~/.codex/hooks.json`: it is `codex-hooks-snippet.json` with your home
+directory written out, the way Codex's own hooks name their scripts. Either
+way, if an event already has hooks, add this one to its `hooks` array rather
+than replacing it. Codex then holds the new hooks back until they have been
+reviewed, which is done under `/hooks` in codex.
 
 ## What maps to what
 
@@ -110,6 +119,7 @@ existing `hooks` array rather than replacing it.
 | `Notification` `idle_prompt` | `idle`, only from `working` |
 | `Stop` | `done` |
 | `StopFailure` | `error` |
+| `Interrupt` (Codex) | `idle` |
 | `SessionEnd` | `clear` |
 
 A Notification is mapped by its `notification_type`. Its `message` is the
@@ -160,14 +170,14 @@ What a hook *does* inherit is the environment of the pane it ran in, including
 `$TMUX` and `$TMUX_PANE`. So the emitter asks tmux for `#{pane_tty}` and
 writes there. A write to a pane's tty from a process with no controlling
 terminal arrives as that pane's output, which is the same path a `printf` from
-a shell in the pane takes: tmux turns it into `%output`, and tmm parses the
-sequence out of it.
+a shell in the pane takes. Inside tmux that goes nowhere, as above, so the
+emitter also sets the `@tmm_status` pane option, which is what tmm reads.
 
 `$TMUX` also carries the socket, which matters — tmm is often watching a
 server that is not the default one, and a bare `tmux` would address the wrong
 one.
 
-`tests/agent_hooks.py` runs these scripts with the hooks detached into their
+`tests/agent_hooks_sidebar.py` runs these scripts with the hooks detached into their
 own session, so a change that reintroduces a dependency on `/dev/tty` fails
 the suite rather than passing it.
 
@@ -181,10 +191,34 @@ during long work instead. A program that genuinely knows its own fraction —
 a build, a deploy, a migration — should pass `progress=` to `tmm-report.sh`
 directly.
 
+## Codex
+
+Codex's hooks are close enough to Claude Code's to share the mapping, which
+was measured rather than read: Codex 0.166 ran a hook on every event from a
+pane on a disposable tmux server, writing down what it was given.
+
+- Its hooks also run with no controlling terminal, and also inherit `$TMUX`
+  and `$TMUX_PANE`, so the emitter finds the pane the same way.
+- The payload has the same fields under the same names: `hook_event_name`,
+  `session_id`, `tool_name`, plus a `turn_id`.
+- An approval runs as Claude Code's does, `PreToolUse`, then
+  `PermissionRequest` while the prompt is on screen, then `PostToolUse` once
+  it is answered. Before that, Codex tries the command in its sandbox, and the
+  refusal arrives as a `PostToolUse` too; it changes nothing, because only a
+  blocked pane is moved by one.
+- Escape mid-turn sends `Interrupt` and no `Stop`, so that event is mapped:
+  `idle`, since the person stopped the turn and there is nothing unseen.
+- It has no `Notification`, `StopFailure` or permission-denied event, so
+  those rows never fire for it. A refused approval should therefore leave `!`
+  showing until the next tool call or the turn's `Stop`; that case was not
+  measured.
+
+`tests/codex_hook.py` replays those payloads, in the order Codex sent them.
+
 ## The other agents
 
-Only Claude Code is wired up, because it is the only one that could be tested
-end to end here. The shape transfers: `tmm-report.sh` has nothing agent
+Claude Code and Codex are wired up, because they are the ones that could be
+tested end to end here. The shape transfers: `tmm-report.sh` has nothing agent
 specific in it, so another agent needs only its own mapping from its own
 lifecycle events, and whatever it offers in place of hooks. The two things to
 check first for any of them are the two above — whether its hook has a

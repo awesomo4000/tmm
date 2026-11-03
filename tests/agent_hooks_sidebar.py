@@ -45,7 +45,7 @@ from screen import Screen  # noqa: E402
 ROWS, COLS, READ_COLS = 44, 170, 34
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'zig-out/bin/tmm'
-HOOK = ROOT / 'contrib/agent-status/claude-status-hook.py'
+HOOK = ROOT / 'contrib/agent-status/agent-status-hook.py'
 TMUX = shutil.which('tmux') or 'tmux'
 
 

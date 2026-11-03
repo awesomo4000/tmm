@@ -31,7 +31,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-HOOK = ROOT / 'contrib/agent-status/claude-status-hook.py'
+HOOK = ROOT / 'contrib/agent-status/agent-status-hook.py'
 TMUX = shutil.which('tmux') or 'tmux'
 
 

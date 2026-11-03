@@ -3,11 +3,21 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-"""Map a Claude Code hook event onto one OSC 7501 report.
+"""Map a Claude Code or Codex hook event onto one OSC 7501 report.
 
-Installed once for every event in settings-snippet.json; the event name
-arrives in the JSON on stdin, so one script covers all of them and there is
-one place where the mapping lives.
+Installed once for every event, from settings-snippet.json for Claude Code
+and codex-hooks-snippet.json for Codex; the event name arrives in the JSON on
+stdin, so one script covers all of them and there is one place where the
+mapping lives. The first argument names the agent, `claude` when it is left
+off, and goes on every report as `app`.
+
+The two agents' hooks are close enough to share it. Codex sends the same
+fields under the same names -- hook_event_name, session_id, tool_name -- and
+an approval runs PreToolUse, PermissionRequest, then PostToolUse once it is
+answered, as Claude Code's does. Codex has no Notification or StopFailure, so
+those branches simply never fire for it, and one event of its own, Interrupt.
+All of that was measured from Codex 0.166 running the hooks in a tmux pane,
+not taken from documentation.
 
 This needs the agent to be in a tmux pane on the server tmm is watching, which
 is the ordinary way to run tmm. tmm reads the record from the pane option the
@@ -36,6 +46,7 @@ The mapping:
     Notification idle_prompt             idle      only from working
     Stop                                 done      finished, not yet looked at
     StopFailure                          error
+    Interrupt (Codex)                    idle      stopped by the person
     SessionEnd                           clear     the record goes away
 
 Anything else is ignored, which is deliberate: an event with no obvious state
@@ -63,6 +74,13 @@ Rules worth knowing, each learned the hard way, here or by prior art:
     main turn is still working.
   - `SubagentStop` never reports either, even without `agent_id`, because it
     can arrive after the main turn has already stopped and would revive it.
+  - Codex's Interrupt is `idle`. Escape mid-turn sends it and no Stop, so
+    without it the pane read as working until the next prompt. It is not
+    `done`: the person stopped the turn themselves and has nothing unseen.
+  - Codex runs a command in its sandbox first and asks only once that
+    fails, so a PostToolUse carrying the sandbox's refusal comes before the
+    PermissionRequest. Nothing changes for it, because it is only acted on
+    from blocked.
 
 The conditional rules need the state this hook last reported. It keeps that in
 a file per session in TMPDIR rather than asking tmux, so the events that fire
@@ -179,6 +197,7 @@ def notification_type(hook):
 
 
 def main():
+    app = sys.argv[1] if len(sys.argv) > 1 else 'claude'
     try:
         raw = sys.stdin.read()
     except Exception:
@@ -200,7 +219,7 @@ def main():
     # `app` is on every report so the sidebar can say which program spoke, and
     # because a report replaces the record: leaving it off one report would
     # erase it.
-    base = {'app': 'claude'}
+    base = {'app': app}
 
     def tool_title(options):
         tool = hook.get('tool_name')
@@ -243,6 +262,8 @@ def main():
         report(session, dict(base, state='done'))
     elif event == 'StopFailure':
         report(session, dict(base, state='error'))
+    elif event == 'Interrupt':
+        report(session, dict(base, state='idle'))
     elif event == 'SessionEnd':
         # `clear` removes the record rather than setting a state, so the row
         # stops claiming anything about a session that is gone.
