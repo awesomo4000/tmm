@@ -10,7 +10,7 @@ const palette = @import("palette.zig");
 const Order = @import("order.zig").Order;
 const tmux = @import("libtmux");
 pub const Server = struct { name: []const u8, options: tmux.ServerOptions };
-pub const Action = union(enum) { server: usize, display: usize, session: usize, fold: usize, pane: usize, new_session, blink };
+pub const Action = union(enum) { server: usize, display: usize, session: usize, fold: usize, pane: usize, new_session, blink, sort, auto_sort };
 
 /// Columns the fold arrow and the space after it take at the start of a
 /// session row; a click inside them folds rather than selects.

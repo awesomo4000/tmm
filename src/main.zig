@@ -21,6 +21,20 @@ pub const panic = std.debug.FullPanic(struct {
 pub const std_options: std.Options = .{ .log_level = .err };
 const new_button_col = 11; // "sessions" plus three spaces
 const new_button_text = "[new]";
+/// Puts the sessions back in the server's order, which is the order tmux's
+/// own next and previous session keys step through.
+const sort_button_col = new_button_col + new_button_text.len + 1;
+const sort_button_text = "[sort]";
+/// The mark after it says what keeps the order, and a click steps to the
+/// next: M for manual, the order as arranged, and A for automatic,
+/// following the server, new sessions included, until one is moved. Not a
+/// cross and a tick, which a pane's status already means.
+const auto_button_col = sort_button_col + sort_button_text.len + 1;
+const auto_button_width = 1;
+const auto_on_text = "Ⓐ";
+const auto_off_text = "Ⓜ";
+/// The buttons on the sessions heading, which is one row with one action.
+const Heading = enum { new, sort, auto };
 const Event = union(enum) { key_press: vaxis.Key, mouse: vaxis.Mouse, focus_out, color_report: vaxis.Cell.Color.Report, winsize: vaxis.Winsize, snapshot: *backend.Snapshot };
 const Editor = struct {
     id: []const u8,
@@ -179,6 +193,12 @@ pub fn main(init: std.process.Init) !void {
     var rows: []sidebar.Row = &.{};
     var cursor: ?usize = null;
     var mouse_cursor = false;
+    // Which button on the sessions heading the pointer is on: the same row,
+    // so the cursor alone cannot tell them apart.
+    var on_button: ?Heading = null;
+    // Whether the list follows the server's order, which tmux's own next and
+    // previous session keys step through.
+    var auto_sort = false;
     var column_width: u16 = 0;
     // The sidebar's own box, kept across iterations because mouse events are
     // resolved against the previous frame's geometry.
@@ -236,7 +256,8 @@ pub fn main(init: std.process.Init) !void {
                     break;
                 }
             }
-            if (mouse_cursor and cursor == mouseHit(rows, offset, event.mouse, sidebar_width, sidebar_height, column_width)) continue;
+            const hit = mouseHit(rows, offset, event.mouse, sidebar_width, sidebar_height, column_width);
+            if (mouse_cursor and cursor == hit and on_button == headingButton(rows, hit, event.mouse)) continue;
         }
         var action: ?sidebar.Action = null;
         var reveal = false;
@@ -264,6 +285,7 @@ pub fn main(init: std.process.Init) !void {
                 if (!s.valid) s.destroy(a) else {
                     if (snapshot) |old| old.destroy(a);
                     snapshot = s;
+                    if (auto_sort) order.clear(a);
                     try order.sync(a, s.sessions);
                     if (initial_client) |name| {
                         for (s.clients) |client| if (std.mem.eql(u8, client.name, name)) {
@@ -292,6 +314,7 @@ pub fn main(init: std.process.Init) !void {
             // losing focus is the next best sign the pointer went elsewhere.
             .focus_out => if (mouse_cursor) {
                 cursor = null;
+                on_button = null;
             },
             .color_report => |report| if (report.kind == .bg) {
                 terminal_bg = report.value;
@@ -306,6 +329,7 @@ pub fn main(init: std.process.Init) !void {
                     }
                 } else {
                     const index = mouseHit(rows, offset, mouse, sidebar_width, sidebar_height, column_width);
+                    on_button = headingButton(rows, index, mouse);
                     if (mouse.type == .motion) {
                         cursor = index;
                     }
@@ -322,7 +346,7 @@ pub fn main(init: std.process.Init) !void {
                             const grabs = (chosen == .session and mouse.col >= sidebar.fold_width) or chosen == .pane;
                             if (grabs) if (sessionOf(rows, i)) |held| {
                                 const id = s.sessions[held].id;
-                                drag = .{ .id = try a.dupe(u8, id), .row = mouse.row, .from = order.indexOf(id) orelse 0 };
+                                drag = .{ .id = try a.dupe(u8, id), .row = mouse.row, .from = order.indexOf(id) orelse 0, .auto = auto_sort };
                             };
                         };
                     }
@@ -333,6 +357,8 @@ pub fn main(init: std.process.Init) !void {
                         // rows it is over.
                         if (mouse.row != d.row) d.moved = true;
                         if (d.moved) {
+                            // Moving a session is choosing an order of your own.
+                            auto_sort = false;
                             if (mouse.row < top) offset -|= 1;
                             if (mouse.row >= @as(i32, sidebar_height) - 2) offset = @min(offset + 1, rows.len -| 1);
                             if (sessionAt(rows, offset, mouse.row)) |over| if (snapshot) |s| {
@@ -353,6 +379,13 @@ pub fn main(init: std.process.Init) !void {
                     if (mouse.type == .release) {
                         if (mouse.button == .left) if (index) |i| if (pressed) |p| {
                             if (std.mem.eql(u8, p, rows[i].key)) action = rows[i].action;
+                            if (action) |chosen| if (chosen == .new_session) if (on_button) |button| {
+                                action = switch (button) {
+                                    .new => .new_session,
+                                    .sort => .sort,
+                                    .auto => .auto_sort,
+                                };
+                            };
                             if (action) |chosen| if (chosen == .session and mouse.col < sidebar.fold_width) {
                                 action = .{ .fold = chosen.session };
                             };
@@ -404,6 +437,7 @@ pub fn main(init: std.process.Init) !void {
                 // Escape during a drag puts the session back where it was.
                 if (key.matches(vaxis.Key.escape, .{})) if (drag) |d| {
                     if (d.moved) order.moveTo(d.id, d.from);
+                    if (d.moved) auto_sort = d.auto;
                     a.free(d.id);
                     drag = null;
                 };
@@ -428,8 +462,11 @@ pub fn main(init: std.process.Init) !void {
                 const earlier = key.matches('K', .{}) or key.matches('k', .{ .shift = true }) or key.matches(vaxis.Key.up, .{ .shift = true });
                 if (later or earlier) if (cursor) |c| if (snapshot) |s| if (sessionOf(rows, c)) |i| {
                     order.step(s.sessions[i].id, if (later) 1 else -1);
+                    auto_sort = false;
                     reveal = true;
                 };
+                if (key.matches('s', .{})) action = .sort;
+                if (key.matches('a', .{})) action = .auto_sort;
                 if (key.matches('b', .{})) {
                     if (cursor) |c| {
                         if (rows[c].action) |selected| switch (selected) {
@@ -551,6 +588,13 @@ pub fn main(init: std.process.Init) !void {
             .blink => if (target) |t| {
                 try shared.blinkDisplay(io, a, t.client);
             },
+            // Forgetting the arrangement lists the sessions as the server
+            // does, and sessions created later still go to the bottom.
+            .sort => order.clear(a),
+            .auto_sort => {
+                auto_sort = !auto_sort;
+                if (auto_sort) order.clear(a);
+            },
         };
         _ = layout_arena.reset(.retain_capacity);
         const fa = layout_arena.allocator();
@@ -569,7 +613,7 @@ pub fn main(init: std.process.Init) !void {
         const win = vx.window().child(.{ .x_off = gutter });
         // The widest row decides the clickable column, so a click to the right
         // of every row's text selects nothing rather than the row beside it.
-        var natural: u16 = new_button_col + new_button_text.len;
+        var natural: u16 = auto_button_col + auto_button_width;
         for (rows) |row| {
             const safe = try m.display(fa, row.text);
             var width = win.gwidth(safe) +| 1;
@@ -610,10 +654,18 @@ pub fn main(init: std.process.Init) !void {
                 const heading_win = win.child(.{ .width = @min(win.width, new_button_col) });
                 draw(heading_win, fa, i + top, row.text, .{ .bold = true });
                 tint(win, i + top, 0, new_button_col, .full);
-                const button = win.child(.{ .x_off = @min(win.width, new_button_col), .width = @min(win.width -| new_button_col, new_button_text.len) });
-                draw(button, fa, i + top, new_button_text, .{
-                    .fg = .{ .index = if (highlighted) 7 else 8 },
-                    .bold = highlighted,
+                inline for (.{ .{ Heading.new, new_button_col, new_button_text }, .{ Heading.sort, sort_button_col, sort_button_text } }) |b| {
+                    const lit = highlighted and on_button == b[0];
+                    const at = win.child(.{ .x_off = @min(win.width, b[1]), .width = @min(win.width -| b[1], b[2].len) });
+                    draw(at, fa, i + top, b[2], .{ .fg = .{ .index = if (lit) 7 else 8 }, .bold = lit });
+                }
+                // A is the selected bar's green, so following tmux reads as
+                // on; M stays as quiet as the buttons.
+                const lit = highlighted and on_button == .auto;
+                const mark = win.child(.{ .x_off = @min(win.width, auto_button_col), .width = @min(win.width -| auto_button_col, auto_button_width) });
+                draw(mark, fa, i + top, if (auto_sort) auto_on_text else auto_off_text, .{
+                    .fg = if (auto_sort) .{ .rgb = palette.selected_bar } else .{ .index = if (lit) 7 else 8 },
+                    .bold = lit,
                 });
                 continue;
             }
@@ -754,8 +806,23 @@ fn mouseHit(rows: []const sidebar.Row, offset: usize, mouse: vaxis.Mouse, width:
     if (mouse.row < top or mouse.row >= @as(i32, height) - 2 or mouse.col < -@as(i16, @intCast(gutter)) or mouse.col >= @min(width, column_width)) return null;
     const i = offset + @as(usize, @intCast(mouse.row - @as(i16, @intCast(top))));
     if (i >= rows.len or rows[i].action == null) return null;
-    if (rows[i].action.? == .new_session and (mouse.col < new_button_col or mouse.col >= new_button_col + new_button_text.len)) return null;
+    if (rows[i].action.? == .new_session and headingAt(mouse.col) == null) return null;
     return i;
+}
+
+/// The heading button under a column, if any.
+fn headingAt(col: i16) ?Heading {
+    if (col >= new_button_col and col < new_button_col + new_button_text.len) return .new;
+    if (col >= sort_button_col and col < sort_button_col + sort_button_text.len) return .sort;
+    if (col >= auto_button_col and col < auto_button_col + auto_button_width) return .auto;
+    return null;
+}
+
+/// The heading button a hit is on; null for any other row.
+fn headingButton(rows: []const sidebar.Row, index: ?usize, mouse: vaxis.Mouse) ?Heading {
+    const i = index orelse return null;
+    if (rows[i].action == null or rows[i].action.? != .new_session) return null;
+    return headingAt(mouse.col);
 }
 /// Drop everything `Shared` owns. Both callers cancel the collector and the
 /// control worker first, so nothing is queued behind this and the mutex is
@@ -913,6 +980,8 @@ const bindings = [_][2][]const u8{
     .{ "1-9 0", "switch to session 1 to 10" },
     .{ "Enter", "switch to the session" },
     .{ "space", "fold the session" },
+    .{ "s", "sort sessions as tmux steps them" },
+    .{ "a", "keep them sorted, until one moves" },
     .{ "b", "blink the display" },
     .{ "?  Esc  q", "close this" },
     .{ "q", "quit" },
@@ -944,8 +1013,10 @@ const Drag = struct {
     /// The row it was pressed on, and whether the pointer has left it.
     row: i16,
     moved: bool = false,
-    /// Where it was in the order, for Escape to put it back.
+    /// Where it was in the order, and whether the order was following the
+    /// server, for Escape to put both back.
     from: usize,
+    auto: bool,
 };
 /// The session whose rows include row `r`: its own name row or the nearest
 /// one above.

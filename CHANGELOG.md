@@ -1,5 +1,10 @@
 # Changelog
 
+## 11/03/2026
+
+- Added `[sort]` beside `[new]`, and the `s` key, to put the sessions back in the order tmux's own next and previous session keys step through, after they have been rearranged.
+- Added a mark after `[sort]`, stepped by a click or `a`, from `Ⓜ`, manual, the list as arranged, to `Ⓐ`, automatic, following the order tmux steps through, new sessions included. Moving a session puts it back to `Ⓜ`.
+
 ## 10/29/2026
 
 - Fixed tmm changing which session a plain `tmux attach` picks. Its control clients used to take the session used last, which a plain attach then passed over, and the attach marked that session as used, so after tmm exited a plain attach went there. They now attach to the least recently used session no terminal is on, and the session that was most recent is marked as used again afterwards.

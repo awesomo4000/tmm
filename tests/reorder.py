@@ -19,6 +19,12 @@ that order to begin with:
   back up.
 - A session created afterwards goes to the bottom, leaving the arranged
   order alone.
+- [sort], and the s key, put the sessions back in the server's order, which
+  is the order tmux's own next and previous session keys step through.
+- The mark after [sort], and the a key, step from M, manual, to A,
+  automatic, which keeps them in that order, a new session going in
+  by name, until a drag or Shift-J/K moves one, which puts it back
+  to M. Escape during a drag puts the A back with the session.
 
 Only disposable tmux sockets and files under /tmp are mutated.
 """
@@ -168,6 +174,72 @@ def main():
             tmux('new-session', '-d', '-s', 'aardvark', '-x', '80', '-y', '24')
             if not until(lambda: listed() == ['gamma', 'alpha', 'beta', 'aardvark']):
                 failures.append('a new session did not go to the bottom: %r' % listed())
+
+            # [sort] puts them back in the server's order, the one tmux's own
+            # next and previous session keys step through.
+            heading = next(r for r, l in enumerate(display.lines()) if '[sort]' in l)
+            column = display.lines()[heading].index('[sort]') + 2
+            mouse(0, heading + 1, b'M', col=column)
+            mouse(0, heading + 1, b'm', col=column)
+            if not until(lambda: listed() == ['aardvark', 'alpha', 'beta', 'gamma']):
+                failures.append('[sort] did not list the sessions as tmux orders them: %r' % listed())
+            if any('Enter save' in l for l in display.lines()):
+                failures.append('[sort] also opened the new session field')
+
+            drag('gamma', 'aardvark')
+            if not until(lambda: listed() == ['gamma', 'aardvark', 'alpha', 'beta']):
+                failures.append('dragging after a sort failed: %r' % listed())
+            os.write(fd, b's')
+            if not until(lambda: listed() == ['aardvark', 'alpha', 'beta', 'gamma']):
+                failures.append('s did not sort the sessions: %r' % listed())
+
+            # The mark after [sort] steps from M, manual, the order as
+            # arranged, to A, automatic, following the server: a new session then goes
+            # in by name, where tmux will step to it, not at the bottom.
+            def heading():
+                return next(r for r, l in enumerate(display.lines()) if '[sort]' in l)
+
+            def automatic():
+                return '[sort] Ⓐ' in display.lines()[heading()]
+
+            def click_box():
+                row = heading()
+                column = display.lines()[row].index('[sort]') + len('[sort] ') + 1
+                mouse(0, row + 1, b'M', col=column)
+                mouse(0, row + 1, b'm', col=column)
+
+            if '[sort] Ⓜ' not in display.lines()[heading()]:
+                failures.append('the mark after [sort] did not start as M: %r'
+                                % display.lines()[heading()])
+            click_box()
+            if not until(automatic):
+                failures.append('clicking M did not make it A')
+            tmux('new-session', '-d', '-s', 'bongo', '-x', '80', '-y', '24')
+            if not until(lambda: listed() == ['aardvark', 'alpha', 'beta', 'bongo', 'gamma']):
+                failures.append('with A on, a new session did not go in by name: %r' % listed())
+
+            # Escape puts the session and the A back.
+            drag('gamma', 'aardvark', escape=True)
+            pump(0.3)
+            if listed() != ['aardvark', 'alpha', 'beta', 'bongo', 'gamma'] or not automatic():
+                failures.append('Escape did not restore the sorted order and the A: %r %r'
+                                % (listed(), automatic()))
+
+            # Moving a session is choosing an order: it goes back to M, and
+            # the list stays where it was put.
+            drag('gamma', 'aardvark')
+            if not until(lambda: listed()[0] == 'gamma' and not automatic()):
+                failures.append('a drag did not go back to M: %r %r' % (listed(), automatic()))
+            tmux('new-session', '-d', '-s', 'apple', '-x', '80', '-y', '24')
+            if not until(lambda: listed() == ['gamma', 'aardvark', 'alpha', 'beta', 'bongo', 'apple']):
+                failures.append('on M, a new session did not go to the bottom: %r' % listed())
+
+            os.write(fd, b'a')
+            if not until(lambda: automatic() and listed() == ['aardvark', 'alpha', 'apple', 'beta', 'bongo', 'gamma']):
+                failures.append('a did not switch to A and sort: %r %r' % (listed(), automatic()))
+            os.write(fd, b'a')
+            if not until(lambda: not automatic()):
+                failures.append('a did not switch back to M')
         finally:
             for sig in (signal.SIGTERM, signal.SIGKILL):
                 try:
@@ -188,7 +260,8 @@ def main():
             print('FAIL: %s' % f, file=sys.stderr)
         raise SystemExit(1)
     print('ok: sessions reorder by drag and by Shift-J/K, Escape cancels, '
-          'and new ones go to the bottom')
+          'new ones go to the bottom, [sort] and s restore the tmux order, '
+          'and auto keeps it until a session is moved')
 
 
 if __name__ == '__main__':
