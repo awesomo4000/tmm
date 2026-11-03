@@ -8,7 +8,7 @@ const backend = @import("backend.zig");
 const reported_opt = @import("reported.zig");
 const palette = @import("palette.zig");
 const Order = @import("order.zig").Order;
-const tmux = @import("libtmux");
+const tmux = @import("tmux.zig");
 pub const Server = struct { name: []const u8, options: tmux.ServerOptions };
 pub const Action = union(enum) { server: usize, display: usize, session: usize, fold: usize, pane: usize, new_session, blink, sort, auto_sort };
 
@@ -283,7 +283,7 @@ test "a session's directory is the one most of its panes share" {
 
 /// Discover sockets only in tmux's conventional per-user directory. Custom
 /// socket paths are explicit CLI entries; never traverse arbitrary directories.
-pub fn discover(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, environ: std.process.Environ, list: *std.ArrayList(Server)) !void {
+pub fn discover(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, list: *std.ArrayList(Server)) !void {
     const directory = try std.fmt.allocPrint(a, "{s}/tmux-{d}", .{ env.get("TMUX_TMPDIR") orelse "/tmp", std.posix.system.getuid() });
     var dir = std.Io.Dir.openDirAbsolute(io, directory, .{ .iterate = true }) catch return;
     defer dir.close(io);
@@ -291,8 +291,7 @@ pub fn discover(a: std.mem.Allocator, io: std.Io, env: *const std.process.Enviro
     while (try iterator.next(io)) |entry| {
         if (entry.kind != .unix_domain_socket or std.mem.eql(u8, entry.name, "default")) continue;
         const path = try std.fs.path.join(a, &.{ directory, entry.name });
-        var connection = backend.Connection.init(a, io, environ, .{ .socket_path = path }) catch continue;
-        defer connection.deinit();
+        var connection = backend.Connection.init(a, io, .{ .socket_path = path });
         var result = connection.server.exec(&.{"list-sessions"}) catch continue;
         defer result.deinit();
         if (!result.success()) continue;

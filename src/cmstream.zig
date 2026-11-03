@@ -21,17 +21,14 @@
 
 const std = @import("std");
 const control = @import("control.zig");
+const tmux = @import("tmux.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Options = struct {
-    /// Socket path (`-S`). Mutually exclusive with `label`.
-    socket: ?[]const u8 = null,
-    /// Socket name (`-L`). Mutually exclusive with `socket`.
-    label: ?[]const u8 = null,
-    /// Session to attach to; null attaches to the most recent.
+    /// The server, and the tmux binary.
+    server: tmux.ServerOptions = .{},
+    /// Session to attach to; null lets tmux choose.
     session: ?[]const u8 = null,
-    /// tmux binary, overridable for tests.
-    tmux_bin: []const u8 = "tmux",
     /// Line buffer. Must exceed the longest expected line; %output blocks are
     /// bounded by tmux's own write size, but a wide pane redraw can be large.
     buffer_bytes: usize = 256 * 1024,
@@ -65,22 +62,9 @@ pub const Stream = struct {
     /// Spawn the control-mode client. Heap-allocated because `reader` holds a
     /// self-referential interface; returning it by value would move it.
     pub fn open(alloc: Allocator, io: std.Io, opts: Options) !*Stream {
-        var argv: std.ArrayList([]const u8) = .empty;
-        defer argv.deinit(alloc);
-        try argv.append(alloc, opts.tmux_bin);
-        if (opts.socket) |s| {
-            try argv.append(alloc, "-S");
-            try argv.append(alloc, s);
-        } else if (opts.label) |l| {
-            try argv.append(alloc, "-L");
-            try argv.append(alloc, l);
-        }
-        try argv.append(alloc, "-C");
-        try argv.append(alloc, "attach");
-        if (opts.session) |s| {
-            try argv.append(alloc, "-t");
-            try argv.append(alloc, s);
-        }
+        const attach: []const []const u8 = if (opts.session) |s| &.{ "-C", "attach", "-t", s } else &.{ "-C", "attach" };
+        const argv = try tmux.argv(alloc, opts.server, attach);
+        defer alloc.free(argv);
 
         const buffer = try alloc.alloc(u8, opts.buffer_bytes);
         errdefer alloc.free(buffer);
@@ -91,7 +75,7 @@ pub const Stream = struct {
         errdefer alloc.destroy(self);
 
         var child = try std.process.spawn(io, .{
-            .argv = argv.items,
+            .argv = argv,
             .stdin = .pipe,
             .stdout = .pipe,
             .stderr = .ignore,

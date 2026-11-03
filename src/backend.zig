@@ -3,7 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 const std = @import("std");
-const tmux = @import("libtmux");
+const tmux = @import("tmux.zig");
 const m = @import("model.zig");
 const status = @import("status.zig");
 const cmstream = @import("cmstream.zig");
@@ -198,11 +198,8 @@ pub const Connection = struct {
     /// Set when the query stream turned out to be dead, so the collector
     /// can drop it and open a new one.
     queries_lost: bool = false,
-    pub fn init(a: Allocator, io: std.Io, environ: std.process.Environ, opts: tmux.ServerOptions) !Connection {
-        return .{ .server = try tmux.Server.init(a, io, environ, opts) };
-    }
-    pub fn deinit(self: *Connection) void {
-        self.server.deinit();
+    pub fn init(a: Allocator, io: std.Io, opts: tmux.ServerOptions) Connection {
+        return .{ .server = tmux.Server.init(a, io, opts) };
     }
 };
 /// Read-only query. Prefers the control client; falls back to a subprocess if
@@ -465,20 +462,11 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
 
         const s = alloc.create(Snapshot) catch return;
         s.* = .{ .arena = .init(alloc) };
-        var server = Connection.init(s.arena.allocator(), io, environ, opts) catch |err| {
-            // No connection yet, so there is no diagnostic to prefer.
-            s.failure = lostServer(err) orelse @errorName(err);
-            loop.postEvent(.{ .snapshot = s }) catch {
-                s.destroy(alloc);
-                return;
-            };
-            // Try again rather than give up: the server may simply not be
-            // running yet, and starting it later should bring the list up.
-            // While there is no server the control worker cannot attach, and
-            // posts the wake on its 500 ms cadence instead.
-            shared.wake.wait(io) catch return;
-            continue;
-        };
+        // Cannot fail: a missing tmux, or no server running, is found by the
+        // first query and reported like any other failed collect, and the
+        // next wake tries again. While there is no server the control worker
+        // cannot attach, and posts the wake on its 500 ms cadence instead.
+        var server = Connection.init(s.arena.allocator(), io, opts);
         // Reopened after one died, which is also how a server started after
         // tmm gets its fast path back.
         if (query_stream == null) query_stream = openQueries(alloc, io, opts);
@@ -526,7 +514,6 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
             qs.close();
             query_stream = null;
         };
-        server.deinit();
         if (target) |*t| if (t.session) |session| {
             alloc.free(session);
             t.session = null;
@@ -570,11 +557,7 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
 /// The long-lived control client read-only queries go through. Null when it
 /// cannot be started; queries then run as subprocesses.
 fn openQueries(alloc: Allocator, io: std.Io, opts: tmux.ServerOptions) ?*cmstream.Stream {
-    const stream = attach.open(alloc, io, .{
-        .socket = opts.socket_path,
-        .label = opts.socket_name,
-        .tmux_bin = opts.tmux_bin orelse "tmux",
-    }) catch return null;
+    const stream = attach.open(alloc, io, .{ .server = opts }) catch return null;
     stream.discard_notifications = true;
     return stream;
 }
@@ -780,11 +763,7 @@ pub fn heartbeatWorker(io: std.Io, shared: *Shared) void {
 /// the collector parks on a cancellable semaphore wait, not on this loop.
 pub fn controlWorker(io: std.Io, alloc: Allocator, opts: tmux.ServerOptions, shared: *Shared) void {
     while (!shared.stopping.load(.acquire)) {
-        const stream = attach.open(alloc, io, .{
-            .socket = opts.socket_path,
-            .label = opts.socket_name,
-            .tmux_bin = opts.tmux_bin orelse "tmux",
-        }) catch {
+        const stream = attach.open(alloc, io, .{ .server = opts }) catch {
             // No control stream: fall back to the historical fixed cadence so
             // the UI keeps refreshing rather than freezing.
             shared.wake.post(io);

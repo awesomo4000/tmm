@@ -8,7 +8,7 @@ A skinny libvaxis sidebar for ordinary tmux sessions. Run it beside your workspa
 
 ## Build and run
 
-Requires Zig 0.16.0 and tmux. Zig fetches [libtmux](https://github.com/awesomo4000/libtmux) and libvaxis from public repositories, with revisions and content hashes pinned in `build.zig.zon`. Tested with tmux 3.7c and libtmux revision `c63d5aa24d95c8bf757f8ad0b79f81da98275dbf`. No sibling checkout or JavaScript runtime is needed.
+Requires Zig 0.16.0 and tmux. Zig fetches libvaxis, the one dependency, from its public repository, with the revision and content hash pinned in `build.zig.zon`; tmux itself is run as a program, `tmux` on `PATH`. Tested with tmux 3.8. No sibling checkout or JavaScript runtime is needed.
 
 The integration suite also passes on Ubuntu 24.04 under WSL with tmux 3.4. Linux x86-64 and ARM64 builds do not require libc. On older tmux versions without centered messages, display identification appears in the status line for five seconds. See [portability-report.md](portability-report.md) for build results and the remaining native Windows blockers.
 
@@ -107,7 +107,7 @@ The suite cleans up before it starts. The suites create sockets and directories 
 
 All requests stay within the selected server. Display identity includes tty/name, PID, and creation timestamp. Disconnects require explicit selection again. Failed refreshes retain the previous snapshot and display the tmux diagnostic.
 
-Reads span several commands, and client revalidation is separate from mutations, so topology can change between them. libtmux does not yet expose command deadlines. Persistent display registration, focus hooks, durable completion storage, broader agent support, and event-driven refreshes remain follow-up work. No hooks or layout changes are installed.
+Reads span several commands, and client revalidation is separate from mutations, so topology can change between them. A tmux command has no deadline: one that hangs holds up the collector until it returns. Persistent display registration, focus hooks, durable completion storage, broader agent support, and event-driven refreshes remain follow-up work. No hooks or layout changes are installed.
 
 ## The compositor, and where it went
 

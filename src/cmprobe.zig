@@ -64,8 +64,7 @@ pub fn main(init: std.process.Init) !void {
     const w = &out.interface;
 
     const stream = try cmstream.Stream.open(gpa, io, .{
-        .socket = socket,
-        .label = label,
+        .server = .{ .socket_path = socket, .socket_name = label },
         .session = session,
     });
     defer stream.close();

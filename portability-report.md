@@ -135,6 +135,6 @@ Retried the native x86-64 Windows build with `-freference-trace=10`. It still fa
 
 - `src/sidebar.zig`: Unix UID-based socket discovery has no Windows implementation.
 - `src/main.zig`: the argument iterator requires the allocating cross-platform API on Windows.
-- libtmux `src/which.zig:12`: calls `Environ.getPosix("PATH")`, causing the environment compiler error. Its PATH parsing also assumes Unix separators and executable names.
+- libtmux `src/which.zig:12`: calls `Environ.getPosix("PATH")`, causing the environment compiler error. Its PATH parsing also assumes Unix separators and executable names. (Since removed: tmm no longer depends on libtmux, and leaves finding `tmux` to process spawning.)
 
 Thus tmm itself has not run against MSYS2 tmux on Windows. Linux-under-WSL testing and the earlier MSYS2 tmux test are separate results. A native Windows build needs these application/dependency changes before runtime testing is possible.

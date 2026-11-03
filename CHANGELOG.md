@@ -2,6 +2,7 @@
 
 ## 11/03/2026
 
+- Dropped the libtmux dependency. tmm used three things from it -- the server options, a PATH search for tmux, and running one tmux command -- which are now `src/tmux.zig`, with the PATH search left to process spawning. The control-mode client and the attach picker build their command lines there too, instead of each spelling the socket flags. A missing tmux still reads `TmuxNotFound`. One of the native Windows build blockers went with it.
 - Made Codex report its own status through its hooks, sharing the Claude Code mapping, which is now `contrib/agent-status/agent-status-hook.py`, named for both. Escape mid-turn, which Codex sends as `Interrupt` with no `Stop`, reports idle. `install.sh codex` installs it. The hooks' payloads, terminal and environment were measured from Codex itself.
 - Added `[sort]` beside `[new]`, and the `s` key, to put the sessions back in the order tmux's own next and previous session keys step through, after they have been rearranged.
 - Added a mark after `[sort]`, stepped by a click or `a`, from `Ⓜ`, manual, the list as arranged, to `Ⓐ`, automatic, following the order tmux steps through, new sessions included. Moving a session puts it back to `Ⓜ`.

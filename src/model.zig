@@ -284,6 +284,7 @@ test {
     _ = @import("status.zig");
     _ = @import("control.zig");
     _ = @import("quiet.zig");
+    _ = @import("tmux.zig");
     _ = @import("reconcile.zig");
     _ = @import("state.zig");
     _ = @import("aurora.zig");

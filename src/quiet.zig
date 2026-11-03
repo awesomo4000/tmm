@@ -21,6 +21,7 @@
 
 const std = @import("std");
 const cmstream = @import("cmstream.zig");
+const tmux = @import("tmux.zig");
 const Allocator = std.mem.Allocator;
 
 /// The session line format `choose` reads: activity, then id.
@@ -137,24 +138,13 @@ pub fn open(alloc: Allocator, io: std.Io, opts: cmstream.Options) !*cmstream.Str
 
 /// A one-shot tmux command's output, or null if it failed.
 fn run(alloc: Allocator, io: std.Io, opts: cmstream.Options, args: []const []const u8) ?[]u8 {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(alloc);
-    argv.append(alloc, opts.tmux_bin) catch return null;
-    if (opts.socket) |s| {
-        argv.appendSlice(alloc, &.{ "-S", s }) catch return null;
-    } else if (opts.label) |l| {
-        argv.appendSlice(alloc, &.{ "-L", l }) catch return null;
-    }
-    argv.appendSlice(alloc, args) catch return null;
-    const result = std.process.run(alloc, io, .{
-        .argv = argv.items,
-        .stdout_limit = .limited(1024 * 1024),
-    }) catch return null;
-    alloc.free(result.stderr);
-    if (result.term != .exited or result.term.exited != 0) {
-        alloc.free(result.stdout);
+    var server = tmux.Server.init(alloc, io, opts.server);
+    var result = server.exec(args) catch return null;
+    if (!result.success()) {
+        result.deinit();
         return null;
     }
+    alloc.free(result.stderr);
     return result.stdout;
 }
 

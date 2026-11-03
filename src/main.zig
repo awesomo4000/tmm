@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const vaxis = @import("vaxis");
-const tmux = @import("libtmux");
+const tmux = @import("tmux.zig");
 const m = @import("model.zig");
 const sidebar = @import("sidebar.zig");
 const backend = @import("backend.zig");
@@ -139,8 +139,7 @@ pub fn main(init: std.process.Init) !void {
     if (dump) {
         var snapshot: backend.Snapshot = .{ .arena = .init(a) };
         defer snapshot.arena.deinit();
-        var server = try backend.Connection.init(snapshot.arena.allocator(), io, init.minimal.environ, opts);
-        defer server.deinit();
+        var server = backend.Connection.init(snapshot.arena.allocator(), io, opts);
         try backend.collect(&server, &snapshot, null);
         var buf: [4096]u8 = undefined;
         var out = std.Io.File.stdout().writer(io, &buf);
@@ -151,7 +150,7 @@ pub fn main(init: std.process.Init) !void {
     }
     try servers.insert(ca, 0, .{ .name = opts.socket_name orelse if (opts.socket_path) |path| std.fs.path.basename(path) else "default", .options = opts });
     if (opts.socket_name == null and opts.socket_path == null)
-        try sidebar.discover(ca, io, init.environ_map, init.minimal.environ, &servers);
+        try sidebar.discover(ca, io, init.environ_map, &servers);
     var tty_buf: [4096]u8 = undefined;
     var tty = try vaxis.Tty.init(io, &tty_buf);
     defer tty.deinit();
