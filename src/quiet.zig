@@ -18,6 +18,14 @@
 //! used again, newer than tmm's attach, and leaves the terminal where it was,
 //! including its previous session for `switch-client -l`. Listing sessions
 //! and clients does not mark anything, so deciding costs nothing.
+//!
+//! tmux ranks sessions by activity to the microsecond, but formats show it
+//! only to the second, and sessions used within the same second are the
+//! usual case at startup: tmm and the attach it must not disturb are started
+//! together. So the sessions are asked for in tmux's own order, newest first
+//! (`list-sessions -O activity`, tmux 3.7 and later), and a tie in the
+//! seconds is broken by that order. Before 3.7 the list is in name order and
+//! a tie is broken by name, which is a guess.
 
 const std = @import("std");
 const cmstream = @import("cmstream.zig");
@@ -26,6 +34,10 @@ const Allocator = std.mem.Allocator;
 
 /// The session line format `choose` reads: activity, then id.
 pub const sessions_format = "#{session_activity} #{session_id}";
+/// The listing `choose` wants: sessions newest first, by tmux's own clock.
+const sessions_newest_first = [_][]const u8{ "list-sessions", "-O", "activity", "-F", sessions_format };
+/// The same, for a tmux older than 3.7, which has no `-O`.
+const sessions_unordered = [_][]const u8{ "list-sessions", "-F", sessions_format };
 /// The client line format `choose` reads: control mode, session id, name.
 pub const clients_format = "#{client_control_mode} #{session_id} #{client_name}";
 
@@ -38,7 +50,9 @@ pub const Choice = struct {
 };
 
 /// Decide from `list-sessions` and `list-clients` output in the formats
-/// above. Slices borrow from `sessions`. Null when there are no sessions.
+/// above, the sessions newest first where tmux can say. Within one second of
+/// activity an earlier line is the newer session. Slices borrow from
+/// `sessions`. Null when there are no sessions.
 ///
 /// A session only control clients are on comes first, so tmm's second client
 /// joins its first instead of taking another: the first one's attach has
@@ -52,9 +66,10 @@ pub fn choose(sessions: []const u8, clients: []const u8) ?Choice {
     var lines = std.mem.tokenizeScalar(u8, sessions, '\n');
     while (lines.next()) |line| {
         const s = Session.parse(line) orelse continue;
-        if (oldest == null or s.activity < oldest.?.activity) oldest = s;
+        // `<=`: on a tie the later line is the older session.
+        if (oldest == null or s.activity <= oldest.?.activity) oldest = s;
         const terminal = held(clients, s.id, false);
-        if (!terminal and (oldest_free == null or s.activity < oldest_free.?.activity)) oldest_free = s;
+        if (!terminal and (oldest_free == null or s.activity <= oldest_free.?.activity)) oldest_free = s;
         if (!terminal and held_by_control == null and held(clients, s.id, true)) held_by_control = s;
     }
     const pick = held_by_control orelse oldest_free orelse oldest orelse return null;
@@ -63,6 +78,7 @@ pub fn choose(sessions: []const u8, clients: []const u8) ?Choice {
     while (lines.next()) |line| {
         const s = Session.parse(line) orelse continue;
         if (std.mem.eql(u8, s.id, attach)) continue;
+        // `>`: on a tie the earlier line is the newer session.
         if (newest == null or s.activity > newest.?.activity) newest = s;
     }
     return .{ .attach = attach, .restore = if (newest) |n| n.id else null };
@@ -117,7 +133,8 @@ fn held(clients: []const u8, session: []const u8, control: bool) bool {
 /// Open a control client attached as described above. When the server
 /// cannot be asked, attaches wherever tmux puts it, as before.
 pub fn open(alloc: Allocator, io: std.Io, opts: cmstream.Options) !*cmstream.Stream {
-    const sessions = run(alloc, io, opts, &.{ "list-sessions", "-F", sessions_format });
+    const sessions = run(alloc, io, opts, &sessions_newest_first) orelse
+        run(alloc, io, opts, &sessions_unordered);
     defer if (sessions) |s| alloc.free(s);
     const clients = run(alloc, io, opts, &.{ "list-clients", "-F", clients_format });
     defer if (clients) |c| alloc.free(c);
@@ -178,6 +195,19 @@ test "one session: attach to it, nothing to restore" {
     try std.testing.expectEqualStrings("$0", c.attach);
     try std.testing.expect(c.restore == null);
     try std.testing.expect(choose("", "") == null);
+}
+
+test "within one second, the order of the lines decides" {
+    // All used in the same second; tmux listed them newest first, so $2 is
+    // the one a plain attach wants and $0 the one nobody has touched longest.
+    const sessions = "500 $2\n500 $1\n500 $0\n";
+    const c = choose(sessions, "0 $2 /dev/ttys001\n").?;
+    try std.testing.expectEqualStrings("$0", c.attach);
+    try std.testing.expectEqualStrings("$2", c.restore.?);
+    // The terminal on the oldest instead: attach to the oldest free one.
+    const d = choose(sessions, "0 $0 /dev/ttys001\n").?;
+    try std.testing.expectEqualStrings("$1", d.attach);
+    try std.testing.expectEqualStrings("$2", d.restore.?);
 }
 
 test "terminalOn skips control clients" {

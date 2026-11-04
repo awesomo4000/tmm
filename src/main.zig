@@ -46,7 +46,7 @@ const Editor = struct {
     fn init(a: std.mem.Allocator, session: m.Session) !Editor {
         const id = try a.dupe(u8, session.id);
         errdefer a.free(id);
-        const key = try std.fmt.allocPrint(a, "session:{s}", .{session.id});
+        const key = try a.print("session:{s}", .{session.id});
         errdefer a.free(key);
         var input = vaxis.widgets.TextInput.init(a);
         errdefer input.deinit();
@@ -94,7 +94,7 @@ pub fn main(init: std.process.Init) !void {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             var buf: [2048]u8 = undefined;
-            var out = std.Io.File.stdout().writer(io, &buf);
+            var out = std.Io.File.stdout().writerStreaming(io, &buf);
             try out.interface.writeAll(help);
             try out.interface.flush();
             return;
@@ -120,7 +120,7 @@ pub fn main(init: std.process.Init) !void {
             // that went away get a pointer to where they went, since habit
             // will keep typing them for a while.
             var buf: [512]u8 = undefined;
-            var out = std.Io.File.stderr().writer(io, &buf);
+            var out = std.Io.File.stderr().writerStreaming(io, &buf);
             const removed = for ([_][]const u8{ "--panes", "--shell", "--split", "--session", "--focus-key" }) |flag| {
                 if (std.mem.eql(u8, arg, flag)) break true;
             } else false;
@@ -142,7 +142,7 @@ pub fn main(init: std.process.Init) !void {
         var server = backend.Connection.init(snapshot.arena.allocator(), io, opts);
         try backend.collect(&server, &snapshot, null);
         var buf: [4096]u8 = undefined;
-        var out = std.Io.File.stdout().writer(io, &buf);
+        var out = std.Io.File.stdout().writerStreaming(io, &buf);
         try std.json.Stringify.value(.{ .clients = snapshot.clients, .sessions = snapshot.sessions, .panes = snapshot.panes }, .{ .whitespace = .indent_2 }, &out.interface);
         try out.interface.writeAll("\n");
         try out.interface.flush();
@@ -912,7 +912,7 @@ fn tail(win: vaxis.Window, a: std.mem.Allocator, text: []const u8, width: u16) [
         start += std.unicode.utf8ByteSequenceLength(text[start]) catch 1;
         if (win.gwidth(text[start..]) + 1 <= width) break;
     }
-    return std.fmt.allocPrint(a, "…{s}", .{text[start..]}) catch text[start..];
+    return a.print("…{s}", .{text[start..]}) catch text[start..];
 }
 
 /// Colour cells `from` to `to` of `row` one flat colour.

@@ -8,7 +8,7 @@ const std = @import("std");
 pub const State = enum { unknown, working, blocked, idle, done };
 pub const Verdict = struct { state: State, rule: []const u8, interrupted: bool = false };
 fn has(text: []const u8, needle: []const u8) bool {
-    return std.ascii.indexOfIgnoreCase(text, needle) != null;
+    return std.ascii.findIgnoreCase(text, needle) != null;
 }
 fn starts(text: []const u8, needle: []const u8) bool {
     return std.mem.startsWith(u8, text, needle);

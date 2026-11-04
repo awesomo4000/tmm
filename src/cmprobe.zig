@@ -52,7 +52,7 @@ pub fn main(init: std.process.Init) !void {
             max_events = try std.fmt.parseInt(usize, v, 10);
         } else {
             var buf: [256]u8 = undefined;
-            var err = std.Io.File.stderr().writer(io, &buf);
+            var err = std.Io.File.stderr().writerStreaming(io, &buf);
             try err.interface.writeAll(usage);
             try err.interface.flush();
             return error.BadUsage;
@@ -60,7 +60,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var out_buf: [4096]u8 = undefined;
-    var out = std.Io.File.stdout().writer(io, &out_buf);
+    var out = std.Io.File.stdout().writerStreaming(io, &out_buf);
     const w = &out.interface;
 
     const stream = try cmstream.Stream.open(gpa, io, .{

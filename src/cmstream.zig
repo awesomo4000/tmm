@@ -9,7 +9,7 @@
 //! Lifetime: events borrow from an internal line buffer and are valid until the
 //! next `next()` call, exactly like `control.Parser.feed`. Copy what you keep.
 //!
-//! Three Zig 0.16 traps are handled here so callers do not meet them again:
+//! Three Zig traps, still there in 0.17, are handled here so callers do not meet them again:
 //!   - `takeDelimiterInclusive`, not `Exclusive`: the Exclusive variant tosses
 //!     only the returned length and leaves the delimiter buffered, so the next
 //!     call returns a zero-length slice and tosses nothing. With an empty-line

@@ -131,12 +131,11 @@ pub fn diff(alloc: std.mem.Allocator, incremental: View, queried: View) ![]Misma
 /// Human-readable one-liner, for a log line or a test failure.
 pub fn describe(alloc: std.mem.Allocator, mismatch: Mismatch) ![]u8 {
     return switch (mismatch.kind) {
-        .session_differs, .pane_differs => std.fmt.allocPrint(
-            alloc,
+        .session_differs, .pane_differs => alloc.print(
             "{s} {s}: {s} queried={s} incremental={s}",
             .{ @tagName(mismatch.kind), mismatch.id, mismatch.field, mismatch.expected, mismatch.actual },
         ),
-        else => std.fmt.allocPrint(alloc, "{s} {s}", .{ @tagName(mismatch.kind), mismatch.id }),
+        else => alloc.print("{s} {s}", .{ @tagName(mismatch.kind), mismatch.id }),
     };
 }
 

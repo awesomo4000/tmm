@@ -1,5 +1,10 @@
 # Changelog
 
+## 11/04/2026
+
+- Moved to Zig 0.17.0 and the libvaxis release for it. `tmm --help` and `--dump` no longer overwrite a file they are appended to (`tmm --dump >> log`): standard output was written at offset 0.
+- Fixed tmm still changing which session a plain `tmux attach` picks when sessions were used within the same second, which is the usual case when tmm and the attach start together. It compared activity to the second, picked the wrong session to mark as used again, and left its own attach the newest. It now asks tmux for sessions in its own order, to the microsecond, with tmux 3.7 or later.
+
 ## 11/03/2026
 
 - Dropped the libtmux dependency. tmm used three things from it -- the server options, a PATH search for tmux, and running one tmux command -- which are now `src/tmux.zig`, with the PATH search left to process spawning. The control-mode client and the attach picker build their command lines there too, instead of each spelling the socket flags. A missing tmux still reads `TmuxNotFound`. One of the native Windows build blockers went with it.

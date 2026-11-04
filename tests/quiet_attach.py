@@ -20,6 +20,13 @@ a plain attach must land on b:
   anything typed in between, which is when tmm's own attach would otherwise
   have been the most recent thing to happen to a session.
 
+With a terminal already on, tmm must mark the terminal's session as used
+again after attaching, by tmux's own clock rather than the second-resolution
+`session_activity`: the sessions here are all used within the same second,
+which is where comparing seconds picked the wrong session to mark. The test
+waits for that before going on, because stopping the terminal while tmm is
+still marking would race it rather than test it.
+
 The terminal tmm marks as used again must keep its previous session, so
 `switch-client -l` still goes where it did.
 
@@ -111,12 +118,25 @@ def main():
                 time.sleep(0.05)
             return False
 
+        def newest():
+            """The session tmux counts as used most recently, by its own clock:
+            session_activity is only to the second."""
+            listed = tmux('list-sessions', '-O', 'activity', '-F', '#{session_name}').split()
+            return listed[0] if listed else None
+
         def start_tmm():
+            terminal_on = clients(False)
             child = spawn([str(BINARY), '-S', socket])
             done = threading.Event()
             threading.Thread(target=answer, args=(child[1], done), daemon=True).start()
             if not until(lambda: len(clients(True)) == 2):
                 failures.append('tmm never attached both its control clients')
+            # Both clients attached is not the end of it: with a terminal on,
+            # tmm then marks the terminal's session as used again. Stopping
+            # the terminal before that lands would lose the race, not test it.
+            if terminal_on and not until(lambda: newest() in terminal_on):
+                failures.append('tmm never marked %r as used again, %r is newest'
+                                % (terminal_on, newest()))
             return child + (done,)
 
         def attach():
@@ -162,7 +182,11 @@ def main():
                         tmux('switch-client', '-c', name, '-t', 'b')
                         stop(sidebar)
                         sidebar = start_tmm()
-                        last = tmux('display-message', '-c', name, '-p', '#{client_last_session}').strip()
+                        # From list-clients: `display-message -c` can fall back to
+                        # another client and read back an empty last session.
+                        last = dict(l.split(' ', 1) for l in tmux(
+                            'list-clients', '-F', '#{client_name} #{client_last_session}').splitlines()
+                            if ' ' in l).get(name)
                         if last != 'c':
                             failures.append('marking the terminal as used again changed '
                                             'its previous session to %r' % last)

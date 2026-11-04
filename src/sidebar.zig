@@ -89,8 +89,8 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
     // Servers and displays are indented like panes, with an arrow beside
     // the selected one.
     for (servers, 0..) |server, i| try list.append(a, .{
-        .text = try std.fmt.allocPrint(a, "{s} {s}", .{ if (i == current) entry_mark else " ", server.name }),
-        .key = try std.fmt.allocPrint(a, "server:{d}", .{i}),
+        .text = try a.print("{s} {s}", .{ if (i == current) entry_mark else " ", server.name }),
+        .key = try a.print("server:{d}", .{i}),
         .action = .{ .server = i },
         .active = i == current,
     });
@@ -109,18 +109,18 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
                 for (s.clients) |other| if (other.terminal) |owner| {
                     if (std.mem.eql(u8, owner, terminal)) count += 1;
                 };
-                if (count > 1) display_name = try std.fmt.allocPrint(a, "{s} ({s})", .{ terminal, std.fs.path.basename(client.name) });
+                if (count > 1) display_name = try a.print("{s} ({s})", .{ terminal, std.fs.path.basename(client.name) });
             }
 
             try list.append(a, .{
                 // The selected display ends in the blink button.
-                .text = try std.fmt.allocPrint(a, "{s} {s} : {s}{s}", .{
+                .text = try a.print("{s} {s} : {s}{s}", .{
                     if (active) entry_mark else " ",
                     if (active and label != null) label.? else display_name,
                     name,
                     if (active) " " ++ blink_mark else "",
                 }),
-                .key = try std.fmt.allocPrint(a, "display:{s}:{s}:{s}", .{ client.name, client.pid, client.created }),
+                .key = try a.print("display:{s}:{s}:{s}", .{ client.name, client.pid, client.created }),
                 .action = .{ .display = i },
                 .active = active,
             });
@@ -142,9 +142,9 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
             try list.append(a, .{
                 // The key that switches to it: 1 to 9, then 0 for the tenth,
                 // and a blank past that so the names stay in line.
-                .text = try std.fmt.allocPrint(a, "{s} {s} {s}", .{ if (fold) "▶" else "▼", if (listed < 10) "1234567890"[listed .. listed + 1] else " ", session.name }),
+                .text = try a.print("{s} {s} {s}", .{ if (fold) "▶" else "▼", if (listed < 10) "1234567890"[listed .. listed + 1] else " ", session.name }),
                 .number = listed < 10,
-                .key = try std.fmt.allocPrint(a, "session:{s}", .{session.id}),
+                .key = try a.print("session:{s}", .{session.id}),
                 .action = .{ .session = i },
                 .active = active,
                 .detail = try tilde(a, home, where),
@@ -174,13 +174,11 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
                 // may be stale, is not added to one.
                 const name = if (pane.agent.len > 0) pane.agent else if (pane.command.len > 0) pane.command else "shell";
                 const text = if (said) |r| blk: {
-                    if (r.progress) |percent| break :blk try std.fmt.allocPrint(
-                        a,
+                    if (r.progress) |percent| break :blk try a.print(
                         "{s}   {s} {s} {d}%",
                         .{ marker, state.symbol, name, percent },
                     );
-                    if (r.kind) |kind| break :blk try std.fmt.allocPrint(
-                        a,
+                    if (r.kind) |kind| break :blk try a.print(
                         "{s}   {s} {s} ({s})",
                         .{ marker, state.symbol, name, @tagName(kind) },
                     );
@@ -189,17 +187,16 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
                     // This is what a program can say during long work when it
                     // has no fraction to report -- an agent hook knows the
                     // tool that is running but never how many will run.
-                    if (r.title().len > 0) break :blk try std.fmt.allocPrint(
-                        a,
+                    if (r.title().len > 0) break :blk try a.print(
                         "{s}   {s} {s} {s}",
                         .{ marker, state.symbol, name, r.title() },
                     );
-                    break :blk try std.fmt.allocPrint(a, "{s}   {s} {s}", .{ marker, state.symbol, name });
+                    break :blk try a.print("{s}   {s} {s}", .{ marker, state.symbol, name });
                 } else if (is_agent)
-                    try std.fmt.allocPrint(a, "{s} {s}{s} {s}", .{ marker, if (pane.unread and !std.mem.eql(u8, pane.state, "done")) "✓ " else "", state.symbol, pane.agent })
+                    try a.print("{s} {s}{s} {s}", .{ marker, if (pane.unread and !std.mem.eql(u8, pane.state, "done")) "✓ " else "", state.symbol, pane.agent })
                 else
-                    try std.fmt.allocPrint(a, "{s}   {s}", .{ marker, if (pane.command.len > 0) pane.command else "shell" });
-                const pane_key = try std.fmt.allocPrint(a, "pane:{s}:{s}", .{ pane.session, pane.id });
+                    try a.print("{s}   {s}", .{ marker, if (pane.command.len > 0) pane.command else "shell" });
+                const pane_key = try a.print("pane:{s}:{s}", .{ pane.session, pane.id });
                 // Only a pane that has wandered off says where it is; the rest
                 // are where the session row says.
                 const path = if (std.mem.eql(u8, pane.cwd, where)) "" else try tilde(a, home, pane.cwd);
@@ -264,7 +261,7 @@ fn sessionDirectory(panes: []const m.Pane, session: []const u8) []const u8 {
 /// A path with the home directory written as `~`.
 fn tilde(a: std.mem.Allocator, home: ?[]const u8, path: []const u8) ![]const u8 {
     if (home) |h| if (h.len > 0 and std.mem.startsWith(u8, path, h) and (path.len == h.len or path[h.len] == '/')) {
-        return std.fmt.allocPrint(a, "~{s}", .{path[h.len..]});
+        return a.print("~{s}", .{path[h.len..]});
     };
     return path;
 }
@@ -284,7 +281,7 @@ test "a session's directory is the one most of its panes share" {
 /// Discover sockets only in tmux's conventional per-user directory. Custom
 /// socket paths are explicit CLI entries; never traverse arbitrary directories.
 pub fn discover(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, list: *std.ArrayList(Server)) !void {
-    const directory = try std.fmt.allocPrint(a, "{s}/tmux-{d}", .{ env.get("TMUX_TMPDIR") orelse "/tmp", std.posix.system.getuid() });
+    const directory = try a.print("{s}/tmux-{d}", .{ env.get("TMUX_TMPDIR") orelse "/tmp", std.posix.system.getuid() });
     var dir = std.Io.Dir.openDirAbsolute(io, directory, .{ .iterate = true }) catch return;
     defer dir.close(io);
     var iterator = dir.iterate();

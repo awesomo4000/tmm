@@ -242,7 +242,7 @@ fn query(connection: *Connection, args: []const []const u8) ![]u8 {
     var result = try connection.server.exec(args);
     if (!result.success()) {
         defer result.deinit();
-        connection.diagnostic = try std.fmt.allocPrint(connection.server.allocator, "{s}: {s}", .{
+        connection.diagnostic = try connection.server.allocator.print("{s}: {s}", .{
             args[0], std.mem.trim(u8, result.stderr, "\r\n"),
         });
         return error.TmuxCommandFailed;
@@ -297,7 +297,7 @@ pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Reque
             }
             if (t.session) |s| _ = try query(server, &.{ "switch-client", "-c", t.client.name, "-t", s });
             if (t.pane) |pane| {
-                const window_target = try std.fmt.allocPrint(a, "{s}:{s}", .{ t.session.?, t.window.? });
+                const window_target = try a.print("{s}:{s}", .{ t.session.?, t.window.? });
                 _ = try query(server, &.{ "select-window", "-t", window_target });
                 _ = try query(server, &.{ "select-pane", "-t", pane });
             }
@@ -307,7 +307,7 @@ pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Reque
             if (t.session != null or t.pane != null) snapshot.clients = try clients(server, a);
             var located = false;
             for (snapshot.clients) |c| if (c.same(t.client)) {
-                snapshot.context = try std.fmt.allocPrint(a, "{s} {s} {s}", .{ c.session, c.window, c.pane });
+                snapshot.context = try a.print("{s} {s} {s}", .{ c.session, c.window, c.pane });
                 snapshot.cwd = c.cwd;
                 snapshot.focused_pane = c.pane;
                 located = true;
@@ -342,7 +342,7 @@ pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Reque
         const root_pid = std.fmt.parseInt(u32, record[8], 10) catch 0;
         const process = m.processAgentInfo(processes, root_pid);
         pane.at_prompt = m.atPrompt(processes, root_pid);
-        pane.run_identity = try std.fmt.allocPrint(a, "{s}:{d}:{s}", .{ record[8], if (process) |info| info.pid else root_pid, record[9] });
+        pane.run_identity = try a.print("{s}:{d}:{s}", .{ record[8], if (process) |info| info.pid else root_pid, record[9] });
         if (pane.agent.len > 0) {
             pane.agent_source = "metadata";
         } else {
@@ -482,7 +482,7 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
                 createSession(&server, r, &s.rename_result.?.success) catch |err| {
                     const why = reason(&server, err);
                     rename_failure = if (s.rename_result.?.success)
-                        std.fmt.allocPrint(s.arena.allocator(), "Session {s} created; display switch failed: {s}", .{ r.name, why }) catch "Session created; display switch failed"
+                        s.arena.allocator().print("Session {s} created; display switch failed: {s}", .{ r.name, why }) catch "Session created; display switch failed"
                     else
                         why;
                 };
@@ -726,7 +726,7 @@ fn lostServer(err: anyerror) ?[]const u8 {
 /// Append one collect's query count, for measuring the effect of changes to
 /// how much each pass asks tmux. Gated on TMM_QUERY_LOG; free when unset.
 fn appendCount(io: std.Io, alloc: Allocator, path: []const u8, count: usize) void {
-    const line = std.fmt.allocPrint(alloc, "{d}\n", .{count}) catch return;
+    const line = alloc.print("{d}\n", .{count}) catch return;
     defer alloc.free(line);
     var file = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false }) catch return;
     defer file.close(io);
@@ -842,7 +842,7 @@ fn createSession(server: *Connection, edit: Rename, created: *bool) !void {
 /// Briefly mark only this client; never change shared session styling or focus.
 fn flashDisplay(server: *Connection, client: m.Client) !void {
     const a = server.server.allocator;
-    const message = try std.fmt.allocPrint(a, ">>> tmm display: {s} <<<", .{client.name});
+    const message = try a.print(">>> tmm display: {s} <<<", .{client.name});
     const current = try clients(server, a);
     var found = false;
     for (current) |c| if (c.same(client)) {
@@ -878,7 +878,7 @@ const Tracker = struct {
         const a = snapshot.arena.allocator();
         for (snapshot.panes) |*pane| {
             if (pane.agent.len == 0) continue;
-            const key = try std.fmt.allocPrint(a, "{s}:{s}:{s}", .{ pane.id, pane.run_identity, pane.agent });
+            const key = try a.print("{s}:{s}:{s}", .{ pane.id, pane.run_identity, pane.agent });
             const entry = try self.tracks.getOrPut(key);
             if (!entry.found_existing) {
                 entry.key_ptr.* = self.a.dupe(u8, key) catch |err| {

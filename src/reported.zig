@@ -320,7 +320,7 @@ test "a report the specification discards is discarded whole" {
     try std.testing.expect(parse("state=working:id=a//b") == null);
     // Limits: a key over 16 bytes, an app over 32.
     try std.testing.expect(parse("state=idle:abcdefghijklmnopq=1") == null);
-    try std.testing.expect(parse("state=idle:app=" ++ "x" ** 33) == null);
+    try std.testing.expect(parse("state=idle:app=" ++ &@as([33]u8, @splat('x'))) == null);
 }
 
 test "a malformed pair is skipped and the rest of the report applies" {

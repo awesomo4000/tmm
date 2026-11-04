@@ -15,12 +15,12 @@ pub fn build(b: *std.Build) void {
     const probe_mod = b.createModule(.{ .root_source_file = b.path("src/cmprobe.zig"), .target = target, .optimize = optimize });
     const probe = b.addExecutable(.{ .name = "cmprobe", .root_module = probe_mod });
     const probe_run = b.addRunArtifact(probe);
-    if (b.args) |args| probe_run.addArgs(args);
+    probe_run.addPassthruArgs();
     b.step("cmprobe", "Run the control-mode probe").dependOn(&probe_run.step);
     b.getInstallStep().dependOn(&b.addInstallArtifact(probe, .{}).step);
 
     const run = b.addRunArtifact(exe);
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     b.step("run", "Run tmm").dependOn(&run.step);
     const test_mod = b.createModule(.{ .root_source_file = b.path("src/model.zig"), .target = target, .optimize = optimize });
     test_mod.addImport("vaxis", b.dependency("vaxis", .{ .target = target, .optimize = optimize }).module("vaxis"));
