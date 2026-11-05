@@ -21,11 +21,17 @@ a plain attach must land on b:
   have been the most recent thing to happen to a session.
 
 With a terminal already on, tmm must mark the terminal's session as used
-again after attaching, by tmux's own clock rather than the second-resolution
-`session_activity`: the sessions here are all used within the same second,
-which is where comparing seconds picked the wrong session to mark. The test
-waits for that before going on, because stopping the terminal while tmm is
-still marking would race it rather than test it.
+again after attaching, by switching the terminal to the session it is on. The
+sessions here are all used within the same second, which is where comparing
+`session_activity`, only to the second, picked the wrong session to mark. The
+test waits for that switch before going on, because stopping the terminal
+while tmm is still marking would race it rather than test it. It counts the
+switch with a `client-session-changed` hook: which session tmux holds newest
+within a second cannot be listed before tmux 3.7.
+
+tmm runs with TMUX_PANE naming a pane of the oldest session, as it would in a
+pane there. Before tmux 3.7 tmm asks tmux which session is newest, and tmux
+answers a question from a pane with that pane's session.
 
 The terminal tmm marks as used again must keep its previous session, so
 `switch-client -l` still goes where it did.
@@ -52,11 +58,12 @@ BINARY = ROOT / 'zig-out/bin/tmm'
 TMUX = shutil.which('tmux') or 'tmux'
 
 
-def spawn(argv):
+def spawn(argv, env=None):
     pid, fd = pty.fork()
     if pid == 0:
         os.environ['TERM'] = 'xterm-256color'
         os.environ.pop('TMUX', None)
+        os.environ.update(env or {})
         os.execvp(argv[0], argv)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 60, 0, 0))
     return pid, fd
@@ -118,15 +125,18 @@ def main():
                 time.sleep(0.05)
             return False
 
-        def newest():
-            """The session tmux counts as used most recently, by its own clock:
-            session_activity is only to the second."""
-            listed = tmux('list-sessions', '-O', 'activity', '-F', '#{session_name}').split()
-            return listed[0] if listed else None
+        def switches():
+            """How many times a terminal has been put on a session, its own
+            session included, as the hook set up below counts them."""
+            return len(tmux('show', '-gv', '@switches').split())
 
         def start_tmm():
             terminal_on = clients(False)
-            child = spawn([str(BINARY), '-S', socket])
+            before = switches()
+            # As if tmm ran in a pane of a, the session used longest ago:
+            # asked from that pane, tmux would name a as the newest.
+            child = spawn([str(BINARY), '-S', socket],
+                          {'TMUX_PANE': tmux('display-message', '-p', '-t', 'a', '#{pane_id}').strip()})
             done = threading.Event()
             threading.Thread(target=answer, args=(child[1], done), daemon=True).start()
             if not until(lambda: len(clients(True)) == 2):
@@ -134,9 +144,8 @@ def main():
             # Both clients attached is not the end of it: with a terminal on,
             # tmm then marks the terminal's session as used again. Stopping
             # the terminal before that lands would lose the race, not test it.
-            if terminal_on and not until(lambda: newest() in terminal_on):
-                failures.append('tmm never marked %r as used again, %r is newest'
-                                % (terminal_on, newest()))
+            if terminal_on and not until(lambda: switches() > before):
+                failures.append('tmm never marked %r as used again' % terminal_on)
             return child + (done,)
 
         def attach():
@@ -149,6 +158,12 @@ def main():
             return on[0] if on else None
 
         tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'a', '-x', '80', '-y', '24')
+        # One word per terminal put on a session; control clients, tmm's,
+        # are left out.
+        tmux('set', '-g', '@switches', '')
+        tmux('set-hook', '-g', 'client-session-changed',
+             'if -F "#{client_control_mode}" "" '
+             '"set -gF @switches \\"#{@switches}#{client_name} \\""')
         for name in ('b', 'c'):
             time.sleep(1.1)
             tmux('new-session', '-d', '-s', name, '-x', '80', '-y', '24')

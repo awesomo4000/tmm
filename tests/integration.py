@@ -258,7 +258,11 @@ def main():
             click(beta_name)
             until(lambda: shows('Enter save'), 'the inline editor')
             os.write(ui_fd, b'alpha\r')  # duplicate name must fail without losing the editor
-            until(lambda: shows('Enter save') and not shows('saving...'), 'the duplicate to be refused')
+            # On the refusal itself: the editor is open and not saving before
+            # the Enter is read, too, and typing then would be dropped while
+            # the save runs.
+            until(lambda: shows('duplicate session') and shows('Enter save') and not shows('saving...'),
+                  'the duplicate to be refused')
             assert {s['name'] for s in snapshot()['sessions']} == {'alpha', 'beta'}
             os.write(ui_fd, b'\x15beta renamed \xc3\xa9\r')
             until(lambda: {s['name'] for s in snapshot()['sessions']} == {'alpha', 'beta renamed é'}, 'the rename')
@@ -337,7 +341,11 @@ def main():
             click(heading, 14)
             until(lambda: shows('Enter save'), 'the new-session field')
             os.write(ui_fd, b'alpha\r')
-            until(lambda: shows('Enter save') and not shows('saving...'), 'the duplicate to be refused')
+            # On the refusal itself: the editor is open and not saving before
+            # the Enter is read, too, and typing then would be dropped while
+            # the save runs.
+            until(lambda: shows('duplicate session') and shows('Enter save') and not shows('saving...'),
+                  'the duplicate to be refused')
             assert len(snapshot()['sessions']) == 2
             os.write(ui_fd, b'\x15zz new session\r')
             until(lambda: any(s['name'] == 'zz new session' for s in snapshot()['sessions']), 'the new session')

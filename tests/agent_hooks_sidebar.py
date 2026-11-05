@@ -47,6 +47,8 @@ ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'zig-out/bin/tmm'
 HOOK = ROOT / 'contrib/agent-status/agent-status-hook.py'
 TMUX = shutil.which('tmux') or 'tmux'
+# exec, so the pane's own process is the shell, as a default one would be.
+SHELL = 'exec bash --norc --noprofile'
 
 
 def run_mode(argv, label):
@@ -65,9 +67,11 @@ def run_mode(argv, label):
         # Two sessions. The second is the one the in-band route could never
         # have reported on, since a control client hears output from the
         # session it is attached to and no other.
+        # A shell that reads no startup files: the test types into it, and a
+        # slow ~/.bashrc under a loaded machine outlasted the wait for it.
         tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'alpha',
-             '-x', '80', '-y', '24')
-        tmux('new-session', '-d', '-s', 'beta', '-x', '80', '-y', '24')
+             '-x', '80', '-y', '24', SHELL)
+        tmux('new-session', '-d', '-s', 'beta', '-x', '80', '-y', '24', SHELL)
 
         pid, fd = pty.fork()
         if pid == 0:

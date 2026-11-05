@@ -168,7 +168,7 @@ pub fn main(init: std.process.Init) !void {
     try vx.queryColor(tty.writer(), .bg);
     var shared: backend.Shared = .{};
     var task = try io.concurrent(runWorker, .{ io, a, init.minimal.environ, opts, &shared, &loop });
-    var control_task = try io.concurrent(backend.controlWorker, .{ io, a, opts, &shared });
+    var control_task = try io.concurrent(backend.controlWorker, .{ io, a, init.minimal.environ, opts, &shared });
     var heartbeat_task = try io.concurrent(backend.heartbeatWorker, .{ io, &shared });
     defer {
         vx.setMouseMode(tty.writer(), false) catch {};
@@ -535,7 +535,7 @@ pub fn main(init: std.process.Init) !void {
                 opts = servers.items[i].options;
                 shared.stopping.store(false, .release);
                 task = try io.concurrent(runWorker, .{ io, a, init.minimal.environ, opts, &shared, &loop });
-                control_task = try io.concurrent(backend.controlWorker, .{ io, a, opts, &shared });
+                control_task = try io.concurrent(backend.controlWorker, .{ io, a, init.minimal.environ, opts, &shared });
                 heartbeat_task = try io.concurrent(backend.heartbeatWorker, .{ io, &shared });
             },
             .display => |i| if (snapshot) |s| {

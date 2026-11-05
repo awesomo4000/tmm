@@ -59,6 +59,8 @@ pub const Server = struct {
     allocator: Allocator,
     io: std.Io,
     options: ServerOptions,
+    /// The environment tmux runs with; null inherits tmm's own.
+    environ_map: ?*const std.process.Environ.Map = null,
 
     pub fn init(allocator: Allocator, io: std.Io, options: ServerOptions) Server {
         return .{ .allocator = allocator, .io = io, .options = options };
@@ -72,6 +74,7 @@ pub const Server = struct {
         defer self.allocator.free(full);
         const run = std.process.run(self.allocator, self.io, .{
             .argv = full,
+            .environ_map = self.environ_map,
             .stdout_limit = .limited(output_limit),
             .stderr_limit = .limited(output_limit),
         }) catch |err| return switch (err) {

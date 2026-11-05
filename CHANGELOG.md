@@ -1,5 +1,10 @@
 # Changelog
 
+## 11/05/2026
+
+- Fixed tmm changing which session a plain `tmux attach` picks with tmux older than 3.7, such as the 3.4 in Ubuntu 24.04 and Linux Mint 22. Those list sessions by name, not in tmux order, so a tie within one second was a guess and usually wrong. tmm now also asks tmux which session is newest, with a command that has no target, and puts that one first. tmm leaves TMUX_PANE out of that command, since tmux would otherwise answer with the session of the pane tmm runs in.
+- Ran the test suite on Linux Mint 22.3 with tmux 3.4, and fixed three tests that only passed on a fast shell or a quiet machine. The two that type into a pane start a shell that reads no startup files, since a slow `~/.bashrc` outlasted their wait under load. The attach test counts tmm marking a session as used again with a `client-session-changed` hook, which every tmux version runs, instead of reading the session order only 3.7 has. The integration test waits for a duplicate name to be refused before typing again, rather than for an editor that was also open before the refusal.
+
 ## 11/04/2026
 
 - Moved to Zig 0.17.0 and the libvaxis release for it. `tmm --help` and `--dump` no longer overwrite a file they are appended to (`tmm --dump >> log`): standard output was written at offset 0.

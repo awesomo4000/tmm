@@ -8,9 +8,9 @@ A skinny libvaxis sidebar for ordinary tmux sessions. Run it beside your workspa
 
 ## Build and run
 
-Requires Zig 0.17.0 and tmux. Zig fetches libvaxis, the one dependency, from its public repository, with the revision and content hash pinned in `build.zig.zon`; tmux itself is run as a program, `tmux` on `PATH`. Tested with tmux 3.8; tmux 3.7 or later orders sessions by their exact activity, which keeps tmm out of the way of a plain `tmux attach` when sessions were used within the same second. No sibling checkout or JavaScript runtime is needed.
+Requires Zig 0.17.0 and tmux. Zig fetches libvaxis, the one dependency, from its public repository, with the revision and content hash pinned in `build.zig.zon`; tmux itself is run as a program, `tmux` on `PATH`. Tested with tmux 3.8. No sibling checkout or JavaScript runtime is needed.
 
-The integration suite also passes on Ubuntu 24.04 under WSL with tmux 3.4. Linux x86-64 and ARM64 builds do not require libc. On older tmux versions without centered messages, display identification appears in the status line for five seconds. See [portability-report.md](portability-report.md) for build results and the remaining native Windows blockers.
+The whole test suite (`mise run test`) also passes on Linux Mint 22.3 with tmux 3.4, and the integration suite on Ubuntu 24.04 under WSL with tmux 3.4. Linux x86-64 and ARM64 builds do not require libc. On older tmux versions without centered messages, display identification appears in the status line for five seconds. See [portability-report.md](portability-report.md) for build results and the remaining native Windows blockers.
 
 ```sh
 zig build

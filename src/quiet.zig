@@ -24,8 +24,10 @@
 //! usual case at startup: tmm and the attach it must not disturb are started
 //! together. So the sessions are asked for in tmux's own order, newest first
 //! (`list-sessions -O activity`, tmux 3.7 and later), and a tie in the
-//! seconds is broken by that order. Before 3.7 the list is in name order and
-//! a tie is broken by name, which is a guess.
+//! seconds is broken by that order. Before 3.7 the list is in name order, and
+//! tmux is asked for the one session it holds newest, which is moved to the
+//! front: that is the one a tie must not get wrong. Ties among the rest are
+//! broken by name.
 
 const std = @import("std");
 const cmstream = @import("cmstream.zig");
@@ -38,6 +40,8 @@ pub const sessions_format = "#{session_activity} #{session_id}";
 const sessions_newest_first = [_][]const u8{ "list-sessions", "-O", "activity", "-F", sessions_format };
 /// The same, for a tmux older than 3.7, which has no `-O`.
 const sessions_unordered = [_][]const u8{ "list-sessions", "-F", sessions_format };
+/// With no target and no pane to go by, tmux resolves the newest session.
+const newest_session = [_][]const u8{ "display-message", "-p", "#{session_id}" };
 /// The client line format `choose` reads: control mode, session id, name.
 pub const clients_format = "#{client_control_mode} #{session_id} #{client_name}";
 
@@ -132,11 +136,12 @@ fn held(clients: []const u8, session: []const u8, control: bool) bool {
 
 /// Open a control client attached as described above. When the server
 /// cannot be asked, attaches wherever tmux puts it, as before.
-pub fn open(alloc: Allocator, io: std.Io, opts: cmstream.Options) !*cmstream.Stream {
-    const sessions = run(alloc, io, opts, &sessions_newest_first) orelse
-        run(alloc, io, opts, &sessions_unordered);
+/// `environ` is tmm's own environment.
+pub fn open(alloc: Allocator, io: std.Io, environ: std.process.Environ, opts: cmstream.Options) !*cmstream.Stream {
+    const sessions = run(alloc, io, opts, null, &sessions_newest_first) orelse
+        newestFirst(alloc, io, environ, opts);
     defer if (sessions) |s| alloc.free(s);
-    const clients = run(alloc, io, opts, &.{ "list-clients", "-F", clients_format });
+    const clients = run(alloc, io, opts, null, &.{ "list-clients", "-F", clients_format });
     defer if (clients) |c| alloc.free(c);
     const choice = choose(sessions orelse "", clients orelse "");
 
@@ -146,16 +151,52 @@ pub fn open(alloc: Allocator, io: std.Io, opts: cmstream.Options) !*cmstream.Str
 
     const restore = (choice orelse return stream).restore orelse return stream;
     // Asked again: a terminal that attached while tmm did is on the list now.
-    const now = run(alloc, io, opts, &.{ "list-clients", "-F", clients_format }) orelse return stream;
+    const now = run(alloc, io, opts, null, &.{ "list-clients", "-F", clients_format }) orelse return stream;
     defer alloc.free(now);
     const terminal = terminalOn(now, restore) orelse return stream;
-    if (run(alloc, io, opts, &.{ "switch-client", "-c", terminal, "-t", restore })) |out| alloc.free(out);
+    if (run(alloc, io, opts, null, &.{ "switch-client", "-c", terminal, "-t", restore })) |out| alloc.free(out);
     return stream;
 }
 
-/// A one-shot tmux command's output, or null if it failed.
-fn run(alloc: Allocator, io: std.Io, opts: cmstream.Options, args: []const []const u8) ?[]u8 {
+/// For a tmux older than 3.7: the sessions in name order, with the one tmux
+/// holds newest moved to the front. Null when they cannot be listed.
+fn newestFirst(alloc: Allocator, io: std.Io, environ: std.process.Environ, opts: cmstream.Options) ?[]u8 {
+    const listed = run(alloc, io, opts, null, &sessions_unordered) orelse return null;
+    var env = environ.createMap(alloc) catch return listed;
+    defer env.deinit();
+    // tmm runs in a pane, and tmux takes a command from a pane to mean that
+    // pane's session. It goes by TMUX_PANE, or by standard input being the
+    // pane's terminal, which it is not here: tmux is run with it on /dev/null.
+    _ = env.swapRemove("TMUX_PANE");
+    const newest = run(alloc, io, opts, &env, &newest_session) orelse return listed;
+    defer alloc.free(newest);
+    const moved = putFirst(alloc, listed, std.mem.trim(u8, newest, " \n")) catch return listed;
+    alloc.free(listed);
+    return moved;
+}
+
+/// `sessions` with the line for session `id` moved to the front. Owned.
+fn putFirst(alloc: Allocator, sessions: []const u8, id: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.ensureTotalCapacity(alloc, sessions.len + 1);
+    for ([_]bool{ true, false }) |first| {
+        var lines = std.mem.tokenizeScalar(u8, sessions, '\n');
+        while (lines.next()) |line| {
+            const s = Session.parse(line) orelse continue;
+            if (std.mem.eql(u8, s.id, id) != first) continue;
+            out.appendSliceAssumeCapacity(line);
+            out.appendAssumeCapacity('\n');
+        }
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+/// A one-shot tmux command's output, or null if it failed. `env` replaces
+/// tmm's environment when given.
+fn run(alloc: Allocator, io: std.Io, opts: cmstream.Options, env: ?*const std.process.Environ.Map, args: []const []const u8) ?[]u8 {
     var server = tmux.Server.init(alloc, io, opts.server);
+    server.environ_map = env;
     var result = server.exec(args) catch return null;
     if (!result.success()) {
         result.deinit();
@@ -208,6 +249,16 @@ test "within one second, the order of the lines decides" {
     const d = choose(sessions, "0 $0 /dev/ttys001\n").?;
     try std.testing.expectEqualStrings("$1", d.attach);
     try std.testing.expectEqualStrings("$2", d.restore.?);
+}
+
+test "before tmux 3.7, the newest session goes first and wins the tie" {
+    // Name order, all in one second, and tmux says $1 is the newest.
+    const moved = try putFirst(std.testing.allocator, "500 $0\n500 $1\n500 $2\n", "$1");
+    defer std.testing.allocator.free(moved);
+    try std.testing.expectEqualStrings("500 $1\n500 $0\n500 $2\n", moved);
+    const c = choose(moved, "0 $1 /dev/ttys001\n").?;
+    try std.testing.expectEqualStrings("$2", c.attach);
+    try std.testing.expectEqualStrings("$1", c.restore.?);
 }
 
 test "terminalOn skips control clients" {

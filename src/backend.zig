@@ -404,7 +404,7 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
     // Long-lived control client for read-only queries. Opened once: a client
     // per iteration would cost as much as the fork and exec it replaces. Its
     // own notifications are dropped, because controlWorker handles events.
-    var query_stream = openQueries(alloc, io, opts);
+    var query_stream = openQueries(alloc, io, environ, opts);
     defer if (query_stream) |qs| qs.close();
 
     // Incremental model, maintained across iterations from the event queue and
@@ -469,7 +469,7 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
         var server = Connection.init(s.arena.allocator(), io, opts);
         // Reopened after one died, which is also how a server started after
         // tmm gets its fast path back.
-        if (query_stream == null) query_stream = openQueries(alloc, io, opts);
+        if (query_stream == null) query_stream = openQueries(alloc, io, environ, opts);
         server.queries = query_stream;
         var rename_failure: ?[]const u8 = null;
         if (rename) |r| {
@@ -556,8 +556,8 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
 
 /// The long-lived control client read-only queries go through. Null when it
 /// cannot be started; queries then run as subprocesses.
-fn openQueries(alloc: Allocator, io: std.Io, opts: tmux.ServerOptions) ?*cmstream.Stream {
-    const stream = attach.open(alloc, io, .{ .server = opts }) catch return null;
+fn openQueries(alloc: Allocator, io: std.Io, environ: std.process.Environ, opts: tmux.ServerOptions) ?*cmstream.Stream {
+    const stream = attach.open(alloc, io, environ, .{ .server = opts }) catch return null;
     stream.discard_notifications = true;
     return stream;
 }
@@ -761,9 +761,9 @@ pub fn heartbeatWorker(io: std.Io, shared: *Shared) void {
 /// Reads the control-mode stream and wakes the collector when tmux state
 /// changes. Runs as its own task so a stalled stream cannot delay shutdown:
 /// the collector parks on a cancellable semaphore wait, not on this loop.
-pub fn controlWorker(io: std.Io, alloc: Allocator, opts: tmux.ServerOptions, shared: *Shared) void {
+pub fn controlWorker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: tmux.ServerOptions, shared: *Shared) void {
     while (!shared.stopping.load(.acquire)) {
-        const stream = attach.open(alloc, io, .{ .server = opts }) catch {
+        const stream = attach.open(alloc, io, environ, .{ .server = opts }) catch {
             // No control stream: fall back to the historical fixed cadence so
             // the UI keeps refreshing rather than freezing.
             shared.wake.post(io);

@@ -44,6 +44,8 @@ ROWS, COLS = 40, 120
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'zig-out/bin/tmm'
 TMUX = shutil.which('tmux') or 'tmux'
+# exec, so the pane's own process is the shell, as a default one would be.
+SHELL = 'exec bash --norc --noprofile'
 # Unusual on purpose, so the process this kills can only be the one it started.
 NAP = '31337'
 
@@ -63,8 +65,10 @@ def main():
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 return ''
 
+        # A shell that reads no startup files: the test types into it, and a
+        # slow ~/.bashrc under a loaded machine outlasted the wait for it.
         tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'work',
-             '-x', '80', '-y', '24')
+             '-x', '80', '-y', '24', SHELL)
         pane = tmux('display-message', '-p', '-t', 'work', '#{pane_id}').strip()
         shell_pid = tmux('display-message', '-p', '-t', 'work', '#{pane_pid}').strip()
         assert pane and shell_pid, 'no pane to report from'
