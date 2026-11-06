@@ -1,5 +1,11 @@
 # Changelog
 
+## 11/06/2026
+
+- Ran tmm natively on Windows, against psmux 3.4. tmm tells psmux from tmux by `-V`, and a real tmux, on any system, keeps the usual path. psmux has no `#{n:}`, so its records are split on a unit separator instead. Its pane ids repeat from one session to the next, so tmm asks for them as `$session:@window.%pane`, which psmux also takes as a target. Its servers run one per session and a control client hears only its own, so tmm polls every 500 ms. A display there is known by name and pid, since psmux reports a different creation time on each listing.
+- Worked around two psmux behaviours when switching a display. psmux sends a command to the session named by the caller's `TMUX`, whatever it targets, so a switch from tmm in a pane said it had worked and moved nothing: tmm runs psmux without `TMUX`, and takes its `-L` namespace from it instead. And `switch-client -t $id` fails inside a namespace, so tmm switches by `=name`.
+- Read each pane directory and command every five seconds on psmux, instead of on every pass. psmux asks Windows for them on each listing, and with six sessions that cost its servers an eighth of a core; it is now about a thirtieth. A new pane is read at once.
+
 ## 11/05/2026
 
 - Fixed tmm changing which session a plain `tmux attach` picks with tmux older than 3.7, such as the 3.4 in Ubuntu 24.04 and Linux Mint 22. Those list sessions by name, not in tmux order, so a tie within one second was a guess and usually wrong. tmm now also asks tmux which session is newest, with a command that has no target, and puts that one first. tmm leaves TMUX_PANE out of that command, since tmux would otherwise answer with the session of the pane tmm runs in.

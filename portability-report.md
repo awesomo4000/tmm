@@ -138,3 +138,7 @@ Retried the native x86-64 Windows build with `-freference-trace=10`. It still fa
 - libtmux `src/which.zig:12`: calls `Environ.getPosix("PATH")`, causing the environment compiler error. Its PATH parsing also assumes Unix separators and executable names. (Since removed: tmm no longer depends on libtmux, and leaves finding `tmux` to process spawning.)
 
 Thus tmm itself has not run against MSYS2 tmux on Windows. Linux-under-WSL testing and the earlier MSYS2 tmux test are separate results. A native Windows build needs these application/dependency changes before runtime testing is possible.
+
+## Native Windows, 11/06/2026
+
+The blockers above are fixed: the argument iterator uses the allocating form, and socket discovery, which looks in a per-user directory Windows does not have, is skipped there. `zig build` with Zig 0.17.0 produces `tmm.exe` on Windows, and it runs against psmux 3.4. See the README for what differs on psmux.

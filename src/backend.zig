@@ -201,6 +201,17 @@ pub const Connection = struct {
     pub fn init(a: Allocator, io: std.Io, opts: tmux.ServerOptions) Connection {
         return .{ .server = tmux.Server.init(a, io, opts) };
     }
+
+    /// `fields` as a format this server answers in; see m.Framing.
+    fn format(self: *const Connection, comptime fields: []const []const u8) []const u8 {
+        return switch (m.Framing.of(self.server.options.kind)) {
+            inline else => |framing| m.format(framing, fields),
+        };
+    }
+
+    fn records(self: *const Connection, comptime N: usize, alloc: Allocator, data: []const u8) ![][N][]const u8 {
+        return m.records(N, m.Framing.of(self.server.options.kind), alloc, data);
+    }
 };
 /// Read-only query. Prefers the control client; falls back to a subprocess if
 /// there is none, or if an argument cannot be quoted for the command parser.
@@ -259,21 +270,26 @@ fn query(connection: *Connection, args: []const []const u8) ![]u8 {
 /// does not move when a client navigates. `list-clients -F` expands per client
 /// and does follow navigation.
 pub fn clients(server: *Connection, alloc: Allocator) ![]m.Client {
-    const data = try queryRead(server, &.{ "list-clients", "-F", m.format(&.{ "client_name", "client_pid", "client_created", "session_id", "client_control_mode", "window_id", "pane_id", "pane_current_path" }) });
-    const rows = try m.records(8, alloc, data);
+    const data = try queryRead(server, &.{ "list-clients", "-F", server.format(&.{ "client_name", "client_pid", "client_created", "session_id", "client_control_mode", "window_id", "pane_id", "pane_current_path" }) });
+    const rows = try server.records(8, alloc, data);
     var result: std.ArrayList(m.Client) = .empty;
+    // psmux works client_created out afresh on each listing, a second either
+    // way, and moves it when the client changes session, so it cannot say
+    // whether a client is still the same one. Its client names carry the
+    // client's pid, which is identity enough there.
+    const created_known = server.server.options.kind != .psmux;
     for (rows) |r| if (std.mem.eql(u8, r[4], "0")) {
-        try result.append(alloc, .{ .name = r[0], .pid = r[1], .created = r[2], .session = r[3], .window = r[5], .pane = r[6], .cwd = r[7] });
+        try result.append(alloc, .{ .name = r[0], .pid = r[1], .created = if (created_known) r[2] else "", .session = r[3], .window = r[5], .pane = r[6], .cwd = r[7] });
     };
     return result.toOwnedSlice(alloc);
 }
 pub fn collect(server: *Connection, snapshot: *Snapshot, target: ?Request) !void {
-    return collectWithCache(server, snapshot, target, null, null);
+    return collectWithCache(server, snapshot, target, null, null, null);
 }
 
 /// As `collect`, but reusing cached agent verdicts for panes that emitted no
 /// output, which is where most of a pass's queries go.
-pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Request, agents: ?*AgentCache, model: ?*istate.State) !void {
+pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Request, agents: ?*AgentCache, model: ?*istate.State, pane_processes: ?*ProcessCache) !void {
     const a = snapshot.arena.allocator();
     snapshot.clients = try clients(server, a);
     if (target) |t| {
@@ -286,8 +302,8 @@ pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Reque
             snapshot.failure = "Display disconnected. Select another display.";
         } else {
             if (t.pane) |pane| {
-                const data = try queryRead(server, &.{ "list-panes", "-s", "-t", t.session.?, "-F", m.format(&.{ "pane_id", "window_id" }) });
-                const pane_rows = try m.records(2, a, data);
+                const data = try queryRead(server, &.{ "list-panes", "-s", "-t", t.session.?, "-F", server.format(&.{ "pane_id", "window_id" }) });
+                const pane_rows = try server.records(2, a, data);
                 var exists = false;
                 for (pane_rows) |r| if (std.mem.eql(u8, r[0], pane) and std.mem.eql(u8, r[1], t.window.?)) {
                     exists = true;
@@ -295,7 +311,7 @@ pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Reque
                 };
                 if (!exists) return error.AgentPaneDisappeared;
             }
-            if (t.session) |s| _ = try query(server, &.{ "switch-client", "-c", t.client.name, "-t", s });
+            if (t.session) |s| try switchClient(server, t.client.name, s);
             if (t.pane) |pane| {
                 const window_target = try a.print("{s}:{s}", .{ t.session.?, t.window.? });
                 _ = try query(server, &.{ "select-window", "-t", window_target });
@@ -316,12 +332,11 @@ pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Reque
             if (!located) return error.MalformedContext;
         }
     }
-    const session_data = try queryRead(server, &.{ "list-sessions", "-F", m.format(&.{ "session_id", "session_name", "session_path" }) });
-    const session_rows = try m.records(3, a, session_data);
+    const session_data = try queryRead(server, &.{ "list-sessions", "-F", server.format(&.{ "session_id", "session_name", "session_path" }) });
+    const session_rows = try server.records(3, a, session_data);
     snapshot.sessions = try a.alloc(m.Session, session_rows.len);
     for (session_rows, snapshot.sessions) |r, *s| s.* = .{ .id = r[0], .name = r[1], .path = r[2] };
-    const pane_data = try queryRead(server, &.{ "list-panes", "-a", "-F", m.format(&.{ "session_id", "window_id", "pane_id", "pane_current_path", "pane_current_command", "@agent_hint", "@agent_state", "@agent_status_text", "pane_pid", "@agent_session_id", "window_activity", reported_mod.option }) });
-    const pane_rows = try m.records(12, a, pane_data);
+    const pane_rows = try paneRows(server, a, pane_processes);
     snapshot.panes = try a.alloc(m.Pane, pane_rows.len);
     for (pane_rows, snapshot.panes) |r, *p| p.* = .{ .session = r[0], .window = r[1], .id = r[2], .cwd = r[3], .command = r[4], .agent = r[5], .state = r[6], .status = r[7], .activity = r[10], .reported = r[11] };
     // One process table per refresh, never a shell command or pane-output scrape.
@@ -415,6 +430,8 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
     defer model.deinit();
     var agents = AgentCache.init(alloc);
     defer agents.deinit();
+    var processes = ProcessCache.init(alloc);
+    defer processes.deinit();
     const reconcile_log = environ.getAlloc(alloc, "TMM_RECONCILE_LOG") catch null;
     defer if (reconcile_log) |path| alloc.free(path);
     const query_log = environ.getAlloc(alloc, "TMM_QUERY_LOG") catch null;
@@ -498,7 +515,7 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
         if (rename) |r| if (r.create and s.rename_result.?.success) {
             if (target) |t| collect_target = .{ .client = t.client };
         };
-        collectWithCache(&server, s, collect_target, &agents, &model) catch |err| {
+        collectWithCache(&server, s, collect_target, &agents, &model, &processes) catch |err| {
             s.failure = reason(&server, err);
         };
         if (rename_failure) |failure| s.failure = failure;
@@ -557,6 +574,8 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
 /// The long-lived control client read-only queries go through. Null when it
 /// cannot be started; queries then run as subprocesses.
 fn openQueries(alloc: Allocator, io: std.Io, environ: std.process.Environ, opts: tmux.ServerOptions) ?*cmstream.Stream {
+    // A psmux control client answers for its own session only.
+    if (opts.kind == .psmux) return null;
     const stream = attach.open(alloc, io, environ, .{ .server = opts }) catch return null;
     stream.discard_notifications = true;
     return stream;
@@ -597,6 +616,91 @@ fn checkModel(
     }
     w.interface.flush() catch {};
 }
+
+const pane_fields = [_][]const u8{ "session_id", "window_id", "pane_id", "pane_current_path", "pane_current_command", "@agent_hint", "@agent_state", "@agent_status_text", "pane_pid", "@agent_session_id", "window_activity", reported_mod.option };
+/// `pane_current_path` and `pane_current_command`, the two fields psmux
+/// answers by asking Windows about the pane's process.
+const process_fields = 3;
+
+/// Every pane, as `pane_fields` rows. On psmux the process fields come from
+/// `cache` while it is fresh and holds every pane; see ProcessCache.
+fn paneRows(server: *Connection, a: Allocator, cache: ?*ProcessCache) ![][pane_fields.len][]const u8 {
+    const c = if (server.server.options.kind == .psmux) cache else null;
+    if (c) |known| if (known.fresh(server.server.io)) {
+        const lean = pane_fields[0..process_fields] ++ pane_fields[process_fields + 2 ..];
+        const data = try queryRead(server, &.{ "list-panes", "-a", "-F", server.format(lean) });
+        const rows = try server.records(lean.len, a, data);
+        const full = try a.alloc([pane_fields.len][]const u8, rows.len);
+        for (rows, full) |r, *f| {
+            // A pane the cache has not seen needs reading now.
+            const p = known.entries.get(r[2]) orelse break;
+            f.* = (r[0..process_fields] ++ .{ p.cwd, p.command } ++ r[process_fields..]).*;
+        } else return full;
+    };
+    const data = try queryRead(server, &.{ "list-panes", "-a", "-F", server.format(&pane_fields) });
+    const rows = try server.records(pane_fields.len, a, data);
+    if (c) |known| known.refill(server.server.io, rows);
+    return rows;
+}
+
+/// Each pane's working directory and command, kept between reads, for psmux
+/// only. psmux works both out by asking Windows about the pane's process each
+/// time it is listed, and at a 500 ms poll that was almost all the CPU its
+/// servers spent on tmm: an eighth of a core with six sessions, against a
+/// twenty-fifth when read every five seconds. A new directory or command shows
+/// up that much later; a new pane is read at once.
+pub const ProcessCache = struct {
+    alloc: Allocator,
+    entries: std.StringHashMap(Entry),
+    read_at: ?std.Io.Timestamp = null,
+
+    const Entry = struct { cwd: []const u8, command: []const u8 };
+    const max_age_ms = 5000;
+
+    pub fn init(alloc: Allocator) ProcessCache {
+        return .{ .alloc = alloc, .entries = .init(alloc) };
+    }
+
+    pub fn deinit(self: *ProcessCache) void {
+        self.clear();
+        self.entries.deinit();
+    }
+
+    fn clear(self: *ProcessCache) void {
+        var it = self.entries.iterator();
+        while (it.next()) |e| {
+            self.alloc.free(e.key_ptr.*);
+            self.alloc.free(e.value_ptr.cwd);
+            self.alloc.free(e.value_ptr.command);
+        }
+        self.entries.clearRetainingCapacity();
+    }
+
+    fn fresh(self: *const ProcessCache, io: std.Io) bool {
+        const at = self.read_at orelse return false;
+        const now: std.Io.Timestamp = .now(io, .awake);
+        return now.toMilliseconds() - at.toMilliseconds() < max_age_ms;
+    }
+
+    /// Replace everything with this read, which also forgets closed panes.
+    /// Left stale on running out of memory, so the next pass reads again.
+    fn refill(self: *ProcessCache, io: std.Io, rows: []const [pane_fields.len][]const u8) void {
+        self.clear();
+        self.read_at = null;
+        for (rows) |r| self.put(r[2], r[process_fields], r[process_fields + 1]) catch return;
+        self.read_at = .now(io, .awake);
+    }
+
+    fn put(self: *ProcessCache, pane: []const u8, cwd: []const u8, command: []const u8) !void {
+        const key = try self.alloc.dupe(u8, pane);
+        errdefer self.alloc.free(key);
+        const cwd_copy = try self.alloc.dupe(u8, cwd);
+        errdefer self.alloc.free(cwd_copy);
+        const command_copy = try self.alloc.dupe(u8, command);
+        errdefer self.alloc.free(command_copy);
+        try self.entries.put(key, .{ .cwd = cwd_copy, .command = command_copy });
+    }
+};
 
 /// Captures still owed to a pane after its last output. The completion rule
 /// needs two consecutive idle samples, so a pane must keep being sampled for a
@@ -762,6 +866,9 @@ pub fn heartbeatWorker(io: std.Io, shared: *Shared) void {
 /// changes. Runs as its own task so a stalled stream cannot delay shutdown:
 /// the collector parks on a cancellable semaphore wait, not on this loop.
 pub fn controlWorker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: tmux.ServerOptions, shared: *Shared) void {
+    // A psmux control client hears its own session only, and every other
+    // would go unnoticed, so psmux is read on the heartbeat alone.
+    if (opts.kind == .psmux) return;
     while (!shared.stopping.load(.acquire)) {
         const stream = attach.open(alloc, io, environ, .{ .server = opts }) catch {
             // No control stream: fall back to the historical fixed cadence so
@@ -836,7 +943,20 @@ fn createSession(server: *Connection, edit: Rename, created: *bool) !void {
     created.* = true;
     const id = std.mem.trim(u8, output, "\r\n");
     _ = try attachedClient(server, display.client);
-    _ = try query(server, &.{ "switch-client", "-c", display.client.name, "-t", id });
+    try switchClient(server, display.client.name, id);
+}
+
+/// Put a display on the session with id `session`. psmux, in a `-L`
+/// namespace, cannot find the server of a session given to switch-client by
+/// id, though it finds it by name, so there the name is looked up first.
+fn switchClient(server: *Connection, client: []const u8, session: []const u8) !void {
+    if (server.server.options.kind != .psmux) {
+        _ = try query(server, &.{ "switch-client", "-c", client, "-t", session });
+        return;
+    }
+    const name = try query(server, &.{ "display-message", "-p", "-t", session, "#{session_name}" });
+    const exact = try server.server.allocator.print("={s}", .{std.mem.trimEnd(u8, name, "\r\n")});
+    _ = try query(server, &.{ "switch-client", "-c", client, "-t", exact });
 }
 
 /// Briefly mark only this client; never change shared session styling or focus.

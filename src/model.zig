@@ -3,19 +3,71 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 const std = @import("std");
+const tmux = @import("tmux.zig");
 const Allocator = std.mem.Allocator;
 
-/// tmux's n: modifier counts bytes. Each field is length:payload; a record ends
-/// with a newline. Payloads may themselves contain newlines or any delimiter.
-pub fn format(comptime fields: []const []const u8) []const u8 {
+/// How the fields of a listed record are told apart.
+pub const Framing = enum {
+    /// tmux's n: modifier counts bytes. Each field is length:payload; a record
+    /// ends with a newline. Payloads may themselves contain newlines or any
+    /// delimiter.
+    lengths,
+    /// For psmux, which has no n: modifier: fields are apart by the ASCII unit
+    /// separator, and a record ends with a newline. A payload holding either
+    /// breaks its record, which is then refused rather than misread.
+    ///
+    /// Pane ids are asked for with their session and window, as `$1:@2.%3`.
+    /// psmux numbers panes per session, so a bare `%3` can be a pane in more
+    /// than one session; the qualified form is unique and is a target psmux
+    /// resolves to that one pane, so it serves as the id everywhere.
+    separated,
+
+    pub fn of(kind: tmux.Kind) Framing {
+        return switch (kind) {
+            .tmux => .lengths,
+            .psmux => .separated,
+        };
+    }
+};
+
+const separator = "\x1f";
+
+pub fn format(comptime framing: Framing, comptime fields: []const []const u8) []const u8 {
     return comptime blk: {
         var result: []const u8 = "";
-        for (fields) |field| result = result ++ "#{n:" ++ field ++ "}:#{" ++ field ++ "}";
+        for (fields, 0..) |field, i| result = result ++ switch (framing) {
+            .lengths => "#{n:" ++ field ++ "}:#{" ++ field ++ "}",
+            .separated => (if (i > 0) separator else "") ++
+                (if (std.mem.eql(u8, field, "pane_id")) "#{session_id}:#{window_id}.#{pane_id}" else "#{" ++ field ++ "}"),
+        };
         break :blk result;
     };
 }
 
-pub fn records(comptime N: usize, alloc: Allocator, data: []const u8) ![][N][]const u8 {
+pub fn records(comptime N: usize, framing: Framing, alloc: Allocator, data: []const u8) ![][N][]const u8 {
+    return switch (framing) {
+        .lengths => lengthRecords(N, alloc, data),
+        .separated => separatedRecords(N, alloc, data),
+    };
+}
+
+fn separatedRecords(comptime N: usize, alloc: Allocator, data: []const u8) ![][N][]const u8 {
+    var list: std.ArrayList([N][]const u8) = .empty;
+    errdefer list.deinit(alloc);
+    if (data.len > 0 and data[data.len - 1] != '\n') return error.MalformedRecord;
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    while (lines.next()) |line| {
+        if (lines.index == null) break; // after the last newline
+        var row: [N][]const u8 = undefined;
+        var fields = std.mem.splitSequence(u8, line, separator);
+        for (&row) |*field| field.* = fields.next() orelse return error.MalformedRecord;
+        if (fields.next() != null) return error.MalformedRecord;
+        try list.append(alloc, row);
+    }
+    return list.toOwnedSlice(alloc);
+}
+
+fn lengthRecords(comptime N: usize, alloc: Allocator, data: []const u8) ![][N][]const u8 {
     var list: std.ArrayList([N][]const u8) = .empty;
     errdefer list.deinit(alloc);
     var pos: usize = 0;
@@ -79,12 +131,27 @@ pub fn display(alloc: Allocator, value: []const u8) ![]const u8 {
 
 test "length frames preserve unusual names and reject broken records" {
     const a = std.testing.allocator;
-    const rows = try records(2, a, "8:é|\n\tfoo0:\n1:x3:a:b\n");
+    const rows = try records(2, .lengths, a, "8:é|\n\tfoo0:\n1:x3:a:b\n");
     defer a.free(rows);
     try std.testing.expectEqualStrings("é|\n\tfoo", rows[0][0]);
     try std.testing.expectEqualStrings("a:b", rows[1][1]);
     for ([_][]const u8{ "99:x\n", "1:x", "-1:x\n", "1:xextra\n", "999999999999999999999999999999999:x\n" }) |bad|
-        try std.testing.expectError(error.MalformedRecord, records(1, a, bad));
+        try std.testing.expectError(error.MalformedRecord, records(1, .lengths, a, bad));
+}
+test "separated records split on the unit separator and refuse a wrong count" {
+    const a = std.testing.allocator;
+    const rows = try records(2, .separated, a, "$1:@1.%2\x1fa b:c\n$2:@1.%2\x1f\n");
+    defer a.free(rows);
+    try std.testing.expectEqual(@as(usize, 2), rows.len);
+    try std.testing.expectEqualStrings("a b:c", rows[0][1]);
+    try std.testing.expectEqualStrings("$2:@1.%2", rows[1][0]);
+    try std.testing.expectEqualStrings("", rows[1][1]);
+    const none = try records(2, .separated, a, "");
+    try std.testing.expectEqual(@as(usize, 0), none.len);
+    // A newline inside a payload splits its record into two short ones.
+    for ([_][]const u8{ "a\x1fb\x1fc\n", "a\n", "a\x1fb", "a\x1fb\nc\n" }) |bad|
+        try std.testing.expectError(error.MalformedRecord, records(2, .separated, a, bad));
+    try std.testing.expectEqualStrings("#{session_id}\x1f#{session_id}:#{window_id}.#{pane_id}", format(.separated, &.{ "session_id", "pane_id" }));
 }
 test "reused tty does not inherit client identity" {
     const c: Client = .{ .name = "/tmp/test-tty", .pid = "12", .created = "100", .session = "$0" };

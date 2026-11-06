@@ -10,7 +10,9 @@ A skinny libvaxis sidebar for ordinary tmux sessions. Run it beside your workspa
 
 Requires Zig 0.17.0 and tmux. Zig fetches libvaxis, the one dependency, from its public repository, with the revision and content hash pinned in `build.zig.zon`; tmux itself is run as a program, `tmux` on `PATH`. Tested with tmux 3.8. No sibling checkout or JavaScript runtime is needed.
 
-The whole test suite (`mise run test`) also passes on Linux Mint 22.3 with tmux 3.4, and the integration suite on Ubuntu 24.04 under WSL with tmux 3.4. Linux x86-64 and ARM64 builds do not require libc. On older tmux versions without centered messages, display identification appears in the status line for five seconds. See [portability-report.md](portability-report.md) for build results and the remaining native Windows blockers.
+The whole test suite (`mise run test`) also passes on Linux Mint 22.3 with tmux 3.4, and the integration suite on Ubuntu 24.04 under WSL with tmux 3.4. Linux x86-64 and ARM64 builds do not require libc. On older tmux versions without centered messages, display identification appears in the status line for five seconds. See [portability-report.md](portability-report.md) for build results on other targets.
+
+On Windows, tmm builds natively and runs against psmux 3.4, which it finds on `PATH` as `psmux` and recognises from `psmux -V`. psmux runs a server per session, so tmm polls every 500 ms there instead of following a control client, which hears only its own session, and reads each pane's directory and command every five seconds, since psmux asks Windows for them afresh on every listing. Run inside a psmux pane, tmm uses that pane's `-L` namespace. Agents are found by their hooks only: there is no `ps` to read the process table from, and psmux names a pane's shell, not what runs in it. The test suite needs Unix pseudoterminals and does not run on Windows; the psmux support was checked by hand on Windows.
 
 ```sh
 zig build
@@ -103,7 +105,7 @@ The suite cleans up before it starts. The suites create sockets and directories 
 
 ## Implementation and remaining work
 
-`src/sidebar.zig` builds sidebar rows and discovers conventional server sockets. `src/main.zig` owns rendering and interaction. `src/backend.zig` reads tmux on a worker -- a control-mode client for events, so tmm learns of a change as it happens rather than by polling processes -- and handles navigation requests. `src/cmstream.zig` and `src/control.zig` are that control-mode transport and its parser, and `src/quiet.zig` picks the session it attaches to, so a plain `tmux attach` still lands on the session last used; `src/state.zig` and `src/reconcile.zig` keep the incremental model and check it against full queries. `src/model.zig` handles length-prefixed records, client identity, and agent detection, `src/status.zig` the screen-status detector, and `src/reported.zig` the reported status.
+`src/sidebar.zig` builds sidebar rows and discovers conventional server sockets. `src/main.zig` owns rendering and interaction. `src/backend.zig` reads tmux on a worker -- a control-mode client for events, so tmm learns of a change as it happens rather than by polling processes -- and handles navigation requests. `src/cmstream.zig` and `src/control.zig` are that control-mode transport and its parser, and `src/quiet.zig` picks the session it attaches to, so a plain `tmux attach` still lands on the session last used; `src/state.zig` and `src/reconcile.zig` keep the incremental model and check it against full queries. `src/model.zig` handles length-prefixed and separated records, client identity, and agent detection, `src/status.zig` the screen-status detector, and `src/reported.zig` the reported status.
 
 All requests stay within the selected server. Display identity includes tty/name, PID, and creation timestamp. Disconnects require explicit selection again. Failed refreshes retain the previous snapshot and display the tmux diagnostic.
 

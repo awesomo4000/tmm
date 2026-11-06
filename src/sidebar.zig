@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const m = @import("model.zig");
 const backend = @import("backend.zig");
 const reported_opt = @import("reported.zig");
@@ -281,6 +282,8 @@ test "a session's directory is the one most of its panes share" {
 /// Discover sockets only in tmux's conventional per-user directory. Custom
 /// socket paths are explicit CLI entries; never traverse arbitrary directories.
 pub fn discover(a: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, list: *std.ArrayList(Server)) !void {
+    // No per-user socket directory to look in.
+    if (builtin.os.tag == .windows) return;
     const directory = try a.print("{s}/tmux-{d}", .{ env.get("TMUX_TMPDIR") orelse "/tmp", std.posix.system.getuid() });
     var dir = std.Io.Dir.openDirAbsolute(io, directory, .{ .iterate = true }) catch return;
     defer dir.close(io);

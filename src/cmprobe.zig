@@ -34,7 +34,9 @@ pub fn main(init: std.process.Init) !void {
     var raw_mode = false;
     var max_events: usize = 64;
 
-    var args = init.minimal.args.iterate();
+    // The allocating form: Windows hands over one command line to split.
+    var args = try init.minimal.args.iterateAllocator(gpa);
+    defer args.deinit();
     _ = args.next();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-S")) {

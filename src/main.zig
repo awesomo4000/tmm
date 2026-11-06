@@ -81,7 +81,9 @@ pub fn main(init: std.process.Init) !void {
         io.random(&bytes);
         break :roll std.mem.readInt(u64, &bytes, .little);
     });
-    var args = init.minimal.args.iterate();
+    // The allocating form: Windows hands over one command line to split.
+    var args = try init.minimal.args.iterateAllocator(a);
+    defer args.deinit();
     _ = args.next();
     var opts: tmux.ServerOptions = .{};
     var initial_client: ?[]const u8 = null;
@@ -136,6 +138,23 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     if (opts.socket_name != null and opts.socket_path != null) return error.ConflictingSocketSelectors;
+    opts.kind = kind: {
+        var probe = tmux.Server.init(a, io, opts);
+        break :kind probe.kind();
+    };
+    // psmux sends a command to the session its caller runs in, by `TMUX`,
+    // whatever the command names: a switch-client from tmm's pane reports
+    // success and moves nothing. So psmux runs without it, and tmm in a
+    // named namespace says so with -L instead, as `TMUX` would have.
+    var psmux_environ: std.process.Environ.Map = undefined;
+    defer if (opts.kind == .psmux) psmux_environ.deinit();
+    if (opts.kind == .psmux) {
+        if (opts.socket_name == null and opts.socket_path == null)
+            opts.socket_name = tmux.psmuxNamespace(init.environ_map.get("TMUX"));
+        psmux_environ = try init.environ_map.clone(a);
+        _ = psmux_environ.swapRemove("TMUX");
+        opts.environ_map = &psmux_environ;
+    }
     if (dump) {
         var snapshot: backend.Snapshot = .{ .arena = .init(a) };
         defer snapshot.arena.deinit();
@@ -151,6 +170,10 @@ pub fn main(init: std.process.Init) !void {
     try servers.insert(ca, 0, .{ .name = opts.socket_name orelse if (opts.socket_path) |path| std.fs.path.basename(path) else "default", .options = opts });
     if (opts.socket_name == null and opts.socket_path == null)
         try sidebar.discover(ca, io, init.environ_map, &servers);
+    for (servers.items) |*s| {
+        s.options.kind = opts.kind;
+        s.options.environ_map = opts.environ_map;
+    }
     var tty_buf: [4096]u8 = undefined;
     var tty = try vaxis.Tty.init(io, &tty_buf);
     defer tty.deinit();
