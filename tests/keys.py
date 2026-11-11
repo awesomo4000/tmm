@@ -18,6 +18,8 @@ display attached to alpha:
 - `j` and `k` step between sessions only, never stopping on a pane, and
   Enter switches the display to the session they land on. With every
   session folded they still do, and the cursor shows beside the name.
+- `n` opens the new-session field, and a name typed there with Enter makes
+  the session and sends the display to it.
 
 Only disposable tmux sockets and files under /tmp are mutated.
 """
@@ -232,6 +234,13 @@ def main():
             os.write(fd, b'\r')
             if not until(lambda: on() == 'alpha' and bar('alpha') == ('▐', SELECTED)):
                 failures.append('Enter on a folded session did not switch to it: %r' % on())
+
+            os.write(fd, b'n')
+            if not until(lambda: any('Enter save' in l for l in display.lines())):
+                failures.append('n did not open the new-session field')
+            os.write(fd, b'delta\r')
+            if not until(lambda: on() == 'delta'):
+                failures.append('a name typed after n did not make the session: %r' % on())
         finally:
             for child in (pid, cpid):
                 for sig in (signal.SIGTERM, signal.SIGKILL):
@@ -253,7 +262,7 @@ def main():
         for f in failures:
             print('FAIL: %s' % f, file=sys.stderr)
         raise SystemExit(1)
-    print('ok: the digits follow the listed order and ? shows the keys')
+    print('ok: the digits follow the listed order, n makes a session and ? shows the keys')
 
 
 if __name__ == '__main__':

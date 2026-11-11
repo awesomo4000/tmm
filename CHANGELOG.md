@@ -1,5 +1,9 @@
 # Changelog
 
+## 11/11/2026
+
+- Added the `n` key, which opens the new session field, as `[new]` does.
+
 ## 11/06/2026
 
 - Ran tmm natively on Windows, against psmux 3.4. tmm tells psmux from tmux by `-V`, and a real tmux, on any system, keeps the usual path. psmux has no `#{n:}`, so its records are split on a unit separator instead. Its pane ids repeat from one session to the next, so tmm asks for them as `$session:@window.%pane`, which psmux also takes as a target. Its servers run one per session and a control client hears only its own, so tmm polls every 500 ms. A display there is known by name and pid, since psmux reports a different creation time on each listing.

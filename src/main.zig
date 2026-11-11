@@ -487,6 +487,7 @@ pub fn main(init: std.process.Init) !void {
                     auto_sort = false;
                     reveal = true;
                 };
+                if (key.matches('n', .{})) action = .new_session;
                 if (key.matches('s', .{})) action = .sort;
                 if (key.matches('a', .{})) action = .auto_sort;
                 if (key.matches('b', .{})) {
@@ -1002,6 +1003,7 @@ const bindings = [_][2][]const u8{
     .{ "1-9 0", "switch to session 1 to 10" },
     .{ "Enter", "switch to the session" },
     .{ "space", "fold the session" },
+    .{ "n", "new session" },
     .{ "s", "sort sessions as tmux steps them" },
     .{ "a", "keep them sorted, until one moves" },
     .{ "b", "blink the display" },
