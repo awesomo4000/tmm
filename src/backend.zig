@@ -6,6 +6,7 @@ const std = @import("std");
 const tmux = @import("tmux.zig");
 const m = @import("model.zig");
 const status = @import("status.zig");
+const agentstate = @import("agentstate.zig");
 const cmstream = @import("cmstream.zig");
 const control = @import("control.zig");
 const attach = @import("quiet.zig");
@@ -287,9 +288,10 @@ pub fn collect(server: *Connection, snapshot: *Snapshot, target: ?Request) !void
     return collectWithCache(server, snapshot, target, null, null, null);
 }
 
-/// As `collect`, but reusing cached agent verdicts for panes that emitted no
-/// output, which is where most of a pass's queries go.
-pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Request, agents: ?*AgentCache, model: ?*istate.State, pane_processes: ?*ProcessCache) !void {
+/// As `collect`, but with agent state kept across passes in `monitor`, which
+/// also spares a screen read for a pane that emitted no output: those reads
+/// are where most of a pass's queries go.
+pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Request, monitor: ?*agentstate.Monitor, model: ?*istate.State, pane_processes: ?*ProcessCache) !void {
     const a = snapshot.arena.allocator();
     snapshot.clients = try clients(server, a);
     if (target) |t| {
@@ -344,10 +346,10 @@ pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Reque
         .argv = &.{ "ps", "-axo", "pid=,ppid=,comm=" },
         .stdout_limit = .limited(10 * 1024 * 1024),
     }) catch null;
-    var processes: []const m.Process = &.{};
+    var processes: []const agentstate.Process = &.{};
     if (process_result) |result| {
         if (result.term == .exited and result.term.exited == 0)
-            processes = try m.parseProcesses(a, result.stdout);
+            processes = try agentstate.parseProcesses(a, result.stdout);
     }
     for (snapshot.clients) |*client| {
         const pid = std.fmt.parseInt(u32, client.pid, 10) catch continue;
@@ -355,14 +357,14 @@ pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Reque
     }
     for (snapshot.panes, pane_rows) |*pane, record| {
         const root_pid = std.fmt.parseInt(u32, record[8], 10) catch 0;
-        const process = m.processAgentInfo(processes, root_pid);
-        pane.at_prompt = m.atPrompt(processes, root_pid);
+        const process = agentstate.processAgentInfo(processes, root_pid);
+        pane.at_prompt = agentstate.atPrompt(processes, root_pid);
         pane.run_identity = try a.print("{s}:{d}:{s}", .{ record[8], if (process) |info| info.pid else root_pid, record[9] });
         if (pane.agent.len > 0) {
             pane.agent_source = "metadata";
         } else {
             const pid = std.fmt.parseInt(u32, record[8], 10) catch 0;
-            if (m.processAgent(processes, pid) orelse m.agentCommand(pane.command)) |agent| {
+            if (agentstate.processAgent(processes, pid) orelse agentstate.agentCommand(pane.command)) |agent| {
                 pane.agent = agent;
                 pane.agent_source = "process";
                 // Presence alone says nothing about turn completion.
@@ -371,49 +373,83 @@ pub fn collectWithCache(server: *Connection, snapshot: *Snapshot, target: ?Reque
             }
         }
     }
-    var detections: std.StringHashMap(status.Verdict) = .init(a);
+    const now: u64 = @intCast(std.Io.Timestamp.now(server.server.io, .awake).toMilliseconds());
     for (snapshot.panes) |*pane| {
         if (pane.agent.len == 0) continue;
-        if (pane.state.len > 0) {
-            pane.status_source = "metadata";
-            pane.status_rule = "explicit-pane-state";
-            continue;
-        }
-        if (!std.mem.eql(u8, pane.agent, "codex") and !std.mem.eql(u8, pane.agent, "claude")) continue;
-        // Reuse a cached verdict when this pane emitted nothing and has
-        // settled: capture plus title is two queries and dominates a pass.
-        if (agents) |cache| {
-            const had_output = if (model) |mo| mo.hadOutput(pane.id) else true;
-            if (!cache.needsCapture(pane.id, had_output, pane.activity)) {
-                if (cache.cached(pane.id)) |v| {
-                    pane.state = @tagName(v.state);
-                    pane.status_source = "screen";
-                    pane.status_rule = v.rule;
-                    pane.interrupted = v.interrupted;
-                    continue;
-                }
-            }
-        }
-        const verdict = detections.get(pane.id) orelse blk: {
-            // Capture live screen, not copy-mode scroll position. No screen data is retained.
-            const screen = queryRead(server, &.{ "capture-pane", "-p", "-t", pane.id, "-S", "0" }) catch
-                break :blk status.Verdict{ .state = .unknown, .rule = "capture-failed" };
-            const title_data = queryRead(server, &.{ "display-message", "-p", "-t", pane.id, "#{pane_title}" }) catch "";
-            const result = status.classify(pane.agent, screen, std.mem.trim(u8, title_data, "\r\n"));
-            try detections.put(pane.id, result);
-            if (agents) |cache| cache.record(pane.id, result, pane.activity);
-            break :blk result;
+        var o: agentstate.Observation = .{
+            .at_ms = now,
+            .run = pane.run_identity,
+            .agent = pane.agent,
+            .state = pane.state,
+            .report = pane.reported,
+            .at_prompt = pane.at_prompt,
+            .output = if (model) |mo| mo.hadOutput(pane.id) else true,
+            .activity = parseActivity(pane.activity),
         };
-        pane.state = @tagName(verdict.state);
-        pane.status_source = "screen";
-        pane.status_rule = verdict.rule;
-        pane.interrupted = verdict.interrupted;
+        // A screen read is two queries and dominates a pass, so the monitor
+        // decides: a pane that emitted nothing and has settled keeps the
+        // verdict it had.
+        const wanted = if (monitor) |mon| mon.needsScreen(pane.id, o) else agentstate.readsScreen(o);
+        if (wanted) o.screen = readScreen(server, pane.id) catch null;
+        const inferred = if (monitor) |mon| (try mon.observe(pane.id, o)).inferred else agentstate.infer(o);
+        switch (inferred.source) {
+            .none => {},
+            .metadata => {
+                pane.status_source = "metadata";
+                pane.status_rule = inferred.rule;
+            },
+            .screen => {
+                pane.state = @tagName(inferred.state);
+                pane.status_source = "screen";
+                pane.status_rule = inferred.rule;
+                pane.interrupted = inferred.interrupted;
+            },
+        }
     }
     snapshot.valid = true;
 }
+/// The live screen, not a copy-mode scroll position, and the pane title. No
+/// screen data is kept past the pass.
+fn readScreen(server: *Connection, pane: []const u8) !agentstate.Screen {
+    const text = try queryRead(server, &.{ "capture-pane", "-p", "-t", pane, "-S", "0" });
+    const title = queryRead(server, &.{ "display-message", "-p", "-t", pane, "#{pane_title}" }) catch "";
+    return .{ .text = text, .title = std.mem.trim(u8, title, "\r\n") };
+}
+
+/// tmux reports `window_activity` as a unix time, and as an empty string for
+/// a window that has produced nothing yet. Null means unknown, which the
+/// monitor treats as a reason to read the screen rather than to skip it.
+fn parseActivity(activity: []const u8) ?u64 {
+    if (activity.len == 0) return null;
+    return std.fmt.parseInt(u64, activity, 10) catch null;
+}
+
+/// Acknowledge the completion a display was just taken to, then mark each
+/// agent pane with its completions.
+///
+/// Only the completion the clicked row showed, of the run it showed it for,
+/// and only once the display has arrived at that pane: an older click can
+/// never clear a newer completion.
+fn settle(monitor: *agentstate.Monitor, snapshot: *Snapshot, request: ?Request) void {
+    for (snapshot.panes) |*pane| {
+        if (pane.agent.len == 0) continue;
+        if (snapshot.failure == null) if (request) |r| if (r.pane) |id| {
+            if (std.mem.eql(u8, id, pane.id) and std.mem.eql(u8, snapshot.focused_pane, pane.id))
+                if (r.run_identity) |identity| {
+                    if (std.mem.eql(u8, identity, pane.run_identity)) monitor.acknowledge(pane.id, r.completion);
+                };
+        };
+        pane.completion = monitor.completion(pane.id);
+        pane.unread = monitor.unread(pane.id);
+        const state = status.metadata(pane.state);
+        if (state == .idle or state == .done) pane.state = if (pane.unread) "done" else "idle";
+    }
+    monitor.sweep();
+}
+
 pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: tmux.ServerOptions, shared: *Shared, loop: anytype) void {
-    var tracker = Tracker.init(alloc);
-    defer tracker.deinit();
+    var monitor = agentstate.Monitor.init(alloc);
+    defer monitor.deinit();
     var target: ?Request = null;
     defer if (target) |t| t.deinit(alloc);
     // Long-lived control client for read-only queries. Opened once: a client
@@ -428,8 +464,6 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
     // logic is being proven. Divergence is reported through TMM_RECONCILE_LOG.
     var model = istate.State.init(alloc);
     defer model.deinit();
-    var agents = AgentCache.init(alloc);
-    defer agents.deinit();
     var processes = ProcessCache.init(alloc);
     defer processes.deinit();
     const reconcile_log = environ.getAlloc(alloc, "TMM_RECONCILE_LOG") catch null;
@@ -515,7 +549,7 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
         if (rename) |r| if (r.create and s.rename_result.?.success) {
             if (target) |t| collect_target = .{ .client = t.client };
         };
-        collectWithCache(&server, s, collect_target, &agents, &model, &processes) catch |err| {
+        collectWithCache(&server, s, collect_target, &monitor, &model, &processes) catch |err| {
             s.failure = reason(&server, err);
         };
         if (rename_failure) |failure| s.failure = failure;
@@ -524,9 +558,7 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
                 s.failure = reason(&server, err);
             };
         }
-        if (s.valid) tracker.update(s, target) catch {
-            s.failure = "Completion tracking failed";
-        };
+        if (s.valid) settle(&monitor, s, target);
         if (server.queries_lost) if (query_stream) |qs| {
             qs.close();
             query_stream = null;
@@ -546,8 +578,7 @@ pub fn worker(io: std.Io, alloc: Allocator, environ: std.process.Environ, opts: 
         // reporting the gap it has already declared would be noise.
         if (query_log) |path| appendCount(io, alloc, path, server.query_count);
         if (s.valid) {
-            // This pass's capture decisions have consumed the output marks.
-            agents.prune(s.panes);
+            // This pass's screen reads have consumed the output marks.
             model.clearOutput();
             const quiet = shared.event_seq.load(.acquire) == seq_before_query;
             if (!model.isDirty() and quiet) checkModel(io, alloc, &model, s, reconcile_log);
@@ -699,105 +730,6 @@ pub const ProcessCache = struct {
         const command_copy = try self.alloc.dupe(u8, command);
         errdefer self.alloc.free(command_copy);
         try self.entries.put(key, .{ .cwd = cwd_copy, .command = command_copy });
-    }
-};
-
-/// Captures still owed to a pane after its last output. The completion rule
-/// needs two consecutive idle samples, so a pane must keep being sampled for a
-/// few passes after it stops emitting, or a working-to-idle transition would
-/// never be observed and completions would be lost. Three covers working, then
-/// idle, then idle.
-const samples_after_output: u8 = 3;
-
-/// Agent verdicts kept across passes, so a pane that emitted nothing need not
-/// be re-captured. Capture plus title is two tmux queries per agent pane per
-/// pass, measured as two thirds of the cost of a pass with three agents.
-pub const AgentCache = struct {
-    alloc: Allocator,
-    entries: std.StringHashMap(Entry),
-
-    pub const Entry = struct {
-        verdict: status.Verdict,
-        /// Remaining captures owed; zero means the pane has settled.
-        budget: u8,
-        /// `window_activity` when this verdict was taken, or null when tmux
-        /// did not report one. A change means the window produced output.
-        activity: ?u64,
-    };
-
-    pub fn init(alloc: Allocator) AgentCache {
-        return .{ .alloc = alloc, .entries = .init(alloc) };
-    }
-
-    pub fn deinit(self: *AgentCache) void {
-        var it = self.entries.iterator();
-        while (it.next()) |e| self.alloc.free(e.key_ptr.*);
-        self.entries.deinit();
-    }
-
-    /// Whether this pane must be captured this pass.
-    ///
-    /// `had_output` comes from `%output` on the control stream, which is exact
-    /// and per pane but only arrives for the session our control client is
-    /// attached to. A pane in any other session would otherwise never be
-    /// captured again once its budget ran out, freezing its status for the
-    /// rest of the run. `window_activity` is reported for every window
-    /// whatever any client is looking at, so it covers the rest. It is a
-    /// one-second stamp for the whole window, which only makes this capture
-    /// more often than strictly needed.
-    pub fn needsCapture(self: *AgentCache, pane: []const u8, had_output: bool, activity: []const u8) bool {
-        const stamp = parseActivity(activity);
-        const existing = self.entries.getPtr(pane) orelse return true;
-        if (had_output or existing.activity == null or stamp == null or
-            existing.activity.? != stamp.?)
-        {
-            existing.budget = samples_after_output;
-            return true;
-        }
-        return existing.budget > 0;
-    }
-
-    pub fn record(self: *AgentCache, pane: []const u8, verdict: status.Verdict, activity: []const u8) void {
-        const stamp = parseActivity(activity);
-        if (self.entries.getPtr(pane)) |e| {
-            e.verdict = verdict;
-            e.activity = stamp;
-            if (e.budget > 0) e.budget -= 1;
-            return;
-        }
-        const key = self.alloc.dupe(u8, pane) catch return;
-        self.entries.put(key, .{
-            .verdict = verdict,
-            .budget = samples_after_output - 1,
-            .activity = stamp,
-        }) catch self.alloc.free(key);
-    }
-
-    /// tmux reports `window_activity` as a unix time, and as an empty string
-    /// for a window that has produced nothing yet. Null means unknown, which
-    /// callers treat as a reason to capture rather than a reason to skip.
-    fn parseActivity(activity: []const u8) ?u64 {
-        if (activity.len == 0) return null;
-        return std.fmt.parseInt(u64, activity, 10) catch null;
-    }
-
-    pub fn cached(self: *AgentCache, pane: []const u8) ?status.Verdict {
-        const e = self.entries.getPtr(pane) orelse return null;
-        return e.verdict;
-    }
-
-    /// Forget panes that no longer exist, so the cache cannot grow without end.
-    pub fn prune(self: *AgentCache, panes: []const m.Pane) void {
-        var stale: std.ArrayList([]const u8) = .empty;
-        defer stale.deinit(self.alloc);
-        var it = self.entries.iterator();
-        outer: while (it.next()) |e| {
-            for (panes) |pane| if (std.mem.eql(u8, pane.id, e.key_ptr.*)) continue :outer;
-            stale.append(self.alloc, e.key_ptr.*) catch return;
-        }
-        for (stale.items) |key| {
-            if (self.entries.fetchRemove(key)) |kv| self.alloc.free(kv.key);
-        }
     }
 };
 
@@ -980,55 +912,3 @@ fn flashDisplay(server: *Connection, client: m.Client) !void {
         return;
     };
 }
-
-const Tracker = struct {
-    a: Allocator,
-    tracks: std.StringHashMap(status.Track),
-    fn init(a: Allocator) Tracker {
-        return .{ .a = a, .tracks = .init(a) };
-    }
-    fn deinit(self: *Tracker) void {
-        var keys = self.tracks.keyIterator();
-        while (keys.next()) |key| self.a.free(key.*);
-        self.tracks.deinit();
-    }
-    fn update(self: *Tracker, snapshot: *Snapshot, request: ?Request) !void {
-        var values = self.tracks.valueIterator();
-        while (values.next()) |value| value.visited = false;
-        const a = snapshot.arena.allocator();
-        for (snapshot.panes) |*pane| {
-            if (pane.agent.len == 0) continue;
-            const key = try a.print("{s}:{s}:{s}", .{ pane.id, pane.run_identity, pane.agent });
-            const entry = try self.tracks.getOrPut(key);
-            if (!entry.found_existing) {
-                entry.key_ptr.* = self.a.dupe(u8, key) catch |err| {
-                    _ = self.tracks.remove(key);
-                    return err;
-                };
-                entry.value_ptr.* = .{};
-            }
-            const track = entry.value_ptr;
-            if (!track.visited) track.observe(.{ .state = status.metadata(pane.state), .rule = pane.status_rule, .interrupted = pane.interrupted }, if (std.mem.eql(u8, pane.status_source, "metadata")) pane.state else null);
-            // Acknowledge exactly the receipt the clicked row displayed, and only
-            // after successful navigation. Never mark a newly finished turn seen.
-            if (snapshot.failure == null) if (request) |r| if (r.pane) |id| {
-                if (std.mem.eql(u8, id, pane.id) and std.mem.eql(u8, snapshot.focused_pane, pane.id))
-                    if (r.run_identity) |identity| {
-                        if (std.mem.eql(u8, identity, pane.run_identity)) track.acknowledge(r.completion);
-                    };
-            };
-            pane.completion = track.generation;
-            pane.unread = track.unread();
-            const state = status.metadata(pane.state);
-            if (state == .idle or state == .done) pane.state = if (pane.unread) "done" else "idle";
-        }
-        var stale: std.ArrayList([]const u8) = .empty;
-        defer stale.deinit(self.a);
-        var entries = self.tracks.iterator();
-        while (entries.next()) |entry| if (!entry.value_ptr.visited) try stale.append(self.a, entry.key_ptr.*);
-        for (stale.items) |key| {
-            _ = self.tracks.remove(key);
-            self.a.free(key);
-        }
-    }
-};

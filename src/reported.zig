@@ -24,7 +24,6 @@
 //! reporter sends it.
 
 const std = @import("std");
-const sidebar = @import("sidebar.zig");
 
 /// The pane option a reporter writes. Read in `backend.zig`'s pane query.
 pub const option = "@tmm_status";
@@ -43,7 +42,26 @@ const max_id = 128;
 const max_segment = 32;
 const max_depth = 8;
 
-/// Parse `state=working:progress=40:title=QmFzaA==` into a sidebar record, by
+/// What a program said about itself, as opposed to what reading its screen
+/// suggested.
+///
+/// The title is copied into the struct rather than referenced, so a record
+/// never borrows from the payload it was parsed out of.
+pub const Record = struct {
+    state: enum { idle, working, done, blocked, @"error" },
+    kind: ?enum { permission, question, auth } = null,
+    progress: ?u8 = null,
+    /// What the program said it is working on, copied in. Empty when it said
+    /// nothing, which is the common case.
+    title_buf: [max_title_decoded]u8 = @splat(0),
+    title_len: u8 = 0,
+
+    pub fn title(self: *const Record) []const u8 {
+        return self.title_buf[0..self.title_len];
+    }
+};
+
+/// Parse `state=working:progress=40:title=QmFzaA==` into a record, by
 /// the Program Status Protocol at revision 0.4.
 ///
 /// Null when the specification says a report is discarded or ignored, and for
@@ -56,7 +74,7 @@ const max_depth = 8;
 /// then checked as a whole, as the specification requires: every pair is
 /// checked before any of it is used, so a report is applied entirely or not
 /// at all.
-pub fn parse(payload: []const u8) ?sidebar.Reported {
+pub fn parse(payload: []const u8) ?Record {
     if (payload.len == 0 or payload.len > max_sequence) return null;
 
     var state: ?[]const u8 = null;
@@ -104,7 +122,7 @@ pub fn parse(payload: []const u8) ?sidebar.Reported {
 
     // A report with no state, or one this tmm does not know, is ignored.
     const named = state orelse return null;
-    var out: sidebar.Reported = .{ .state = .idle };
+    var out: Record = .{ .state = .idle };
     if (std.mem.eql(u8, named, "working")) {
         out.state = .working;
     } else if (std.mem.eql(u8, named, "blocked")) {
@@ -127,11 +145,8 @@ pub fn parse(payload: []const u8) ?sidebar.Reported {
     if (title) |value| {
         var buf: [max_title_decoded]u8 = undefined;
         const text = decodeText(value, max_title_encoded, &buf) orelse return null;
-        // The row has room for less than a title may carry, so it is cut, on
-        // a character boundary rather than through one.
-        const n = utf8Fit(text, out.title_buf.len);
-        @memcpy(out.title_buf[0..n], text[0..n]);
-        out.title_len = @intCast(n);
+        @memcpy(out.title_buf[0..text.len], text);
+        out.title_len = @intCast(text.len);
     }
     // `msg` is not drawn either, but a report whose `msg` does not decode is
     // discarded whole like any other, so it has to be checked.
@@ -168,7 +183,7 @@ pub fn parse(payload: []const u8) ?sidebar.Reported {
 /// pane whose own shell runs nothing is at its prompt (`m.atPrompt`). Without
 /// this an agent killed by `kill -9` never sends its clear, and its row reads
 /// `working` for as long as the pane exists.
-pub fn current(payload: []const u8, at_prompt: bool) ?sidebar.Reported {
+pub fn current(payload: []const u8, at_prompt: bool) ?Record {
     const record = parse(payload) orelse return null;
     if (at_prompt) switch (record.state) {
         .working, .blocked, .idle => return null,
@@ -261,7 +276,7 @@ fn decodeText(value: []const u8, max_encoded: usize, buf: []u8) ?[]const u8 {
 }
 
 /// How much of `text` fits in `limit` bytes without splitting a character.
-fn utf8Fit(text: []const u8, limit: usize) usize {
+pub fn utf8Fit(text: []const u8, limit: usize) usize {
     if (text.len <= limit) return text.len;
     var n = limit;
     while (n > 0 and text[n] & 0xc0 == 0x80) n -= 1;
@@ -332,17 +347,17 @@ test "a malformed pair is skipped and the rest of the report applies" {
     try std.testing.expectEqualStrings("Bash", parse("state=idle:title=QmFzaA").?.title());
 }
 
-test "a long title is cut to the row, not dropped" {
-    // "Running the integration tests", 29 bytes: legal (titles go to 192)
-    // and longer than the row's 24. It used to vanish entirely, and the test
-    // that claimed to cover this passed on the empty string that left.
+test "a long title is kept whole, and cut only on a character boundary" {
+    // "Running the integration tests", 29 bytes: legal, since titles go to
+    // 192, and kept entire; a reader with less room cuts it itself.
     const r = parse("state=working:title=UnVubmluZyB0aGUgaW50ZWdyYXRpb24gdGVzdHM=").?;
-    try std.testing.expectEqualStrings("Running the integration ", r.title());
+    try std.testing.expectEqualStrings("Running the integration tests", r.title());
     // Nine three-byte characters, 27 bytes: cut on a character boundary,
-    // so eight of them, and the cut never splits one.
+    // never through one.
     const wide = parse("state=idle:title=5pel5pel5pel5pel5pel5pel5pel5pel5pel").?;
-    try std.testing.expectEqual(@as(usize, 24), wide.title().len);
-    try std.testing.expect(std.unicode.utf8ValidateSlice(wide.title()));
+    try std.testing.expectEqual(@as(usize, 27), wide.title().len);
+    try std.testing.expectEqual(@as(usize, 24), utf8Fit(wide.title(), 25));
+    try std.testing.expectEqual(@as(usize, 21), utf8Fit(wide.title(), 23));
 }
 
 test "kind and progress mean something only where the specification says" {

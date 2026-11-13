@@ -1,5 +1,14 @@
 # Changelog
 
+## 11/13/2026
+
+- Made agent state its own module, `src/agentstate.zig`, with no tmux in it. It is a state machine fed plain observations of a terminal -- its agent, a state word, its screen when read, its own status report, whether it printed, and the time -- and answers with its state, what changed, its completions, and whether its screen is worth reading again. It does no I/O and reads no clock. The completion tracking, the screen-read schedule and the process rules moved into it from the collector and the model, and the reported-status record from the sidebar. tmm gathers the observations from tmux and draws what comes back.
+- Kept a reported title whole, up to the 192 bytes the protocol allows. The sidebar cuts it to its row, as before.
+- Fixed a pause between tool calls counting as a finished turn. A completion took two idle observations in a row after work, so whether a pause counted depended on how often tmm looked: sampled every 500 ms, as tmm polls, a session with pauses of up to 0.8 s got a false completion in 21 of 50 generated sessions, and in 48 of 50 sampled every 16 ms. Idle must now last a second after work, however many observations fall in it, and the same sessions sampled every 16 ms to every 2 s complete the same turns.
+- Started a terminal's screen-read schedule afresh when what runs in it changes, along with its completions.
+- Made agent state count only the time between observations, with time that runs backwards counting as none, so a clock set back, by an NTP correction or a caller changing clocks, neither completes a turn nor stalls one. Measured against the clock as given, a clock set back by a day held off every completion after it.
+- Added generated tests for agent state: random sessions checked against invariants at every step, and sessions sampled at different rates. `zig build test --seed=0x...` repeats a run.
+
 ## 11/11/2026
 
 - Added the `n` key, which opens the new session field, as `[new]` does.

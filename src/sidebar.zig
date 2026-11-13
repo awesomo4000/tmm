@@ -17,42 +17,22 @@ pub const Action = union(enum) { server: usize, display: usize, session: usize, 
 /// session row; a click inside them folds rather than selects.
 pub const fold_width = 2;
 
-/// What a program in a pane said about itself (OSC 7501, carried to tmm as
-/// the `@tmm_status` pane option), as opposed to what reading its screen
-/// suggested.
-///
-/// The title is copied into the struct rather than referenced, so a record
-/// never borrows from the snapshot it was parsed out of. The label beside the
-/// indicator still comes from the pane's command.
-pub const Reported = struct {
-    /// Longest title a row has space for beside the name and the indicator.
-    pub const title_max = 24;
+/// Longest reported title a row has space for beside the name and the
+/// indicator.
+const title_room = 24;
 
-    state: enum { idle, working, done, blocked, @"error" },
-    kind: ?enum { permission, question, auth } = null,
-    progress: ?u8 = null,
-    /// What the program said it is working on, copied in. Empty when it said
-    /// nothing, which is the common case.
-    title_buf: [title_max]u8 = @splat(0),
-    title_len: u8 = 0,
-
-    pub fn title(self: *const Reported) []const u8 {
-        return self.title_buf[0..self.title_len];
-    }
-
-    /// The symbol and colour for a reported state, in the vocabulary the
-    /// inferred states already use, plus a mark for `error`, which screen
-    /// detection has no way to recognise.
-    pub fn indicator(self: Reported) m.Indicator {
-        return switch (self.state) {
-            .working => .{ .symbol = "●", .color = 6 },
-            .blocked => .{ .symbol = "!", .color = 3 },
-            .done => .{ .symbol = "✓", .color = 2 },
-            .idle => .{ .symbol = "○", .color = 8 },
-            .@"error" => .{ .symbol = "✗", .color = 1 },
-        };
-    }
-};
+/// The symbol and colour for a reported state, in the vocabulary the
+/// inferred states already use, plus a mark for `error`, which screen
+/// detection has no way to recognise.
+fn reportedIndicator(record: reported_opt.Record) m.Indicator {
+    return switch (record.state) {
+        .working => .{ .symbol = "●", .color = 6 },
+        .blocked => .{ .symbol = "!", .color = 3 },
+        .done => .{ .symbol = "✓", .color = 2 },
+        .idle => .{ .symbol = "○", .color = 8 },
+        .@"error" => .{ .symbol = "✗", .color = 1 },
+    };
+}
 
 pub const Row = struct {
     text: []const u8,
@@ -162,7 +142,7 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
                 // As it stands now rather than as written: a record whose
                 // writer is gone, with the pane back at its prompt, ends.
                 const said = reported_opt.current(pane.reported, pane.at_prompt);
-                const state = if (said) |r| r.indicator() else m.agentIndicator(pane.state);
+                const state = if (said) |r| reportedIndicator(r) else m.agentIndicator(pane.state);
                 const is_agent = pane.agent.len > 0 or said != null;
                 if (fold) {
                     if (is_agent and (std.mem.eql(u8, state.symbol, "✓") or pane.unread)) list.items[session_row].done = true;
@@ -188,9 +168,9 @@ pub fn rows(a: std.mem.Allocator, servers: []const Server, current: usize, snaps
                     // This is what a program can say during long work when it
                     // has no fraction to report -- an agent hook knows the
                     // tool that is running but never how many will run.
-                    if (r.title().len > 0) break :blk try a.print(
+                    if (r.title_len > 0) break :blk try a.print(
                         "{s}   {s} {s} {s}",
-                        .{ marker, state.symbol, name, r.title() },
+                        .{ marker, state.symbol, name, r.title()[0..reported_opt.utf8Fit(r.title(), title_room)] },
                     );
                     break :blk try a.print("{s}   {s} {s}", .{ marker, state.symbol, name });
                 } else if (is_agent)

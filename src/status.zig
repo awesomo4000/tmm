@@ -100,56 +100,6 @@ pub fn classify(agent: []const u8, screen: []const u8, title: []const u8) Verdic
     return .{ .state = .unknown, .rule = "no-current-signal" };
 }
 
-pub const Track = struct {
-    observed_working: bool = false,
-    idle_samples: u8 = 0,
-    generation: u64 = 0,
-    seen: u64 = 0,
-    last_done: ?u64 = null,
-    visited: bool = false,
-    pub fn observe(self: *Track, verdict: Verdict, receipt: ?[]const u8) void {
-        self.visited = true;
-        if (verdict.interrupted) {
-            self.observed_working = false;
-            self.idle_samples = 0;
-        }
-        switch (verdict.state) {
-            .working => {
-                self.observed_working = true;
-                self.idle_samples = 0;
-            },
-            .blocked => {
-                self.idle_samples = 0;
-            },
-            .unknown => {
-                self.idle_samples = 0;
-            },
-            .idle => {
-                if (self.observed_working) {
-                    self.idle_samples +|= 1;
-                    if (self.idle_samples >= 2) {
-                        self.generation += 1;
-                        self.observed_working = false;
-                        self.idle_samples = 0;
-                    }
-                }
-            },
-            .done => {
-                const stamp = std.hash.Wyhash.hash(0, receipt orelse "done");
-                if (self.observed_working or self.last_done == null or self.last_done.? != stamp) self.generation += 1;
-                self.last_done = stamp;
-                self.observed_working = false;
-                self.idle_samples = 0;
-            },
-        }
-    }
-    pub fn acknowledge(self: *Track, generation: u64) void {
-        self.seen = @max(self.seen, @min(generation, self.generation));
-    }
-    pub fn unread(self: Track) bool {
-        return self.generation > self.seen;
-    }
-};
 test "live controls outrank prompt and old transcript is not evidence" {
     const t = std.testing;
     try t.expectEqual(State.working, classify("codex", "• Working (2s • esc to interrupt)\n› Ask Codex\n50% context left", "").state);
@@ -160,29 +110,7 @@ test "live controls outrank prompt and old transcript is not evidence" {
     try t.expectEqual(State.unknown, classify("codex", "• Working (2s • esc to interrupt)\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13", "").state);
     try t.expectEqual(State.blocked, classify("claude", "Enter to select · Esc to cancel", "").state);
 }
-test "completion requires observed work and stable idle; receipts acknowledge separately" {
-    var track: Track = .{};
-    track.observe(.{ .state = .idle, .rule = "test" }, null);
-    try std.testing.expect(!track.unread());
-    track.observe(.{ .state = .working, .rule = "test" }, null);
-    track.observe(.{ .state = .idle, .rule = "test" }, null);
-    try std.testing.expect(!track.unread());
-    track.observe(.{ .state = .idle, .rule = "test" }, null);
-    try std.testing.expect(track.unread());
-    track.acknowledge(1);
-    track.observe(.{ .state = .done, .rule = "test" }, "done:123");
-    track.acknowledge(1); // an old click cannot erase a newer completion
-    try std.testing.expect(track.unread());
-    track.acknowledge(2);
-    track.observe(.{ .state = .done, .rule = "test" }, "done:123");
-    try std.testing.expect(!track.unread());
-    track.observe(.{ .state = .working, .rule = "test" }, null);
-    track.observe(.{ .state = .idle, .rule = "test", .interrupted = true }, null);
-    track.observe(.{ .state = .idle, .rule = "test" }, null);
-    try std.testing.expect(!track.unread());
-}
-
-test "Claude activity without interrupt hint completes only after idle" {
+test "Claude activity without interrupt hint reads as working, and a summary as idle" {
     const t = std.testing;
     const idle = "────────────────\n❯ \n────────────────\nshift+tab to cycle\n";
     inline for (.{ "*", "·", "✢", "✶", "✻", "✽" }) |glyph| {
@@ -194,9 +122,4 @@ test "Claude activity without interrupt hint completes only after idle" {
     try t.expectEqual(State.working, classify("claude", idle, "⣿ Claude Code").state);
     try t.expectEqual(State.working, classify("claude", idle, "◓ Claude Code").state);
     try t.expectEqual(State.blocked, classify("claude", "Enter to select · Esc to cancel", "◓ Claude Code").state);
-    var track: Track = .{};
-    track.observe(classify("claude", "✶ Thinking…\n" ++ idle, ""), null);
-    track.observe(classify("claude", idle, "✳ Claude Code"), null);
-    track.observe(classify("claude", idle, "✳ Claude Code"), null);
-    try t.expect(track.unread());
 }

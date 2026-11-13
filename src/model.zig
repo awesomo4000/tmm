@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const tmux = @import("tmux.zig");
+const agentstate = @import("agentstate.zig");
 const Allocator = std.mem.Allocator;
 
 /// How the fields of a listed record are told apart.
@@ -165,115 +166,8 @@ test "reused tty does not inherit client identity" {
     try std.testing.expect(!c.same(other));
 }
 
-pub fn agentCommand(command: []const u8) ?[]const u8 {
-    const name = std.fs.path.basename(command);
-    inline for (.{ "codex", "claude", "aider", "opencode", "gemini" }) |agent| {
-        if (std.mem.eql(u8, name, agent)) return agent;
-    }
-    return null;
-}
-pub const Process = struct { pid: u32, parent: u32, command: []const u8 };
-pub fn parseProcesses(a: Allocator, text: []const u8) ![]Process {
-    var result: std.ArrayList(Process) = .empty;
-    errdefer result.deinit(a);
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line_text| {
-        var fields = std.mem.tokenizeAny(u8, line_text, " \t");
-        const pid = std.fmt.parseInt(u32, fields.next() orelse continue, 10) catch continue;
-        const parent = std.fmt.parseInt(u32, fields.next() orelse continue, 10) catch continue;
-        const command = std.mem.trim(u8, fields.rest(), " \t");
-        try result.append(a, .{ .pid = pid, .parent = parent, .command = command });
-    }
-    return result.toOwnedSlice(a);
-}
-pub fn processAgent(processes: []const Process, root: u32) ?[]const u8 {
-    return if (processAgentInfo(processes, root)) |info| info.name else null;
-}
-pub fn processAgentInfo(processes: []const Process, root: u32) ?struct { name: []const u8, pid: u32 } {
-    for (processes) |process| {
-        const agent = agentCommand(process.command) orelse continue;
-        var ancestor = process.pid;
-        // A corrupt or racing process table must not cause an endless walk.
-        for (0..processes.len + 1) |_| {
-            if (ancestor == root) return .{ .name = agent, .pid = process.pid };
-            var parent: ?u32 = null;
-            for (processes) |p| if (p.pid == ancestor) {
-                parent = p.parent;
-                break;
-            };
-            const next = parent orelse break;
-            if (next == 0 or next == ancestor) break;
-            ancestor = next;
-        }
-    }
-    return null;
-}
-/// Whether a process name is an interactive shell. A login shell is listed by
-/// `ps` with a leading `-` (`-bash`), and `comm` may be a full path, so both
-/// are stripped before comparing.
-pub fn isShellName(command: []const u8) bool {
-    var name = std.fs.path.basename(command);
-    if (name.len > 0 and name[0] == '-') name = name[1..];
-    inline for (.{ "sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "yash", "nu", "elvish", "xonsh", "pwsh", "ion", "osh" }) |shell| {
-        if (std.mem.eql(u8, name, shell)) return true;
-    }
-    return false;
-}
-
-/// Whether a pane is sitting at its own shell's prompt: its root process is a
-/// shell, and nothing runs under it.
-///
-/// This is how tmm sees the moment the specification ties a program-status
-/// record's end to. A terminal drops `working` and `blocked` when the program
-/// exits or the next prompt starts (OSC 133 A); tmm never sees a pane's bytes,
-/// so it has no OSC 133, but a shell with no children is a shell at its
-/// prompt. Structural rather than by the foreground's name, because a
-/// reporter running as `sh build.sh` has a shell's name and is very much
-/// alive -- it is a child of the pane's shell, so the pane is not at a prompt.
-///
-/// False whenever the answer is not known, so a missing process table or a
-/// root that has already gone never drops a record. A pane whose root is the
-/// program itself (`tmux new-window claude`) is never at a prompt either,
-/// which keeps that program's record for as long as the pane lives.
-pub fn atPrompt(processes: []const Process, root: u32) bool {
-    if (root == 0) return false;
-    var found = false;
-    for (processes) |p| {
-        if (p.parent == root) return false;
-        if (p.pid == root) {
-            if (!isShellName(p.command)) return false;
-            found = true;
-        }
-    }
-    return found;
-}
-test "a pane is at its prompt only when its own shell runs nothing" {
-    const a = std.testing.allocator;
-    const p = try parseProcesses(a,
-        \\10 1 -bash
-        \\11 10 claude
-        \\20 1 /opt/homebrew/bin/bash
-        \\30 1 -zsh
-        \\31 30 sh
-        \\32 31 make
-        \\40 1 claude
-        \\50 1 vim
-    );
-    defer a.free(p);
-    // An agent under the shell: not at a prompt.
-    try std.testing.expect(!atPrompt(p, 10));
-    // A shell with nothing under it, named by full path: at its prompt.
-    try std.testing.expect(atPrompt(p, 20));
-    // A script running as `sh` under a login zsh: a shell's name, still alive.
-    try std.testing.expect(!atPrompt(p, 30));
-    // A pane whose root is the program itself is never at a prompt.
-    try std.testing.expect(!atPrompt(p, 40));
-    try std.testing.expect(!atPrompt(p, 50));
-    // Unknown is never "at a prompt": a root that has gone, or no table.
-    try std.testing.expect(!atPrompt(p, 99));
-    try std.testing.expect(!atPrompt(&.{}, 20));
-    try std.testing.expect(!atPrompt(p, 0));
-}
+pub const Process = agentstate.Process;
+const parseProcesses = agentstate.parseProcesses;
 
 pub const Indicator = struct { symbol: []const u8, color: u8 };
 pub fn agentIndicator(state: []const u8) Indicator {
@@ -284,15 +178,6 @@ pub fn agentIndicator(state: []const u8) Indicator {
     if (std.mem.eql(u8, name, "done")) return .{ .symbol = "✓", .color = 2 };
     if (std.mem.eql(u8, name, "idle")) return .{ .symbol = "○", .color = 8 };
     return .{ .symbol = "?", .color = 8 };
-}
-test "agent detection follows wrappers without matching unrelated names" {
-    const a = std.testing.allocator;
-    const processes = try parseProcesses(a, "10 1 /bin/bash\n11 10 node\n12 11 /tmp/test agent/codex\n20 1 claude\n30 31 codex\n31 30 node\n");
-    defer a.free(processes);
-    try std.testing.expectEqualStrings("codex", processAgent(processes, 10).?);
-    try std.testing.expect(processAgent(processes, 99) == null);
-    try std.testing.expect(agentCommand("codex-helper") == null);
-    try std.testing.expect(agentCommand("node") == null);
 }
 test "presence alone remains unknown, explicit status selects symbol" {
     try std.testing.expectEqualStrings("?", agentIndicator("").symbol);
@@ -348,6 +233,7 @@ test "terminal owner follows login and shell, stops at SSH" {
 
 test {
     _ = @import("reported.zig");
+    _ = @import("agentstate.zig");
     _ = @import("status.zig");
     _ = @import("control.zig");
     _ = @import("quiet.zig");
