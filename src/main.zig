@@ -229,6 +229,10 @@ pub fn main(init: std.process.Init) !void {
     var pressed: ?[]const u8 = null;
     defer if (pressed) |p| a.free(p);
     var offset: usize = 0;
+    // The session the display was last seen on, so the list scrolls when the
+    // display moves rather than on every frame. Owned.
+    var shown_active: ?[]const u8 = null;
+    defer if (shown_active) |k| a.free(k);
     // Sessions folded to their name, by session id. Owned keys; a session
     // that has gone simply never matches again.
     var folded: std.StringHashMapUnmanaged(void) = .empty;
@@ -655,6 +659,16 @@ pub fn main(init: std.process.Init) !void {
         if (reveal) if (cursor) |c| {
             if (c < offset) offset = c;
             if (c >= offset + visible) offset = c + 1 -| visible;
+        };
+        // When the display moves to another session, from tmux or from here,
+        // the list follows it.
+        const active_row = for (rows, 0..) |row, r| {
+            if (row.active and row.action != null and row.action.? == .session) break r;
+        } else null;
+        if (active_row) |r| if (shown_active == null or !std.mem.eql(u8, shown_active.?, rows[r].key)) {
+            if (shown_active) |k| a.free(k);
+            shown_active = try a.dupe(u8, rows[r].key);
+            offset = follow(rows, r, offset, visible);
         };
         vx.window().clear();
         win.hideCursor();
@@ -1133,6 +1147,22 @@ fn groupAround(rows: []const sidebar.Row, c: usize) struct { first: usize, last:
     while (last + 1 < rows.len and !blank(rows[last + 1])) last += 1;
     if (last + 1 < rows.len) last += 1;
     return .{ .first = first, .last = last };
+}
+/// The offset that shows the session at row `r` with the sessions on either
+/// side of it, so the next one is already in view when the display moves on.
+/// Where that does not fit, the next session wins over the previous one, and
+/// the session's own name over both.
+fn follow(rows: []const sidebar.Row, r: usize, offset: usize, visible: usize) usize {
+    const group = groupAround(rows, r);
+    var o = offset;
+    if (group.first > 0) {
+        const before = groupAround(rows, group.first - 1).first;
+        if (before < o) o = before;
+    }
+    const last = if (group.last + 1 < rows.len) groupAround(rows, group.last + 1).last else group.last;
+    if (last >= o + visible) o = last + 1 -| visible;
+    if (group.first < o) o = group.first;
+    return o;
 }
 /// Mouse columns as the list sees them, so column 0 is the list's first
 /// column and the gutter is -1.

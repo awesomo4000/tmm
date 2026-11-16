@@ -1,5 +1,9 @@
 # Changelog
 
+## 11/16/2026
+
+- Made the list follow the display from session to session. Switching sessions, from tmux or from tmm, used to leave the list where it was, so the current session walked off the bottom of it. It now scrolls to show the current session with the one after it and the one before, preferring the one after when the window is short.
+
 ## 11/13/2026
 
 - Made agent state its own module, `src/agentstate.zig`, with no tmux in it. It is a state machine fed plain observations of a terminal -- its agent, a state word, its screen when read, its own status report, whether it printed, and the time -- and answers with its state, what changed, its completions, and whether its screen is worth reading again. It does no I/O and reads no clock. The completion tracking, the screen-read schedule and the process rules moved into it from the collector and the model, and the reported-status record from the sidebar. tmm gathers the observations from tmux and draws what comes back.
