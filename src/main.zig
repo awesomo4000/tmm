@@ -294,6 +294,10 @@ pub fn main(init: std.process.Init) !void {
                 try vx.resize(a, tty.writer(), ws);
                 if (pressed) |p| a.free(p);
                 pressed = null;
+                // A new height moves what is in view, so the list follows the
+                // display's session again, as it does when the display moves.
+                if (shown_active) |k| a.free(k);
+                shown_active = null;
             },
             .snapshot => |s| {
                 if (s.rename_result) |result| if (editor) |*edit| {

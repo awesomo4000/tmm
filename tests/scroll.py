@@ -12,6 +12,8 @@ with `switch-client -n` and `-p`, as a key bound in tmux would. Each time, the
 session it lands on must be in view and so must the one after it, so the next
 switch never lands off screen; going back, the one before it as well. Before
 this the list kept its place while the display walked off the bottom of it.
+A resize must keep them in view too: a shorter window used to cut the
+current session off the bottom.
 """
 import fcntl
 import os
@@ -19,6 +21,7 @@ from pathlib import Path
 import pty
 import re
 import select
+import signal
 import struct
 import subprocess
 import sys
@@ -38,7 +41,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix='tmm-scroll-', dir='/tmp') as root:
         socket = root + '/socket'
         children = []
-        screen = Screen(ROWS, COLS)
+        # Replaced on a resize, since the terminal tmm draws on changes size.
+        view = {'screen': Screen(ROWS, COLS)}
         ui_fd = -1
 
         def tmux(*args):
@@ -69,7 +73,7 @@ def main():
                         continue
                     if fd != ui_fd:
                         continue
-                    screen.feed(data)
+                    view['screen'].feed(data)
                     if b'\x1b[c' in data or b'\x1b[0c' in data:
                         os.write(fd, b'\x1b[?1;2c')
                     if b'\x1b[5n' in data:
@@ -88,11 +92,16 @@ def main():
             the session it is on too, which would always count the current
             one as shown."""
             names = []
-            for line in screen.lines():
+            for line in view['screen'].lines():
                 found = re.match(r'\s*[\u25bc\u25b6] [0-9 ] (sess-\d\d)\b', line)
                 if found:
                     names.append(found.group(1))
             return names
+
+        def resize(rows):
+            view['screen'] = Screen(rows, COLS)
+            fcntl.ioctl(ui_fd, termios.TIOCSWINSZ, struct.pack('HHHH', rows, COLS, 0, 0))
+            os.kill(ui_pid, signal.SIGWINCH)
 
         def settle(want, what, limit=8):
             deadline = time.monotonic() + limit
@@ -100,7 +109,7 @@ def main():
                 pump(0.05)
                 if all(n in shown() for n in want):
                     return
-            raise AssertionError((what, 'wanted', want, 'shown', shown(), screen.lines()))
+            raise AssertionError((what, 'wanted', want, 'shown', shown(), view['screen'].lines()))
 
         try:
             tmux('-f', '/dev/null', 'new-session', '-d', '-s', NAMES[0], '-c', root)
@@ -112,7 +121,7 @@ def main():
                 assert time.monotonic() < deadline, 'the display never attached'
                 pump(0.05)
             client = tmux('list-clients', '-F', '#{client_name}').strip()
-            _, ui_fd = terminal([str(BINARY), '-S', socket, '--client', client])
+            ui_pid, ui_fd = terminal([str(BINARY), '-S', socket, '--client', client])
 
             settle(NAMES[:2], 'at the start')
             # The fixture is only a test if the list cannot show everything.
@@ -132,6 +141,17 @@ def main():
                 here = NAMES.index(session_of(client))
                 want = [NAMES[here]] + ([NAMES[here - 1]] if here > 0 else [])
                 settle(want, 'after switch-client -p to ' + NAMES[here])
+
+            # A resize keeps the display's session and the next one in view,
+            # shorter, taller, and shorter again, in the middle of the list
+            # and at its last session, where there is no next one.
+            for where in (5, len(NAMES) - 1):
+                tmux('switch-client', '-c', client, '-t', NAMES[where])
+                want = NAMES[where:where + 2]
+                settle(want, 'before resizing, at ' + NAMES[where])
+                for rows in (14, 30, 12, ROWS):
+                    resize(rows)
+                    settle(want, 'after resizing to %d rows at %s' % (rows, NAMES[where]))
 
             # A wheel scroll away from the display is left alone until the
             # display moves again: following is on a move, not every frame.

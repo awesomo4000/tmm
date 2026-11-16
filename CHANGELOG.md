@@ -2,7 +2,7 @@
 
 ## 11/16/2026
 
-- Made the list follow the display from session to session. Switching sessions, from tmux or from tmm, used to leave the list where it was, so the current session walked off the bottom of it. It now scrolls to show the current session with the one after it and the one before, preferring the one after when the window is short.
+- Made the list follow the display from session to session. Switching sessions, from tmux or from tmm, used to leave the list where it was, so the current session walked off the bottom of it. It now scrolls to show the current session with the one after it and the one before, preferring the one after when the window is short. A resize does the same, where it used to leave the current session off the bottom of a shorter window.
 
 ## 11/13/2026
 
